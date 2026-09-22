@@ -1,0 +1,15 @@
+[package]
+name = "im-gatewayd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "im-gatewayd"
+path = "src/main.rs"
+
+[dependencies]
+im-gateway = { workspace = true }
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

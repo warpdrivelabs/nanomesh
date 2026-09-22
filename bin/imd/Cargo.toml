@@ -1,0 +1,18 @@
+[package]
+name = "imd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "imd"
+path = "src/main.rs"
+
+[dependencies]
+im-node = { workspace = true }
+im-transport = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }

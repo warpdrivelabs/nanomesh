@@ -1,0 +1,65 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/im-proto",
+    "crates/im-core",
+    "crates/im-transport",
+    "crates/im-store",
+    "crates/im-gossip",
+    "crates/im-federation",
+    "crates/im-crypto",
+    "crates/im-entity",
+    "crates/im-node",
+    "crates/im-client",
+    "crates/im-gateway",
+    "bin/imd",
+    "bin/im-gatewayd",
+    "bin/im-agent",
+    "bin/im-echo",
+    "xtask",
+]
+exclude = ["old_space", "clients"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# --- internal ---
+im-proto      = { path = "crates/im-proto" }
+im-core       = { path = "crates/im-core" }
+im-transport  = { path = "crates/im-transport" }
+im-store      = { path = "crates/im-store" }
+im-gossip     = { path = "crates/im-gossip" }
+im-federation = { path = "crates/im-federation" }
+im-crypto     = { path = "crates/im-crypto" }
+im-entity     = { path = "crates/im-entity" }
+im-node       = { path = "crates/im-node" }
+im-client     = { path = "crates/im-client" }
+im-gateway    = { path = "crates/im-gateway" }
+# --- runtime / util ---
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dashmap = "6"
+clap = { version = "4", features = ["derive"] }
+figment = { version = "0.10", features = ["toml", "env"] }
+axum = "0.8"
+# --- iroh 去中心网络栈 ---
+iroh = "1.2"
+# 注意：iroh-gossip / iroh-docs 目前为 0.10x，需与 iroh 1.2 做版本对齐后启用（首个实现任务）。
+iroh-gossip = "0.101"
+iroh-docs = "0.101"
+# --- 存储 / 加密 ---
+redb = "4"
+blake3 = "1"
+argon2 = "0.6"

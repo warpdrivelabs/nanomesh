@@ -1,0 +1,22 @@
+/target
+**/target
+node_modules/
+dist/
+*.log
+*.redb
+.DS_Store
+.env
+# tauri 生成的移动端/桌面工程与产物
+clients/app/src-tauri/gen/
+clients/app/src-tauri/target/
+
+# IDE / OS
+.idea/
+.vscode/
+# secrets / key material (never commit)
+*.pem
+*.der
+*.key
+certs/
+# stray tool artifacts
+*claudeprojects*

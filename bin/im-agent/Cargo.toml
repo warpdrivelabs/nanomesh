@@ -1,0 +1,20 @@
+[package]
+name = "im-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "im-agent"
+path = "src/main.rs"
+
+[dependencies]
+im-client = { workspace = true }
+im-entity = { workspace = true }
+im-proto = { workspace = true }
+im-transport = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }

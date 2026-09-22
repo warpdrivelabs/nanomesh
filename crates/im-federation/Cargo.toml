@@ -1,0 +1,13 @@
+[package]
+name = "im-federation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+im-proto = { workspace = true }
+im-core = { workspace = true }
+im-transport = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+iroh-docs = { workspace = true }
