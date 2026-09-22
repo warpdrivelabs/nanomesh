@@ -50,31 +50,28 @@ pub struct NodeEndpoint {
 }
 
 impl NodeEndpoint {
-    async fn bind_with(secret_key: SecretKey, local_only: bool) -> Result<Self> {
+    async fn bind_with(secret_key: SecretKey, local_only: bool, port: u16) -> Result<Self> {
         let alpns = vec![ALPN.to_vec()];
         let cfg = keepalive_config();
-        let endpoint = if local_only {
+        let mut builder = if local_only {
             Endpoint::builder(presets::Minimal)
-                .transport_config(cfg)
-                .secret_key(secret_key)
-                .alpns(alpns)
-                .bind()
-                .await
         } else {
             Endpoint::builder(presets::N0)
-                .transport_config(cfg)
-                .secret_key(secret_key)
-                .alpns(alpns)
-                .bind()
-                .await
+        };
+        builder = builder.transport_config(cfg).secret_key(secret_key).alpns(alpns);
+        if port != 0 {
+            // 固定 UDP 端口：让本节点地址稳定，便于 LAN 对等配置。
+            builder = builder
+                .bind_addr((std::net::Ipv4Addr::UNSPECIFIED, port))
+                .map_err(err)?;
         }
-        .map_err(err)?;
+        let endpoint = builder.bind().await.map_err(err)?;
         Ok(Self { endpoint })
     }
 
     /// 生产绑定：`N0` 预设（中继 + 发现）。
     pub async fn bind(secret_key: SecretKey) -> Result<Self> {
-        Self::bind_with(secret_key, false).await
+        Self::bind_with(secret_key, false, 0).await
     }
     pub async fn bind_from_seed(seed: [u8; 32]) -> Result<Self> {
         Self::bind(SecretKey::from_bytes(&seed)).await
@@ -85,10 +82,18 @@ impl NodeEndpoint {
 
     /// 本地/LAN 绑定：`Minimal` 预设（仅直连，无中继/发现，适合测试）。
     pub async fn bind_local(secret_key: SecretKey) -> Result<Self> {
-        Self::bind_with(secret_key, true).await
+        Self::bind_with(secret_key, true, 0).await
     }
     pub async fn bind_local_from_seed(seed: [u8; 32]) -> Result<Self> {
         Self::bind_local(SecretKey::from_bytes(&seed)).await
+    }
+
+    /// 本地(Minimal)绑定到指定 UDP 端口（0=临时端口）。固定端口=稳定地址，便于 LAN 对等。
+    pub async fn bind_local_on(secret_key: SecretKey, port: u16) -> Result<Self> {
+        Self::bind_with(secret_key, true, port).await
+    }
+    pub async fn bind_local_on_from_seed(seed: [u8; 32], port: u16) -> Result<Self> {
+        Self::bind_local_on(SecretKey::from_bytes(&seed), port).await
     }
     pub async fn bind_local_random() -> Result<Self> {
         Self::bind_local(SecretKey::generate()).await

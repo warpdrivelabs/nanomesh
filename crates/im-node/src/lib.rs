@@ -136,6 +136,19 @@ impl Node {
         Self::from_ep(ep, Some(store))
     }
 
+    /// 本地绑定 + 持久化 + 固定端口（LAN 部署：稳定地址便于对等配置）。
+    pub async fn bind_local_persistent_on(
+        seed: [u8; 32],
+        db_path: impl AsRef<std::path::Path>,
+        port: u16,
+    ) -> Result<Self, NodeError> {
+        let store = Arc::new(RedbStore::open(db_path)?);
+        let ep = NodeEndpoint::bind_local_on_from_seed(seed, port)
+            .await
+            .map_err(|e| NodeError::Other(e.to_string()))?;
+        Self::from_ep(ep, Some(store))
+    }
+
     fn from_ep(ep: NodeEndpoint, store: Option<Arc<RedbStore>>) -> Result<Self, NodeError> {
         let dir = Arc::new(MemDirectory::new());
         let groups: Arc<DashMap<Vec<u8>, Group>> = Arc::new(DashMap::new());
@@ -161,6 +174,29 @@ impl Node {
     /// 添加联邦对等节点（bootstrap）。之后本节点会周期性拉取其目录、并向其转发跨节点消息。
     pub fn add_peer(&self, node_id: [u8; 32], addr: im_transport::Addr) {
         self.peers.insert(node_id.to_vec(), addr);
+    }
+
+    /// 由对等节点地址添加（node id 从地址里取，配置更省事）。
+    pub fn add_peer_addr(&self, addr: im_transport::Addr) {
+        let id = *addr.id.as_bytes();
+        self.peers.insert(id.to_vec(), addr);
+    }
+
+    pub fn peer_count(&self) -> usize {
+        self.peers.len()
+    }
+
+    /// 后台周期性向所有对等节点同步目录，返回任务句柄。
+    pub fn spawn_federation_sync(
+        self: Arc<Self>,
+        interval: std::time::Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                self.sync_peers_once().await;
+                tokio::time::sleep(interval).await;
+            }
+        })
     }
 
     /// 主动向所有对等节点拉取一次目录（把远端实体并入本地目录，标注其 home_node）。

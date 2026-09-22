@@ -20,3 +20,4 @@ clients/app/src-tauri/target/
 certs/
 # stray tool artifacts
 *claudeprojects*
+*.identity
