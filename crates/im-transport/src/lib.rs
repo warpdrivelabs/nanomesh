@@ -146,6 +146,15 @@ impl NodeEndpoint {
         Self::bind(SecretKey::generate()).await
     }
 
+    /// 生产绑定(`N0`) 到**固定 UDP 端口**：既走 n0 中继 + 发现（穿透 NAT），又让同网可按固定端口
+    /// 直连（配合防火墙放行该端口）。一个实例同时服务同网与跨 NAT 两类对端。
+    pub async fn bind_on(secret_key: SecretKey, port: u16) -> Result<Self> {
+        Self::bind_with(secret_key, false, port).await
+    }
+    pub async fn bind_from_seed_on(seed: [u8; 32], port: u16) -> Result<Self> {
+        Self::bind_on(SecretKey::from_bytes(&seed), port).await
+    }
+
     /// 本地/LAN 绑定：`Minimal` 预设（仅直连，无中继/发现，适合测试）。
     pub async fn bind_local(secret_key: SecretKey) -> Result<Self> {
         Self::bind_with(secret_key, true, 0).await

@@ -166,6 +166,20 @@ impl Node {
         Self::from_ep(ep, Some(store))
     }
 
+    /// 生产绑定(N0) + **固定 UDP 端口** + 持久化：同一实例**既支持同网直连(固定端口)也支持穿透 NAT**。
+    /// 固定端口便于防火墙放行，从而同网走直连、跨网走中继/打洞。
+    pub async fn bind_persistent_on(
+        seed: [u8; 32],
+        db_path: impl AsRef<std::path::Path>,
+        port: u16,
+    ) -> Result<Self, NodeError> {
+        let store = Arc::new(RedbStore::open(db_path)?);
+        let ep = NodeEndpoint::bind_from_seed_on(seed, port)
+            .await
+            .map_err(|e| NodeError::Other(e.to_string()))?;
+        Self::from_ep(ep, Some(store))
+    }
+
     /// 自建基础设施绑定 + 持久化（自定义 iroh-relay + 自建 iroh-dns-server(pkarr)：
     /// 自主可控地穿透 NAT，不依赖 n0 公共设施）。`port=0` 用临时端口。
     #[allow(clippy::too_many_arguments)]

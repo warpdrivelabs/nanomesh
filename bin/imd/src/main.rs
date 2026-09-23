@@ -2,7 +2,8 @@
 //!
 //! 三种连通模式（`imd.toml` 的 `mode`）：
 //! - `nat`（默认）：`N0` 预设——**n0 公共中继 + QUIC 打洞 + DNS/pkarr 按公钥发现**，可**穿透 NAT**
-//!   （跨公网/不同内网）；同网环境同样可用（会直连）。对等按 **node id(公钥)** 配置。
+//!   （跨公网/不同内网）；**同网同时可用（优先直连）**。`bind_port>0` 时固定 UDP 端口，便于同网直连 +
+//!   防火墙放行；对等按 **node id(公钥)** 配置。一个实例即服务同网、也服务跨 NAT。
 //! - `selfhost`：`Minimal` 基座 + **自建 iroh-relay + 自建 iroh-dns-server(pkarr)**——同样可穿透
 //!   NAT，但中继/发现完全自主可控、不依赖 n0 公共设施。对等按 **node id(公钥)** 配置。
 //! - `lan`：`Minimal` 预设——仅直连、免外网依赖；适合能互相直连的同一网络。对等按 **地址** 配置。
@@ -12,7 +13,7 @@
 //! mode      = "nat"          # "nat"(n0公共设施) | "selfhost"(自建设施) | "lan"(仅同网)
 //! identity  = "imd.identity" # 32 字节私钥；不存在则自动生成（每台一份，勿共用/入库）
 //! db        = "imd.redb"
-//! bind_port = 0              # lan/selfhost 建议固定端口(如 9600)；nat 一般 0 即可
+//! bind_port = 0              # nat/lan/selfhost 均可固定端口(如 9600)：同网直连 + 防火墙放行；0=临时端口
 //!
 //! [[peers]]
 //! id   = "<对方 node id (公钥 hex, 64 位)>"   # nat/selfhost：按公钥，发现自动解析地址
@@ -190,8 +191,13 @@ async fn main() -> anyhow::Result<()> {
     let (node, label) = match mode {
         Mode::Nat => {
             // 穿透 NAT + 同网通用（N0：n0 公共中继 + 打洞 + 发现）。
-            let n = im_node::Node::bind_persistent(seed, &cfg.db).await?;
-            (n, "nat(N0/n0公共设施)")
+            // bind_port>0：固定 UDP 端口——同网可按固定端口直连(配合防火墙放行)，同时保留穿透 NAT。
+            let n = if cfg.bind_port != 0 {
+                im_node::Node::bind_persistent_on(seed, &cfg.db, cfg.bind_port).await?
+            } else {
+                im_node::Node::bind_persistent(seed, &cfg.db).await?
+            };
+            (n, "nat(N0/同网直连+穿透NAT)")
         }
         Mode::SelfHost => {
             // 自建中继 + 自建 dns/pkarr：自主可控地穿透 NAT。
