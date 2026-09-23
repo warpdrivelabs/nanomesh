@@ -16,9 +16,23 @@ export interface Entity {
 
 export type CoreEvent = { type: "message"; msg: Message };
 
+// 连接模式（与后端 imd 对齐）。
+export type ConnectMode = "nat" | "selfhost" | "lan";
+
+export interface ConnectParams {
+  mode: ConnectMode;
+  /** nat/selfhost: 节点公钥(hex, 64位)；lan: 节点地址(JSON, IM_NODE_ADDR)。 */
+  node: string;
+  displayName: string;
+  // 仅 selfhost：
+  relayUrls?: string[];
+  pkarrUrl?: string;
+  dnsOrigin?: string;
+}
+
 export interface CoreTransport {
-  /** 连接节点并注册为 person；返回自己的 EntityId(hex)。 */
-  connect(nodeAddr: string, displayName: string): Promise<string>;
+  /** 按模式连接节点并注册为 person；返回自己的 EntityId(hex)。 */
+  connect(params: ConnectParams): Promise<string>;
   /** 向目标实体(hex id)发送一条文本消息。 */
   sendTo(target: string, text: string): Promise<void>;
   /** 按 kind 前缀查询目录（"" = 全部）。 */

@@ -1,6 +1,6 @@
 import { useEffect, useSyncExternalStore } from "react";
 import { makeTransport } from "../core";
-import type { CoreEvent, Entity, Message } from "../core";
+import type { ConnectParams, CoreEvent, Entity, Message } from "../core";
 
 // 极简状态层（占位）。生产可替换为 zustand / jotai。
 class ChatStore {
@@ -23,8 +23,8 @@ class ChatStore {
     });
   }
 
-  async connect(nodeAddr: string, displayName: string): Promise<void> {
-    this.myId = await this.transport.connect(nodeAddr, displayName);
+  async connect(params: ConnectParams): Promise<void> {
+    this.myId = await this.transport.connect(params);
     this.connected = true;
     this.emit();
   }
