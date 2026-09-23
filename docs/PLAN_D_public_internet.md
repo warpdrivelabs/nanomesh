@@ -57,37 +57,44 @@
 
 ## 5. 需要补的代码（逐 crate）
 
-### 5.1 `im-transport` — 传输层开关
-- **`bind_configured(secret_key, cfg: TransportCfg)`**：统一入口，按 `cfg` 选择：
-  - `preset`: `n0`（生产）/ `minimal`（LAN，现状）
-  - `relay`: `None`=预设默认(n0) / `Custom(RelayMap)`=自建中继 URL
-  - `discovery`: `n0` 默认 / 自建 pkarr-dns URL（`PkarrPublisher`+`PkarrResolver` 指向自建 dns）
-  - `bind_port`: 固定端口（可选）
-- **发布与就绪**：绑定后调用 `endpoint.online().await` 等待中继就绪 + 地址发布，再对外 announce/serve。
-- 现有 `bind`(N0) / `bind_local`(Minimal) 保留；新增自定义 relay/dns 分支。
-  > iroh 侧参考：`Endpoint::builder(presets::N0)` 已自动配置 pkarr 发布/解析 + 默认中继；自建走 `.relay_mode(RelayMode::Custom(map))` + 自定义 discovery。**确切自定义-发现 API 在实现时对照 `iroh::endpoint::presets` 源码确认。**
+### 5.1 `im-transport` — 传输层开关 ✅ 已实现
+- **`Infra` 枚举**：`N0`（n0 公共设施）/ `Local`（Minimal，仅直连）/ `SelfHosted { relay_urls, pkarr_url, dns_origin }`（自建）。
+- **`NodeEndpoint::bind_selfhosted(secret_key, relay_urls, pkarr_url, dns_origin, port)`** / `bind_selfhosted_from_seed(...)`：自建 relay/dns 分支。
+- 现有 `bind`(N0) / `bind_local`(Minimal) 保留，内部统一走 `bind_infra(secret_key, &Infra, port)`。
+- **发布与就绪**：绑定后调用 `endpoint.online().await` 等待中继就绪 + 地址发布，再对外 serve（`imd` 已限时 10s，超时降级继续）。
+  > iroh 1.2 已核实的自定义 API：自建 = `Endpoint::builder(presets::Minimal)` 基座 +
+  > `.address_lookup(PkarrPublisher::builder(pkarr_url))` + `.address_lookup(PkarrResolver::builder(pkarr_url))`
+  > （+ 可选 `.address_lookup(DnsAddressLookup::builder(origin))`）+ `.relay_mode(RelayMode::custom([relay_url…]))`。
+  > `pkarr_url`/`relay_url` 均由字符串 `.parse()` 推断为 `url::Url` / `RelayUrl`，无需新增 `url` 依赖。
 
-### 5.2 `im-node` — 节点
-- **`bind_persistent(seed, db)`**：N0 预设 + redb 持久化（目前只有 `bind_local_persistent` 是 Minimal）。
-- **`bind_persistent_configured(seed, db, TransportCfg)`**：自建 relay/dns 版本。
+### 5.2 `im-node` — 节点 ✅ 已实现
+- **`bind_persistent(seed, db)`**：N0 预设 + redb 持久化。
+- **`bind_persistent_selfhosted(seed, db, relay_urls, pkarr_url, dns_origin, port)`**：自建 relay/dns + redb 持久化。
 - **`add_peer_by_id(node_id)`**：按公钥加对等——存 `EndpointAddr::from(EndpointId)`（只含 id，无地址），`connect` 时触发发现解析。跨公网对等由此只需交换**公钥**（稳定），不再交换会变的 addr。
 - **上线发布**：`serve` 前 `endpoint.online().await`，确保已注册到发现服务、可被 dial-by-key。
-- **联邦白名单（安全必做）**：`fed.sync` / `Relay` 只接受来自**已配置对等公钥**的连接（用 `conn.remote_id()` 校验）。否则公网上任何人都能拉你的目录 / 借你中转。
+- **联邦白名单（安全必做，未做）**：`fed.sync` / `Relay` 只接受来自**已配置对等公钥**的连接（用 `conn.remote_id()` 校验）。否则公网上任何人都能拉你的目录 / 借你中转。
 
-### 5.3 `imd` — 守护进程配置
+### 5.3 `imd` — 守护进程配置 ✅ 已实现
 ```toml
-# imd.toml（跨公网）
-identity = "imd.identity"
-db       = "imd.redb"
-preset   = "n0"              # 或 "custom"
-# 自建时：
-# [relay] url = "https://relay.example.com"
-# [dns]   url = "https://dns.example.com/pkarr"
+# imd.toml
+mode      = "nat"          # "nat"(n0公共设施) | "selfhost"(自建设施) | "lan"(仅同网)
+identity  = "imd.identity"
+db        = "imd.redb"
+bind_port = 0             # lan/selfhost 建议固定端口(如 9600)；nat 一般 0 即可
+
 [[peers]]
-id = "<对方 node id (公钥 hex)>"   # 跨公网按公钥；不再需要 addr
+id = "<对方 node id (公钥 hex, 64 位)>"   # nat/selfhost 按公钥；lan 用 addr = '<JSON>'
+
+# 仅 mode = "selfhost"：自建中继 + 自建 dns(pkarr)
+[relay]
+url  = "https://relay.example.com"        # 也可 urls = ["https://r1…","https://r2…"]
+[dns]
+url    = "https://dns.example.com/pkarr"   # 必填：自建 iroh-dns-server 的 pkarr 端点
+# origin = "dns.example.com."               # 可选：额外走 DNS 查询解析的源域
 ```
-- 读 `preset`/`relay`/`dns`，构建节点；对每个 `peers[].id` 调 `add_peer_by_id`；启动后台联邦同步（已实现）。
-- 启动时**打印自身 node id**（供他方配置）。
+- 读 `mode`/`relay`/`dns`，三选一绑定节点；对每个 `peers[].id` 调 `add_peer_by_id`（`lan` 用 `addr`）；`nat`/`selfhost` 上线后启动后台联邦同步（已实现）。
+- `mode=selfhost` 缺 `[dns] url` 直接报错；缺 `[relay] url` 仅告警（退化为无中继、仅可直连）。
+- 启动时**打印自身 `IM_NODE_ID`（公钥）与 `IM_NODE_ADDR`**（供他方配置）。
 
 ### 5.4 `im-client` — 客户端
 - `bind_random`（N0）已就绪；新增"**按 home 节点 id 连接**"（发现解析），或用 **ticket**（含 id+可选地址）一键接入。
