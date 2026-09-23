@@ -1,27 +1,29 @@
 import { useState } from "react";
 import {
   chatStore,
-  useConnected,
   useEntities,
   useMessages,
   useMyId,
-  useStartOnce,
+  useServerLabel,
 } from "../state/store";
-import type { ConnectMode } from "../core";
+
+const IconLogout = (
+  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><path d="M16 17l5-5-5-5M21 12H9" />
+  </svg>
+);
+const IconRefresh = (
+  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21 2v6h-6" /><path d="M3 12a9 9 0 0 1 15-6.7L21 8" /><path d="M3 22v-6h6" /><path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
+  </svg>
+);
 
 export function ChatScreen() {
-  useStartOnce();
-  const connected = useConnected();
   const myId = useMyId();
+  const serverLabel = useServerLabel();
   const messages = useMessages();
   const entities = useEntities();
 
-  const [mode, setMode] = useState<ConnectMode>("nat");
-  const [node, setNode] = useState("");
-  const [name, setName] = useState("我");
-  const [relayUrl, setRelayUrl] = useState("");
-  const [pkarrUrl, setPkarrUrl] = useState("");
-  const [dnsOrigin, setDnsOrigin] = useState("");
   const [target, setTarget] = useState("");
   const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
@@ -39,148 +41,97 @@ export function ChatScreen() {
     }
   };
 
-  const doConnect = () =>
-    run(() =>
-      chatStore.connect({
-        mode,
-        node: node.trim(),
-        displayName: name,
-        relayUrls: relayUrl.trim() ? [relayUrl.trim()] : [],
-        pkarrUrl: pkarrUrl.trim() || undefined,
-        dnsOrigin: dnsOrigin.trim() || undefined,
-      }),
-    );
-
-  const isLan = mode === "lan";
-  const nodeReady =
-    node.trim().length > 0 && (mode !== "selfhost" || pkarrUrl.trim().length > 0);
-
-  if (!connected) {
-    return (
-      <div className="chat">
-        <header className="chat__header">imspace · 连接节点</header>
-        <div className="connect">
-          <label className="field">
-            <span>连接模式</span>
-            <select value={mode} onChange={(e) => setMode(e.target.value as ConnectMode)}>
-              <option value="nat">nat · n0 公共设施（穿透 NAT，按公钥）</option>
-              <option value="selfhost">selfhost · 自建 relay+dns（穿透 NAT，按公钥）</option>
-              <option value="lan">lan · 仅同网（按地址）</option>
-            </select>
-          </label>
-
-          {isLan ? (
-            <>
-              <p className="hint">
-                本机跑 <code>cargo run -p imd</code>（lan 模式），把它打印的{" "}
-                <code>IM_NODE_ADDR=</code> 后那段 JSON 粘到这里。
-              </p>
-              <textarea
-                placeholder="节点地址(JSON)"
-                value={node}
-                onChange={(e) => setNode(e.target.value)}
-                rows={3}
-              />
-            </>
-          ) : (
-            <>
-              <p className="hint">
-                填节点公钥 <code>IM_NODE_ID</code>（hex, 64 位），或直接粘完整地址{" "}
-                <code>IM_NODE_ADDR</code>(JSON)。给地址时：<b>先试同网直连、失败再穿透 NAT</b>；
-                只给公钥则走穿透（在线时也会优先同网路径）。
-              </p>
-              <textarea
-                placeholder="节点公钥(hex, 64 位) 或 IM_NODE_ADDR(JSON)"
-                value={node}
-                onChange={(e) => setNode(e.target.value)}
-                rows={3}
-              />
-            </>
-          )}
-
-          {mode === "selfhost" && (
-            <div className="selfhost">
-              <input
-                placeholder="relay url（如 https://relay.example.com）"
-                value={relayUrl}
-                onChange={(e) => setRelayUrl(e.target.value)}
-              />
-              <input
-                placeholder="pkarr 端点（如 https://dns.example.com/pkarr，必填）"
-                value={pkarrUrl}
-                onChange={(e) => setPkarrUrl(e.target.value)}
-              />
-              <input
-                placeholder="dns origin（可选，如 dns.example.com.）"
-                value={dnsOrigin}
-                onChange={(e) => setDnsOrigin(e.target.value)}
-              />
-            </div>
-          )}
-
-          <input placeholder="昵称" value={name} onChange={(e) => setName(e.target.value)} />
-          <button disabled={busy || !nodeReady} onClick={doConnect}>
-            {busy ? "连接中…" : "连接并注册为 person"}
-          </button>
-          {err && <p className="err">{err}</p>}
-        </div>
-      </div>
-    );
-  }
+  const selected = entities.find((e) => e.id === target);
 
   return (
     <div className="chat">
-      <header className="chat__header">
-        imspace · 我是 <code>{myId.slice(0, 8)}…</code>
+      <header className="topbar">
+        <div className="topbar__left">
+          <span className="status-dot" title="已连接" />
+          <div className="topbar__server">
+            <span className="topbar__label">{serverLabel || "已连接"}</span>
+            <span className="topbar__me">我 · <code className="mono">{myId.slice(0, 10)}…</code></span>
+          </div>
+        </div>
+        <button className="btn btn--ghost btn--sm" onClick={() => run(() => chatStore.disconnect())}>
+          {IconLogout}<span>切换服务器</span>
+        </button>
       </header>
 
       <div className="chat__body">
-        <aside className="chat__dir">
-          <div className="chat__dirhead">
+        <aside className="dir">
+          <div className="dir__head">
             <span>目录</span>
-            <button disabled={busy} onClick={() => run(() => chatStore.refreshDirectory(""))}>
-              刷新
+            <button className="iconbtn" title="刷新" disabled={busy} onClick={() => run(() => chatStore.refreshDirectory(""))}>
+              {IconRefresh}
             </button>
           </div>
-          <ul>
+          <ul className="dir__list">
             {entities.map((e) => (
-              <li key={e.id} onClick={() => setTarget(e.id)} title={e.id}>
-                <b>{e.name || "(无名)"}</b>
-                <small>{e.kind}</small>
+              <li
+                key={e.id}
+                className={`dir__item ${e.id === target ? "is-sel" : ""}`}
+                onClick={() => setTarget(e.id)}
+                title={e.id}
+              >
+                <span className="avatar">{(e.name || "?").slice(0, 1)}</span>
+                <span className="dir__meta">
+                  <b>{e.name || "(无名)"}</b>
+                  <small>{e.kind}</small>
+                </span>
               </li>
             ))}
-            {entities.length === 0 && <li className="muted">点“刷新”加载实体</li>}
+            {entities.length === 0 && <li className="dir__empty">点右上「刷新」加载实体</li>}
           </ul>
         </aside>
 
-        <section className="chat__main">
-          <ul className="chat__list">
+        <section className="conv">
+          <div className="conv__head">
+            {selected ? (
+              <>
+                <span className="avatar avatar--sm">{(selected.name || "?").slice(0, 1)}</span>
+                <b>{selected.name || "(无名)"}</b>
+                <span className="badge badge--nat">{selected.kind}</span>
+              </>
+            ) : (
+              <span className="muted">在左侧选择一个对象，或在下方填入其 EntityId</span>
+            )}
+          </div>
+
+          <ul className="msgs">
             {messages.map((m) => (
-              <li key={m.id} className={m.from === myId ? "mine" : ""}>
-                <b>{m.from.slice(0, 6)}…</b> {m.body}
+              <li key={m.id} className={`msg ${m.from === myId ? "msg--me" : ""}`}>
+                <span className="msg__bubble">{m.body}</span>
+                <span className="msg__from">{m.from === myId ? "我" : `${m.from.slice(0, 6)}…`}</span>
               </li>
             ))}
-            {messages.length === 0 && <li className="muted">暂无消息</li>}
+            {messages.length === 0 && <li className="msgs__empty">暂无消息</li>}
           </ul>
+
           <form
-            className="chat__composer"
+            className="composer"
             onSubmit={(e) => {
               e.preventDefault();
-              if (target && body.trim())
-                void run(() => chatStore.send(target, body)).then(() => setBody(""));
+              if (target && body.trim()) void run(() => chatStore.send(target, body)).then(() => setBody(""));
             }}
           >
             <input
-              placeholder="目标 EntityId(hex，点左侧目录可填入)"
+              className="composer__target"
+              placeholder="目标 EntityId(hex)"
               value={target}
               onChange={(e) => setTarget(e.target.value)}
             />
-            <input placeholder="消息…" value={body} onChange={(e) => setBody(e.target.value)} />
-            <button type="submit" disabled={busy || !target || !body.trim()}>
+            <input
+              className="composer__body"
+              placeholder="输入消息…"
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+            />
+            <button className="btn btn--primary" type="submit" disabled={busy || !target || !body.trim()}>
               发送
             </button>
           </form>
-          {err && <p className="err">{err}</p>}
+          {err && <div className="alert alert--inline">{err}</div>}
         </section>
       </div>
     </div>

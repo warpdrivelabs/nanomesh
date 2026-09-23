@@ -33,6 +33,8 @@ export interface ConnectParams {
 export interface CoreTransport {
   /** 按模式连接节点并注册为 person；返回自己的 EntityId(hex)。 */
   connect(params: ConnectParams): Promise<string>;
+  /** 断开当前连接。 */
+  disconnect(): Promise<void>;
   /** 向目标实体(hex id)发送一条文本消息。 */
   sendTo(target: string, text: string): Promise<void>;
   /** 按 kind 前缀查询目录（"" = 全部）。 */

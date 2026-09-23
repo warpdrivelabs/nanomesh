@@ -9,6 +9,9 @@ export class WebGatewayTransport implements CoreTransport {
   connect(_params: ConnectParams): Promise<string> {
     return this.notImplemented();
   }
+  disconnect(): Promise<void> {
+    return Promise.resolve();
+  }
   sendTo(_target: string, _text: string): Promise<void> {
     return this.notImplemented();
   }

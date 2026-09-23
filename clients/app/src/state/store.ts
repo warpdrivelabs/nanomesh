@@ -2,12 +2,13 @@ import { useEffect, useSyncExternalStore } from "react";
 import { makeTransport } from "../core";
 import type { ConnectParams, CoreEvent, Entity, Message } from "../core";
 
-// 极简状态层（占位）。生产可替换为 zustand / jotai。
+// 极简状态层。生产可替换为 zustand / jotai。
 class ChatStore {
   private messages: Message[] = [];
   private entities: Entity[] = [];
   private myId = "";
   private connected = false;
+  private serverLabel = "";
   private listeners = new Set<() => void>();
   readonly transport = makeTransport();
   private started = false;
@@ -23,18 +24,33 @@ class ChatStore {
     });
   }
 
-  async connect(params: ConnectParams): Promise<void> {
+  async connect(params: ConnectParams, label = ""): Promise<void> {
     this.myId = await this.transport.connect(params);
     this.connected = true;
+    this.serverLabel = label || shortLabel(params);
     this.emit();
   }
+
+  async disconnect(): Promise<void> {
+    try {
+      await this.transport.disconnect();
+    } catch {
+      /* 忽略断开错误 */
+    }
+    this.connected = false;
+    this.myId = "";
+    this.serverLabel = "";
+    this.messages = [];
+    this.entities = [];
+    this.emit();
+  }
+
   async refreshDirectory(kindPrefix: string): Promise<void> {
     this.entities = await this.transport.directoryQuery(kindPrefix);
     this.emit();
   }
   async send(target: string, text: string): Promise<void> {
     await this.transport.sendTo(target, text);
-    // 本地回显自己发出的消息
     this.messages = [
       ...this.messages,
       { id: `local-${Date.now()}`, from: this.myId, body: text, ts: Date.now() },
@@ -45,6 +61,7 @@ class ChatStore {
   getMessages = (): Message[] => this.messages;
   getEntities = (): Entity[] => this.entities;
   getMyId = (): string => this.myId;
+  getServerLabel = (): string => this.serverLabel;
   isConnected = (): boolean => this.connected;
 
   subscribe = (cb: () => void): (() => void) => {
@@ -56,6 +73,11 @@ class ChatStore {
   }
 }
 
+function shortLabel(p: ConnectParams): string {
+  const n = p.node.trim();
+  return n.length > 22 ? `${n.slice(0, 10)}…${n.slice(-4)}` : n;
+}
+
 export const chatStore = new ChatStore();
 
 function useStore<T>(getter: () => T): T {
@@ -64,6 +86,7 @@ function useStore<T>(getter: () => T): T {
 export const useMessages = () => useStore(chatStore.getMessages);
 export const useEntities = () => useStore(chatStore.getEntities);
 export const useMyId = () => useStore(chatStore.getMyId);
+export const useServerLabel = () => useStore(chatStore.getServerLabel);
 export const useConnected = () => useStore(chatStore.isConnected);
 
 export function useStartOnce(): void {

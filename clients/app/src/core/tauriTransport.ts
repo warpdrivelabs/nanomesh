@@ -17,6 +17,9 @@ export class TauriTransport implements CoreTransport {
   sendTo(target: string, text: string): Promise<void> {
     return invoke("send_to", { target, text });
   }
+  disconnect(): Promise<void> {
+    return invoke("disconnect");
+  }
   directoryQuery(kindPrefix: string): Promise<Entity[]> {
     return invoke<Entity[]>("directory_query", { kindPrefix });
   }
