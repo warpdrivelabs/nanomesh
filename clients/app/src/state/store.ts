@@ -50,12 +50,15 @@ class ChatStore {
     this.emit();
   }
   async send(target: string, text: string): Promise<void> {
-    await this.transport.sendTo(target, text);
+    // 先追加本地消息使 UI 立即可见，再 await 网络发送——
+    // 避免对端（如 echo 机器人）的回复在自己消息前渲染。
+    const ts = Date.now();
     this.messages = [
       ...this.messages,
-      { id: `local-${Date.now()}`, from: this.myId, body: text, ts: Date.now() },
+      { id: `local-${ts}`, from: this.myId, body: text, ts },
     ];
     this.emit();
+    await this.transport.sendTo(target, text);
   }
 
   getMessages = (): Message[] => this.messages;

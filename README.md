@@ -11,24 +11,37 @@
 ```
 imspace/
 ├── crates/              # 后端 Rust 库（cargo workspace）
-│   ├── im-proto         # 线协议：ID / gram / 编解码（将换 prost）
+│   ├── im-proto         # 线协议：ID / gram / 编解码（prost 生成）
 │   ├── im-core          # 领域模型 + 核心 trait（Deliver / Store）
 │   ├── im-transport     # iroh 端点：dial-by-key / 流 / 身份
 │   ├── im-store         # 存储抽象 + redb 后端
 │   ├── im-gossip        # 频道 pub/sub（iroh-gossip）
 │   ├── im-federation    # 跨节点状态（iroh-docs）+ 路由/重试/防环
 │   ├── im-crypto        # 身份 / 校验 / 口令；可选 E2E(openmls)
+│   ├── im-entity        # 可扩展实体类型体系（EntityKind trait + 内置类型）
 │   ├── im-node          # 服务端节点（装配各服务）
 │   ├── im-client        # 客户端 SDK（原生端内嵌 / 网关复用）
 │   └── im-gateway       # 浏览器网关：WebTransport/WS ↔ iroh
 ├── bin/
 │   ├── imd              # 节点守护进程
-│   └── im-gatewayd      # 网关守护进程
+│   ├── im-gatewayd      # 网关守护进程
+│   ├── im-echo          # 回声机器人（测试用：收到消息原样回发）
+│   └── im-agent         # 无界面实体守护进程示例（compute.inference）
 ├── clients/app/         # 前端：React+TS（web PWA）+ Tauri(desktop/iOS/android)
 ├── xtask/               # 开发者任务编排
 ├── docs/                # 设计文档
 └── old_space/           # 旧工程归档（勿动）
 ```
+
+## 前置依赖
+
+- **Rust** 1.85+（`rustup`）
+- **protoc**（Protocol Buffers 编译器）：`im-proto` 构建时需要。
+  - macOS：`brew install protobuf`
+  - Debian/Ubuntu：`apt install protobuf-compiler`
+  - Fedora：`dnf install protobuf-compiler`
+  - 其他：从 [github.com/protocolbuffers/protobuf/releases](https://github.com/protocolbuffers/protobuf/releases) 下载二进制，加入 `PATH`
+- **Node.js** 18+（前端，可选）
 
 ## 快速开始
 
@@ -36,6 +49,10 @@ imspace/
 # 后端（node + gateway）
 cargo check --workspace
 cargo run -p imd
+
+# 测试辅助（与 imd 配合）
+cargo run -p im-echo -- --node '<imd 打印的 IM_NODE_ADDR JSON>'
+cargo run -p im-agent -- --node '<imd 打印的 IM_NODE_ADDR JSON>'
 
 # 前端（详见 clients/README.md）
 cd clients/app && npm install
