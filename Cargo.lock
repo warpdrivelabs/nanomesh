@@ -1708,10 +1708,13 @@ dependencies = [
 name = "im-gossip"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "futures",
  "im-core",
  "im-crypto",
  "im-proto",
  "im-transport",
+ "iroh",
  "iroh-gossip",
  "thiserror 2.0.20",
  "tokio",
@@ -1731,6 +1734,8 @@ dependencies = [
  "im-proto",
  "im-store",
  "im-transport",
+ "iroh",
+ "iroh-gossip",
  "prost",
  "tempfile",
  "thiserror 2.0.20",

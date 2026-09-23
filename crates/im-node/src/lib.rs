@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use im_core::Directory;
 use im_proto::{
     now_ms, Any, Command, CommandResult, DirectoryQuery, Entity, EntityList, FedSyncResp, Gram,
@@ -15,6 +15,8 @@ use im_proto::{
 };
 use im_store::RedbStore;
 use im_transport::{read_gram, write_gram, IrohConnection, NodeEndpoint};
+use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+use iroh_gossip::Gossip;
 use prost::Message;
 
 #[derive(Debug, thiserror::Error)]
@@ -38,6 +40,7 @@ struct Ctx {
     store: Option<Arc<RedbStore>>,
     peers: Arc<Peers>,
     node_id: [u8; 32],
+    blacklist: Arc<DashSet<[u8; 32]>>,
 }
 
 /// 内存实体目录：`entity_id → Entity`，支持 kind 前缀 / 能力 / 属性过滤。
@@ -103,6 +106,8 @@ pub struct Node {
     groups: Arc<DashMap<Vec<u8>, Group>>,
     store: Option<Arc<RedbStore>>,
     peers: Arc<DashMap<Vec<u8>, im_transport::Addr>>, // 联邦对等节点：node_id -> addr
+    gossip: Gossip,                                    // 频道 pub/sub（与单播共用同一 endpoint）
+    blacklist: Arc<DashSet<[u8; 32]>>,                 // 黑名单：被禁公钥（无白名单，默认放行）
 }
 
 impl Node {
@@ -149,10 +154,47 @@ impl Node {
         Self::from_ep(ep, Some(store))
     }
 
+    /// 生产绑定 + 持久化（N0 预设：中继 + QUIC 打洞 + DNS/pkarr 发现，可穿透 NAT；同网也可用）。
+    pub async fn bind_persistent(
+        seed: [u8; 32],
+        db_path: impl AsRef<std::path::Path>,
+    ) -> Result<Self, NodeError> {
+        let store = Arc::new(RedbStore::open(db_path)?);
+        let ep = NodeEndpoint::bind_from_seed(seed)
+            .await
+            .map_err(|e| NodeError::Other(e.to_string()))?;
+        Self::from_ep(ep, Some(store))
+    }
+
+    /// 自建基础设施绑定 + 持久化（自定义 iroh-relay + 自建 iroh-dns-server(pkarr)：
+    /// 自主可控地穿透 NAT，不依赖 n0 公共设施）。`port=0` 用临时端口。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn bind_persistent_selfhosted(
+        seed: [u8; 32],
+        db_path: impl AsRef<std::path::Path>,
+        relay_urls: Vec<String>,
+        pkarr_url: String,
+        dns_origin: Option<String>,
+        port: u16,
+    ) -> Result<Self, NodeError> {
+        let store = Arc::new(RedbStore::open(db_path)?);
+        let ep =
+            NodeEndpoint::bind_selfhosted_from_seed(seed, relay_urls, pkarr_url, dns_origin, port)
+                .await
+                .map_err(|e| NodeError::Other(e.to_string()))?;
+        Self::from_ep(ep, Some(store))
+    }
+
+    /// 等待上线（连上中继、发布地址）。N0 模式对外服务前调用，使本节点可被按公钥发现。
+    pub async fn online(&self) {
+        self.ep.online().await;
+    }
+
     fn from_ep(ep: NodeEndpoint, store: Option<Arc<RedbStore>>) -> Result<Self, NodeError> {
         let dir = Arc::new(MemDirectory::new());
         let groups: Arc<DashMap<Vec<u8>, Group>> = Arc::new(DashMap::new());
-        // 从持久层回填内存目录/群组（重启恢复）。
+        let blacklist: Arc<DashSet<[u8; 32]>> = Arc::new(DashSet::new());
+        // 从持久层回填内存目录/群组/黑名单（重启恢复）。
         if let Some(s) = &store {
             for e in s.all_entities()? {
                 dir.entities.insert(e.entity_id.clone(), e);
@@ -160,7 +202,12 @@ impl Node {
             for g in s.all_groups()? {
                 groups.insert(g.group_id.clone(), g);
             }
+            for b in s.all_banned()? {
+                blacklist.insert(b);
+            }
         }
+        // 频道 pub/sub：与单播共用同一 iroh endpoint（accept 侧由 serve() 的 Router 分流）。
+        let gossip = Gossip::builder().spawn(ep.iroh().clone());
         Ok(Self {
             ep,
             dir,
@@ -168,6 +215,8 @@ impl Node {
             groups,
             store,
             peers: Arc::new(DashMap::new()),
+            gossip,
+            blacklist,
         })
     }
 
@@ -179,11 +228,61 @@ impl Node {
     /// 由对等节点地址添加（node id 从地址里取，配置更省事）。
     pub fn add_peer_addr(&self, addr: im_transport::Addr) {
         let id = *addr.id.as_bytes();
+        // 播种到 endpoint 地址簿：让「按公钥拨号」（gossip 引导）在 LAN/无发现时也能解析地址。
+        self.ep.add_addr(addr.clone());
         self.peers.insert(id.to_vec(), addr);
+    }
+
+    /// 按 node id(公钥) 添加对等（N0 模式：发现服务解析地址；跨 NAT 只需交换公钥）。
+    pub fn add_peer_by_id(&self, node_id: [u8; 32]) -> Result<(), NodeError> {
+        let addr = im_transport::addr_from_id(node_id).map_err(|e| NodeError::Other(e.to_string()))?;
+        self.peers.insert(node_id.to_vec(), addr);
+        Ok(())
     }
 
     pub fn peer_count(&self) -> usize {
         self.peers.len()
+    }
+
+    // ---- 黑名单（无白名单：默认放行，仅拒绝名单内公钥）----
+
+    /// 封禁一个公钥：加入黑名单、持久化，并**立即切断**其在线会话。此后其连接一律被拒。
+    pub fn ban(&self, pubkey: [u8; 32]) {
+        self.blacklist.insert(pubkey);
+        if let Some(s) = &self.store {
+            if let Err(e) = s.ban(&pubkey) {
+                tracing::warn!("persist ban failed: {e}");
+            }
+        }
+        // 立即切断在线会话（若有），并主动关闭连接。
+        if let Some((_, conn)) = self.sessions.remove(&pubkey[..]) {
+            conn.close(0u32.into(), b"banned");
+            tracing::info!(online = self.sessions.len(), "banned peer session cut");
+        }
+    }
+
+    /// 解封一个公钥（幂等）。
+    pub fn unban(&self, pubkey: [u8; 32]) {
+        self.blacklist.remove(&pubkey);
+        if let Some(s) = &self.store {
+            if let Err(e) = s.unban(&pubkey) {
+                tracing::warn!("persist unban failed: {e}");
+            }
+        }
+    }
+
+    /// 该公钥是否被封禁。
+    pub fn is_banned(&self, pubkey: &[u8; 32]) -> bool {
+        self.blacklist.contains(pubkey)
+    }
+
+    /// 当前黑名单（全部被禁公钥）。
+    pub fn banned(&self) -> Vec<[u8; 32]> {
+        self.blacklist.iter().map(|k| *k).collect()
+    }
+
+    pub fn banned_count(&self) -> usize {
+        self.blacklist.len()
     }
 
     /// 后台周期性向所有对等节点同步目录，返回任务句柄。
@@ -232,71 +331,143 @@ impl Node {
         self.sessions.len()
     }
 
-    /// 接受循环：登记会话、补投离线消息，每条连接派一个任务处理。
+    /// 服务：用 iroh `Router` 统一分流 accept —— `imspace/0` 走单播/命令/联邦处理，
+    /// `/iroh-gossip/1` 走 gossip 频道；二者共用同一 endpoint。阻塞至进程结束。
     pub async fn serve(&self) -> Result<(), NodeError> {
-        let node_id = self.ep.id_bytes();
         tracing::info!(node = %self.ep.id().fmt_short(), "im-node serving");
-        while let Some(conn) = self.ep.accept().await {
-            let conn = match conn {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!("accept error: {e}");
-                    continue;
-                }
-            };
-            let rid = conn.remote_id().as_bytes().to_vec();
-            self.sessions.insert(rid.clone(), conn.clone());
-            tracing::info!(online = self.sessions.len(), "session up");
-
-            // 连接关闭事件驱动地清理会话表（不依赖 accept 循环报错）。
-            {
-                let sessions = self.sessions.clone();
-                let watch_conn = conn.clone();
-                let watch_rid = rid.clone();
-                let closed_sid = watch_conn.stable_id();
-                tokio::spawn(async move {
-                    let _ = watch_conn.closed().await;
-                    // 仅当表中仍是「这条」连接时才移除，避免误删重连后的新会话。
-                    let stale = sessions
-                        .get(&watch_rid)
-                        .map(|c| c.stable_id() == closed_sid)
-                        .unwrap_or(false);
-                    if stale {
-                        sessions.remove(&watch_rid);
-                        tracing::info!(online = sessions.len(), "session closed");
-                    }
-                });
-            }
-
-            // 上线补投：把该实体的离线消息经 uni 流推送后清空。
-            if let Some(store) = &self.store {
-                if let Ok(pending) = store.drain_inbox(&rid) {
-                    if !pending.is_empty() {
-                        let c = conn.clone();
-                        tracing::info!(count = pending.len(), "delivering offline inbox");
-                        tokio::spawn(async move {
-                            for g in pending {
-                                if let Ok(mut s) = c.open_uni().await {
-                                    let _ = write_gram(&mut s, &g).await;
-                                    let _ = s.finish();
-                                }
-                            }
-                        });
-                    }
-                }
-            }
-
-            let ctx = Ctx {
+        let imspace = ImspaceProto {
+            ctx: Ctx {
                 ep: self.ep.clone(),
                 dir: self.dir.clone(),
                 sessions: self.sessions.clone(),
                 groups: self.groups.clone(),
                 store: self.store.clone(),
                 peers: self.peers.clone(),
-                node_id,
-            };
-            tokio::spawn(handle_conn(conn, ctx, rid));
+                node_id: self.ep.id_bytes(),
+                blacklist: self.blacklist.clone(),
+            },
+        };
+        let gossip_gate = GossipGate {
+            gossip: self.gossip.clone(),
+            blacklist: self.blacklist.clone(),
+        };
+        // Router::spawn 会把两个 ALPN 一并注册到 endpoint（覆盖 bind 时的单 ALPN）。
+        let _router = Router::builder(self.ep.iroh().clone())
+            .accept(im_transport::ALPN, imspace)
+            .accept(iroh_gossip::ALPN, gossip_gate)
+            .spawn();
+        // 持有 router 并阻塞，保持「serve 跑到进程结束」的既有契约
+        //（serve 任务被弃或运行时关停时，_router 析构 → Router 停机）。
+        std::future::pending::<()>().await;
+        Ok(())
+    }
+
+    /// 加入一个频道，返回可 `publish`/`recv` 的句柄。`bootstrap` 为已知对端节点公钥（可空）。
+    /// 需先 `serve()`（Router 起来后才能收发 gossip）；LAN/无发现时还需先 `add_peer_addr` 播种地址。
+    pub async fn join_channel(
+        &self,
+        channel: [u8; 32],
+        bootstrap: Vec<[u8; 32]>,
+    ) -> Result<im_gossip::ChannelTopic, NodeError> {
+        im_gossip::ChannelHub::new(self.gossip.clone())
+            .join(channel, bootstrap)
+            .await
+            .map_err(|e| NodeError::Other(e.to_string()))
+    }
+}
+
+/// imspace 单播/命令/联邦协议处理器：包住既有的每连接处理逻辑，注册到 `Router` 的 `imspace/0`。
+struct ImspaceProto {
+    ctx: Ctx,
+}
+
+impl std::fmt::Debug for ImspaceProto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ImspaceProto")
+    }
+}
+
+impl ProtocolHandler for ImspaceProto {
+    async fn accept(&self, conn: IrohConnection) -> Result<(), AcceptError> {
+        let rid_arr = *conn.remote_id().as_bytes();
+        // 黑名单闸门：被禁公钥的连接直接拒绝（无白名单——其余一律放行）。
+        if self.ctx.blacklist.contains(&rid_arr) {
+            tracing::info!(peer = %conn.remote_id().fmt_short(), "rejected banned peer");
+            conn.close(0u32.into(), b"banned");
+            return Ok(());
         }
+        let rid = rid_arr.to_vec();
+        self.ctx.sessions.insert(rid.clone(), conn.clone());
+        tracing::info!(online = self.ctx.sessions.len(), "session up");
+
+        // 连接关闭事件驱动地清理会话表（仅当表中仍是「这条」连接时移除，避免误删重连后的新会话）。
+        {
+            let sessions = self.ctx.sessions.clone();
+            let watch_conn = conn.clone();
+            let watch_rid = rid.clone();
+            let closed_sid = watch_conn.stable_id();
+            tokio::spawn(async move {
+                let _ = watch_conn.closed().await;
+                let stale = sessions
+                    .get(&watch_rid)
+                    .map(|c| c.stable_id() == closed_sid)
+                    .unwrap_or(false);
+                if stale {
+                    sessions.remove(&watch_rid);
+                    tracing::info!(online = sessions.len(), "session closed");
+                }
+            });
+        }
+
+        // 上线补投：把该实体的离线消息经 uni 流推送后清空。
+        if let Some(store) = &self.ctx.store {
+            if let Ok(pending) = store.drain_inbox(&rid) {
+                if !pending.is_empty() {
+                    let c = conn.clone();
+                    tracing::info!(count = pending.len(), "delivering offline inbox");
+                    tokio::spawn(async move {
+                        for g in pending {
+                            if let Ok(mut s) = c.open_uni().await {
+                                let _ = write_gram(&mut s, &g).await;
+                                let _ = s.finish();
+                            }
+                        }
+                    });
+                }
+            }
+        }
+
+        // 运行该连接的 gram 处理循环，直到连接关闭（handle_conn 内部会清理会话表）。
+        handle_conn(conn, self.ctx.clone(), rid).await;
+        Ok(())
+    }
+}
+
+/// gossip 连接的黑名单闸门：被禁公钥的 gossip 连接直接拒，其余转交 iroh-gossip 处理。
+/// （注意：只能在**连接/邻居层**拦截；gossip 广播消息不带作者级签名，无法按原始作者逐条过滤。）
+struct GossipGate {
+    gossip: Gossip,
+    blacklist: Arc<DashSet<[u8; 32]>>,
+}
+
+impl std::fmt::Debug for GossipGate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GossipGate")
+    }
+}
+
+impl ProtocolHandler for GossipGate {
+    async fn accept(&self, conn: IrohConnection) -> Result<(), AcceptError> {
+        let rid = *conn.remote_id().as_bytes();
+        if self.blacklist.contains(&rid) {
+            tracing::info!(peer = %conn.remote_id().fmt_short(), "rejected banned peer (gossip)");
+            conn.close(0u32.into(), b"banned");
+            return Ok(());
+        }
+        self.gossip
+            .handle_connection(conn)
+            .await
+            .map_err(AcceptError::from_err)?;
         Ok(())
     }
 }
@@ -331,6 +502,12 @@ async fn handle_conn(conn: IrohConnection, ctx: Ctx, rid: Vec<u8>) {
 }
 
 async fn handle_gram(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
+    // 黑名单（纵深防御）：连接建立后才被拉黑的对端，其后续 gram 一律丢弃。
+    if let Ok(c) = <[u8; 32]>::try_from(caller) {
+        if ctx.blacklist.contains(&c) {
+            return None;
+        }
+    }
     // 群消息：receiver 是 group_id，由节点扇出（不是直接路由目标）。
     if matches!(gram.kind(), GramKind::GroupMessage) {
         fanout_group(gram, ctx, caller).await;

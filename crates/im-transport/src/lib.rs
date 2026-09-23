@@ -1,15 +1,20 @@
 //! `im-transport` — 基于 iroh 的节点端点：dial-by-key、流、身份、relay/DNS 发现。
 //! 见 `docs/PLAN_B_iroh_decentralized_im.md` §4/§6。
 //!
-//! - `bind`/`bind_from_seed`/`bind_random`：`N0` 预设（n0 中继 + DNS/pkarr 发现，生产用）。
-//! - `bind_local*`：`Minimal` 预设（仅直连，LAN / 测试用，无外部依赖）。
+//! 三种基础设施（[`Infra`]）：
+//! - [`Infra::N0`]：`N0` 预设——**n0 公共中继 + DNS/pkarr 发现**（`bind*`，生产穿透 NAT 用）。
+//! - [`Infra::Local`]：`Minimal` 预设——仅直连、无外部依赖（`bind_local*`，LAN/测试用）。
+//! - [`Infra::SelfHosted`]：`Minimal` 基座 + **自建 iroh-relay + 自建 iroh-dns-server(pkarr)**
+//!   （`bind_selfhosted*`，自主可控的穿透 NAT）。
+//!
 //! - `write_gram`/`read_gram`：在 iroh 双向流上收发长度前缀 + prost 编码的 `Gram`。
 
 use im_proto::Gram;
 use std::time::Duration;
 
 use iroh::endpoint::{presets, Connection, QuicTransportConfig, RecvStream, SendStream};
-use iroh::{Endpoint, EndpointAddr, EndpointId};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode};
+use iroh::address_lookup::memory::MemoryLookup;
 use prost::Message;
 
 /// 本系统的 ALPN 协议标识。
@@ -32,6 +37,25 @@ fn err(e: impl std::fmt::Display) -> TransportError {
     TransportError::Iroh(e.to_string())
 }
 
+/// 连通基础设施：决定中继与发现服务来源。见 crate 级文档。
+#[derive(Debug, Clone)]
+pub enum Infra {
+    /// n0 公共基础设施：`N0` 预设（n0 公共中继 + DNS/pkarr 发现）。可穿透 NAT。
+    N0,
+    /// 仅本地直连：`Minimal` 预设，无中继/发现。LAN / 测试用。
+    Local,
+    /// 自建基础设施：`Minimal` 基座 + 自定义 iroh-relay + 自建 iroh-dns-server(pkarr)。
+    /// - `relay_urls`：自建中继的 URL（如 `https://relay.example.com`）；为空则不启用中继（仅直连+发现）。
+    /// - `pkarr_url`：自建 iroh-dns-server 的 pkarr 端点（如 `https://dns.example.com/pkarr`），
+    ///   同时用于**发布**本节点地址与**解析**对端地址（dial-by-key）。
+    /// - `dns_origin`：可选，额外走 DNS 查询解析的源域（如 `dns.example.com.`）。
+    SelfHosted {
+        relay_urls: Vec<String>,
+        pkarr_url: String,
+        dns_origin: Option<String>,
+    },
+}
+
 /// QUIC 传输配置：显式设定连接级空闲保活——每 3s 发一次 keep-alive PING，
 /// 连接级最大空闲 30s。keep-alive < idle 才有效，从而空闲连接不会被超时掐断。
 /// （iroh 默认只设了 per-path 保活，未设连接级 max_idle_timeout。）
@@ -47,18 +71,49 @@ fn keepalive_config() -> QuicTransportConfig {
 #[derive(Debug, Clone)]
 pub struct NodeEndpoint {
     endpoint: Endpoint,
+    /// 内存地址簿：供「按公钥拨号」（如 gossip）在 LAN/无发现时解析对端地址。
+    mem: MemoryLookup,
 }
 
 impl NodeEndpoint {
-    async fn bind_with(secret_key: SecretKey, local_only: bool, port: u16) -> Result<Self> {
+    /// 按 [`Infra`] 绑定端点：选择中继与发现服务来源，并统一套用 keep-alive / ALPN / 固定端口。
+    async fn bind_infra(secret_key: SecretKey, infra: &Infra, port: u16) -> Result<Self> {
         let alpns = vec![ALPN.to_vec()];
         let cfg = keepalive_config();
-        let mut builder = if local_only {
-            Endpoint::builder(presets::Minimal)
-        } else {
-            Endpoint::builder(presets::N0)
+        let mut builder = match infra {
+            Infra::N0 => Endpoint::builder(presets::N0),
+            Infra::Local => Endpoint::builder(presets::Minimal),
+            Infra::SelfHosted {
+                relay_urls,
+                pkarr_url,
+                dns_origin,
+            } => {
+                use iroh::address_lookup::{DnsAddressLookup, PkarrPublisher, PkarrResolver};
+                // Minimal 基座（不含任何 n0 中继/发现），再叠加自建发现与中继。
+                let mut b = Endpoint::builder(presets::Minimal);
+                // 自建 iroh-dns-server 的 pkarr：既发布本节点地址、也解析对端（HTTPS /pkarr）。
+                b = b.address_lookup(PkarrPublisher::builder(pkarr_url.parse().map_err(err)?));
+                b = b.address_lookup(PkarrResolver::builder(pkarr_url.parse().map_err(err)?));
+                // 可选：额外用 DNS 查询解析（指向自建 dns 源域）。
+                if let Some(origin) = dns_origin {
+                    b = b.address_lookup(DnsAddressLookup::builder(origin.clone()));
+                }
+                // 自建中继（穿透 NAT / 打洞回退）；无中继 URL 则保持 Minimal 的“无中继”。
+                if !relay_urls.is_empty() {
+                    let relays = relay_urls
+                        .iter()
+                        .map(|s| s.parse())
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .map_err(err)?;
+                    b = b.relay_mode(RelayMode::custom(relays));
+                }
+                b
+            }
         };
-        builder = builder.transport_config(cfg).secret_key(secret_key).alpns(alpns);
+        builder = builder
+            .transport_config(cfg)
+            .secret_key(secret_key)
+            .alpns(alpns);
         if port != 0 {
             // 固定 UDP 端口：让本节点地址稳定，便于 LAN 对等配置。
             builder = builder
@@ -66,7 +121,18 @@ impl NodeEndpoint {
                 .map_err(err)?;
         }
         let endpoint = builder.bind().await.map_err(err)?;
-        Ok(Self { endpoint })
+        // 注册一个内存地址簿：供「按公钥拨号」（如 gossip）在 LAN/无发现时解析对端地址。
+        // 对 N0/selfhost 是叠加项（discovery 仍照常工作），无害。
+        let mem = MemoryLookup::new();
+        if let Ok(al) = endpoint.address_lookup() {
+            al.add(mem.clone());
+        }
+        Ok(Self { endpoint, mem })
+    }
+
+    async fn bind_with(secret_key: SecretKey, local_only: bool, port: u16) -> Result<Self> {
+        let infra = if local_only { Infra::Local } else { Infra::N0 };
+        Self::bind_infra(secret_key, &infra, port).await
     }
 
     /// 生产绑定：`N0` 预设（中继 + 发现）。
@@ -99,6 +165,39 @@ impl NodeEndpoint {
         Self::bind_local(SecretKey::generate()).await
     }
 
+    /// 自建基础设施绑定：自定义 iroh-relay + 自建 iroh-dns-server(pkarr)。可穿透 NAT，
+    /// 但完全走自主可控的中继/发现，不依赖 n0 公共设施。`port=0` 用临时端口。
+    pub async fn bind_selfhosted(
+        secret_key: SecretKey,
+        relay_urls: Vec<String>,
+        pkarr_url: String,
+        dns_origin: Option<String>,
+        port: u16,
+    ) -> Result<Self> {
+        let infra = Infra::SelfHosted {
+            relay_urls,
+            pkarr_url,
+            dns_origin,
+        };
+        Self::bind_infra(secret_key, &infra, port).await
+    }
+    pub async fn bind_selfhosted_from_seed(
+        seed: [u8; 32],
+        relay_urls: Vec<String>,
+        pkarr_url: String,
+        dns_origin: Option<String>,
+        port: u16,
+    ) -> Result<Self> {
+        Self::bind_selfhosted(
+            SecretKey::from_bytes(&seed),
+            relay_urls,
+            pkarr_url,
+            dns_origin,
+            port,
+        )
+        .await
+    }
+
     /// 本节点身份（`EndpointId` = Ed25519 公钥）。
     pub fn id(&self) -> EndpointId {
         self.endpoint.id()
@@ -114,9 +213,20 @@ impl NodeEndpoint {
         self.endpoint.secret_key()
     }
 
+    /// 等待端点“上线”（连上中继、地址已发布到发现服务）。N0 模式对外服务前调用，
+    /// 以便他方能按公钥 dial-by-key 找到本节点。
+    pub async fn online(&self) {
+        self.endpoint.online().await;
+    }
+
     /// 本节点当前地址（含直连地址；用于本地直接拨号 / 分享）。
     pub fn addr(&self) -> EndpointAddr {
         self.endpoint.addr()
+    }
+
+    /// 向本端点地址簿播种一个对端地址（供「按公钥拨号」，如 gossip 引导；LAN/无发现时必需）。
+    pub fn add_addr(&self, addr: EndpointAddr) {
+        self.mem.add_endpoint_info(addr);
     }
 
     /// 底层 iroh 端点（供 gossip/docs 复用同一 endpoint）。
@@ -167,4 +277,12 @@ pub fn addr_to_string(addr: &EndpointAddr) -> String {
 /// 从字符串解析 `EndpointAddr`。
 pub fn addr_from_string(s: &str) -> Result<EndpointAddr> {
     serde_json::from_str(s).map_err(err)
+}
+
+/// 由 node id(公钥 32 字节) 构造“仅含身份”的地址。配合 N0 发现，`connect` 时会
+/// 按公钥解析出当前可达地址——跨 NAT 只需交换公钥（稳定），无需交换会变的地址。
+pub fn addr_from_id(node_id: [u8; 32]) -> Result<EndpointAddr> {
+    EndpointId::from_bytes(&node_id)
+        .map(EndpointAddr::from)
+        .map_err(err)
 }

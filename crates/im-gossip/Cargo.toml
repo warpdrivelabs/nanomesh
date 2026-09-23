@@ -12,3 +12,6 @@ im-crypto = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 iroh-gossip = { workspace = true }
+iroh = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }

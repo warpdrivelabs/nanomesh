@@ -53,11 +53,33 @@ impl Client {
         Ok(Self { ep })
     }
 
+    /// 自建基础设施绑定（自定义 iroh-relay + 自建 iroh-dns-server(pkarr)）：客户端须与目标节点
+    /// 指向**同一套** relay/dns，方能按公钥发现并穿透 NAT。`port=0` 用临时端口。
+    pub async fn bind_selfhosted(
+        seed: [u8; 32],
+        relay_urls: Vec<String>,
+        pkarr_url: String,
+        dns_origin: Option<String>,
+        port: u16,
+    ) -> Result<Self, ClientError> {
+        let ep =
+            NodeEndpoint::bind_selfhosted_from_seed(seed, relay_urls, pkarr_url, dns_origin, port)
+                .await
+                .map_err(err)?;
+        Ok(Self { ep })
+    }
+
     pub fn id(&self) -> im_transport::Id {
         self.ep.id()
     }
     pub fn id_bytes(&self) -> [u8; 32] {
         self.ep.id_bytes()
+    }
+
+    /// 播种一个已知节点地址到本端点地址簿：供 [`Self::online_by_id`] 在 LAN/无发现时按公钥解析。
+    /// N0/selfhost 有发现服务时无需调用（发现服务会自动解析）。
+    pub fn add_peer_addr(&self, addr: Addr) {
+        self.ep.add_addr(addr);
     }
 
     /// 作为资源所有者，用本地私钥签发一份能力授权(Grant)：
@@ -123,6 +145,13 @@ impl Client {
             next_corr: Arc::new(AtomicU64::new(1)),
             _task: task,
         })
+    }
+
+    /// 按 **node id(公钥)** 建立持久会话：由发现服务(N0/selfhost)解析节点当前地址，从而穿透 NAT——
+    /// 跨公网只需知道节点公钥（稳定），无需其会变的地址。LAN/无发现时须先 [`Self::add_peer_addr`] 播种。
+    pub async fn online_by_id(&self, node_id: [u8; 32]) -> Result<Session, ClientError> {
+        let addr = im_transport::addr_from_id(node_id).map_err(err)?;
+        self.online(addr).await
     }
 
     // ---- 短连接便捷方法（面向节点；每次自建连接）----

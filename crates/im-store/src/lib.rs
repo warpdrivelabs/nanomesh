@@ -13,6 +13,8 @@ use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 const INBOX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("inbox");
 const ENTITIES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("entities");
 const GROUPS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("groups");
+/// 黑名单：key = 被禁公钥(32)，value 置空（存在即被禁）。无白名单——默认放行，仅拒绝名单内公钥。
+const BLACKLIST: TableDefinition<&[u8], &[u8]> = TableDefinition::new("blacklist");
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -43,6 +45,7 @@ impl RedbStore {
             wtx.open_table(INBOX).map_err(db_err)?;
             wtx.open_table(ENTITIES).map_err(db_err)?;
             wtx.open_table(GROUPS).map_err(db_err)?;
+            wtx.open_table(BLACKLIST).map_err(db_err)?;
         }
         wtx.commit().map_err(db_err)?;
         Ok(Self { db })
@@ -173,6 +176,44 @@ impl RedbStore {
         }
         Ok(out)
     }
+
+    // ---- 黑名单持久化（无白名单：默认放行，仅拒绝名单内公钥）----
+
+    /// 把一个公钥加入黑名单（幂等）。
+    pub fn ban(&self, pubkey: &[u8]) -> Result<()> {
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        {
+            let mut t = wtx.open_table(BLACKLIST).map_err(db_err)?;
+            t.insert(pubkey, [].as_slice()).map_err(db_err)?;
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 把一个公钥移出黑名单（幂等）。
+    pub fn unban(&self, pubkey: &[u8]) -> Result<()> {
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        {
+            let mut t = wtx.open_table(BLACKLIST).map_err(db_err)?;
+            t.remove(pubkey).map_err(db_err)?;
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 加载全部被禁公钥（节点启动时回填内存黑名单）。
+    pub fn all_banned(&self) -> Result<Vec<[u8; 32]>> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(BLACKLIST).map_err(db_err)?;
+        let mut out = Vec::new();
+        for item in t.iter().map_err(db_err)? {
+            let (k, _v) = item.map_err(db_err)?;
+            if let Ok(arr) = <[u8; 32]>::try_from(k.value()) {
+                out.push(arr);
+            }
+        }
+        Ok(out)
+    }
 }
 
 fn inbox_key(receiver: &[u8], gram_id: u64) -> Vec<u8> {
@@ -267,5 +308,23 @@ mod tests {
         let s = RedbStore::open(&path).unwrap();
         assert_eq!(s.all_entities().unwrap().len(), 1);
         assert_eq!(s.get_entity(&[9u8; 32]).unwrap().unwrap().kind, "agent.assistant");
+    }
+
+    #[test]
+    fn blacklist_persist_and_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.redb");
+        let k = [5u8; 32];
+        {
+            let s = RedbStore::open(&path).unwrap();
+            s.ban(&k).unwrap();
+            assert_eq!(s.all_banned().unwrap(), vec![k]);
+            s.unban(&k).unwrap(); // 幂等解封
+            assert!(s.all_banned().unwrap().is_empty());
+            s.ban(&k).unwrap();
+        }
+        // 重开 → 封禁仍在（持久化）。
+        let s = RedbStore::open(&path).unwrap();
+        assert_eq!(s.all_banned().unwrap(), vec![k]);
     }
 }
