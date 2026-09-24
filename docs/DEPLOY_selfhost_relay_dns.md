@@ -1,6 +1,6 @@
 # 自建 iroh-relay + iroh-dns-server 部署指南
 
-> 让 imspace 完全依赖**你自己**的中继与发现服务运行，摆脱 n0 公共基础设施——
+> 让 nmspace 完全依赖**你自己**的中继与发现服务运行，摆脱 n0 公共基础设施——
 > 两台位于不同 NAT 后的服务器，凭公钥即可穿透 NAT、端到端加密互通。
 
 | 项目 | 版本 / 取值 |
@@ -8,7 +8,7 @@
 | iroh | `1.2.0` |
 | iroh-relay | `1.2.0`（二进制 `iroh-relay`，需 `server` feature） |
 | iroh-dns-server | `1.2.0`（二进制 `iroh-dns-server`） |
-| imspace 对接模式 | `imd.toml` → `mode = "selfhost"`（见 [`docs/PLAN_D_public_internet.md`](./PLAN_D_public_internet.md) §5） |
+| nmspace 对接模式 | `nmd.toml` → `mode = "selfhost"`（见 [`docs/PLAN_D_public_internet.md`](./PLAN_D_public_internet.md) §5） |
 | 适用读者 | 有 1~2 台公网 VPS、掌握基本 Linux 运维的部署者 |
 
 ---
@@ -22,7 +22,7 @@
 5. [安装](#5)
 6. [部署 iroh-relay](#6)
 7. [部署 iroh-dns-server](#7)
-8. [对接 imspace / imd](#8)
+8. [对接 nmspace / nmd](#8)
 9. [端到端验证](#9)
 10. [运维：证书 / 监控 / 限流 / 访问控制 / 升级 / 备份](#10)
 11. [故障排查速查表](#11)
@@ -66,7 +66,7 @@ n0 提供的公共中继（`*.relay.n0.iroh.link`）与发现服务（`dns.iroh.
 
 <p align="center"><img alt="两种发现路径与 DNS 委派" width="960" style="max-width:100%;height:auto" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5NjAgNTYwIiB3aWR0aD0iOTYwIiBoZWlnaHQ9IjU2MCI+PGRlZnM+PG1hcmtlciBpZD0ibS1pbmQiIG1hcmtlcldpZHRoPSIxMCIgbWFya2VySGVpZ2h0PSIxMCIgcmVmWD0iOCIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIiBtYXJrZXJVbml0cz0ic3Ryb2tlV2lkdGgiPjxwYXRoIGQ9Ik0wLDAgTDgsMyBMMCw2IFoiIGZpbGw9IiM2MzY2ZjEiLz48L21hcmtlcj48bWFya2VyIGlkPSJtLXZpbyIgbWFya2VyV2lkdGg9IjEwIiBtYXJrZXJIZWlnaHQ9IjEwIiByZWZYPSI4IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iIG1hcmtlclVuaXRzPSJzdHJva2VXaWR0aCI+PHBhdGggZD0iTTAsMCBMOCwzIEwwLDYgWiIgZmlsbD0iIzhiNWNmNiIvPjwvbWFya2VyPjxtYXJrZXIgaWQ9Im0tZW1lIiBtYXJrZXJXaWR0aD0iMTAiIG1hcmtlckhlaWdodD0iMTAiIHJlZlg9IjgiIHJlZlk9IjMiIG9yaWVudD0iYXV0byIgbWFya2VyVW5pdHM9InN0cm9rZVdpZHRoIj48cGF0aCBkPSJNMCwwIEw4LDMgTDAsNiBaIiBmaWxsPSIjMTBiOTgxIi8+PC9tYXJrZXI+PG1hcmtlciBpZD0ibS1za3kiIG1hcmtlcldpZHRoPSIxMCIgbWFya2VySGVpZ2h0PSIxMCIgcmVmWD0iOCIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIiBtYXJrZXJVbml0cz0ic3Ryb2tlV2lkdGgiPjxwYXRoIGQ9Ik0wLDAgTDgsMyBMMCw2IFoiIGZpbGw9IiMwZWE1ZTkiLz48L21hcmtlcj48bWFya2VyIGlkPSJtLWFtYiIgbWFya2VyV2lkdGg9IjEwIiBtYXJrZXJIZWlnaHQ9IjEwIiByZWZYPSI4IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iIG1hcmtlclVuaXRzPSJzdHJva2VXaWR0aCI+PHBhdGggZD0iTTAsMCBMOCwzIEwwLDYgWiIgZmlsbD0iI2Y1OWUwYiIvPjwvbWFya2VyPjxtYXJrZXIgaWQ9Im0tc2xhIiBtYXJrZXJXaWR0aD0iMTAiIG1hcmtlckhlaWdodD0iMTAiIHJlZlg9IjgiIHJlZlk9IjMiIG9yaWVudD0iYXV0byIgbWFya2VyVW5pdHM9InN0cm9rZVdpZHRoIj48cGF0aCBkPSJNMCwwIEw4LDMgTDAsNiBaIiBmaWxsPSIjNDc1NTY5Ii8+PC9tYXJrZXI+PG1hcmtlciBpZD0ibS1yb3MiIG1hcmtlcldpZHRoPSIxMCIgbWFya2VySGVpZ2h0PSIxMCIgcmVmWD0iOCIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIiBtYXJrZXJVbml0cz0ic3Ryb2tlV2lkdGgiPjxwYXRoIGQ9Ik0wLDAgTDgsMyBMMCw2IFoiIGZpbGw9IiNmNDNmNWUiLz48L21hcmtlcj48bWFya2VyIGlkPSJtLW11dCIgbWFya2VyV2lkdGg9IjEwIiBtYXJrZXJIZWlnaHQ9IjEwIiByZWZYPSI4IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iIG1hcmtlclVuaXRzPSJzdHJva2VXaWR0aCI+PHBhdGggZD0iTTAsMCBMOCwzIEwwLDYgWiIgZmlsbD0iIzY0NzQ4YiIvPjwvbWFya2VyPjwvZGVmcz48cmVjdCB4PSIwIiB5PSIwIiB3aWR0aD0iOTYwIiBoZWlnaHQ9IjU2MCIgcng9IjE4IiBmaWxsPSIjZjhmYWZjIi8+PHRleHQgeD0iNDAiIHk9IjQyIiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTkiIGZpbGw9IiMxZTI5M2IiIHRleHQtYW5jaG9yPSJzdGFydCIgZm9udC13ZWlnaHQ9IjcwMCI+5Zu+IDMgwrcg5Lik56eN5Y+R546w6Lev5b6E77yacGthcnItb3Zlci1IVFRQU++8iOaOqOiNkO+8iXZzIEROUy9Eb0jvvIjpnIDlp5TmtL7vvIk8L3RleHQ+PHRleHQgeD0iNDAiIHk9IjY0IiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTIuNSIgZmlsbD0iIzY0NzQ4YiIgdGV4dC1hbmNob3I9InN0YXJ0IiBmb250LXdlaWdodD0iNDAwIj5pbWQg6buY6K6k6LWwIHBrYXJyIOeahCBIVFRQUyBQVVQvR0VU77yM5Y+q6ZyAIGRucy1zZXJ2ZXIg55qEIDQ0MyDlj6/ovr7vvJtETlMg5p+l6K+i6Lev5b6E5Li65Y+v6YCJ5aKe5by644CCPC90ZXh0PjxyZWN0IHg9IjQwIiB5PSI5MiIgd2lkdGg9IjQzMCIgaGVpZ2h0PSI0MzAiIHJ4PSIxNCIgZmlsbD0iI2VjZmRmNSIgc3Ryb2tlPSIjMTBiOTgxIiBzdHJva2Utd2lkdGg9IjEuNiIvPjx0ZXh0IHg9IjYwIiB5PSIxMjAiIGZvbnQtZmFtaWx5PSItYXBwbGUtc3lzdGVtLEJsaW5rTWFjU3lzdGVtRm9udCwnU2Vnb2UgVUknLFJvYm90byxIZWx2ZXRpY2EsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMyIgZmlsbD0iIzEwYjk4MSIgdGV4dC1hbmNob3I9InN0YXJ0IiBmb250LXdlaWdodD0iNzAwIj7ot6/lvoQgQSDCtyBwa2FyciBvdmVyIEhUVFBT77yI5pyA5bCP5Y+v55So77yM5o6o6I2Q77yJPC90ZXh0PjxyZWN0IHg9IjcwIiB5PSIxNDAiIHdpZHRoPSIxNzAiIGhlaWdodD0iNzAiIHJ4PSIxMiIgZmlsbD0iI2ZmZmZmZiIgc3Ryb2tlPSIjNjM2NmYxIiBzdHJva2Utd2lkdGg9IjEuOCIvPjxwYXRoIGQ9Ik04MiwxNDAgaDE0NiBhMTIsMTIgMCAwIDEgMTIsMTIgdjE0IGgtMTcwIHYtMTQgYTEyLDEyIDAgMCAxIDEyLC0xMiB6IiBmaWxsPSIjZWVmMmZmIi8+PHRleHQgeD0iODQiIHk9IjE1OCIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEyLjUiIGZpbGw9IiM2MzY2ZjEiIHRleHQtYW5jaG9yPSJzdGFydCIgZm9udC13ZWlnaHQ9IjcwMCI+aW1kIOiKgueCuTwvdGV4dD48dGV4dCB4PSI4NCIgeT0iMTc4IiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM2NDc0OGIiIHRleHQtYW5jaG9yPSJzdGFydCIgZm9udC13ZWlnaHQ9IjQwMCI+UGthcnJQdWJsaXNoZXIvUmVzb2x2ZXI8L3RleHQ+PHJlY3QgeD0iMjcwIiB5PSIxNDAiIHdpZHRoPSIxNzAiIGhlaWdodD0iNzAiIHJ4PSIxMiIgZmlsbD0iI2ZmZmZmZiIgc3Ryb2tlPSIjMTBiOTgxIiBzdHJva2Utd2lkdGg9IjEuOCIvPjxwYXRoIGQ9Ik0yODIsMTQwIGgxNDYgYTEyLDEyIDAgMCAxIDEyLDEyIHYxNCBoLTE3MCB2LTE0IGExMiwxMiAwIDAgMSAxMiwtMTIgeiIgZmlsbD0iI2VjZmRmNSIvPjx0ZXh0IHg9IjI4NCIgeT0iMTU4IiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTIuNSIgZmlsbD0iIzEwYjk4MSIgdGV4dC1hbmNob3I9InN0YXJ0IiBmb250LXdlaWdodD0iNzAwIj5pcm9oLWRucy1zZXJ2ZXI8L3RleHQ+PHRleHQgeD0iMjg0IiB5PSIxNzgiIGZvbnQtZmFtaWx5PSItYXBwbGUtc3lzdGVtLEJsaW5rTWFjU3lzdGVtRm9udCwnU2Vnb2UgVUknLFJvYm90byxIZWx2ZXRpY2EsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzY0NzQ4YiIgdGV4dC1hbmNob3I9InN0YXJ0IiBmb250LXdlaWdodD0iNDAwIj7ot6/nlLEgL3BrYXJyPC90ZXh0PjxsaW5lIHgxPSIyNDAiIHkxPSIxNjUiIHgyPSIyNzAiIHkyPSIxNjUiIHN0cm9rZT0iIzEwYjk4MSIgc3Ryb2tlLXdpZHRoPSIxLjgiIG1hcmtlci1lbmQ9InVybCgjbS1lbWUpIi8+PHRleHQgeD0iMjU1IiB5PSIxNTgiIGZvbnQtZmFtaWx5PSItYXBwbGUtc3lzdGVtLEJsaW5rTWFjU3lzdGVtRm9udCwnU2Vnb2UgVUknLFJvYm90byxIZWx2ZXRpY2EsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSI5LjUiIGZpbGw9IiMxMGI5ODEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSI3MDAiPlBVVDwvdGV4dD48bGluZSB4MT0iMjcwIiB5MT0iMTk1IiB4Mj0iMjQwIiB5Mj0iMTk1IiBzdHJva2U9IiMxMGI5ODEiIHN0cm9rZS13aWR0aD0iMS44IiBtYXJrZXItZW5kPSJ1cmwoI20tZW1lKSIvPjx0ZXh0IHg9IjI1NSIgeT0iMjEwIiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iOS41IiBmaWxsPSIjMTBiOTgxIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iNzAwIj5HRVQ8L3RleHQ+PHRleHQgeD0iNjAiIHk9IjI1MCIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEyIiBmaWxsPSIjNDc1NTY5IiB0ZXh0LWFuY2hvcj0ic3RhcnQiIGZvbnQtd2VpZ2h0PSI3MDAiPuS7hemcgO+8mjwvdGV4dD48dGV4dCB4PSI3MCIgeT0iMjc4IiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEuNSIgZmlsbD0iIzEwYjk4MSIgdGV4dC1hbmNob3I9InN0YXJ0IiBmb250LXdlaWdodD0iNTAwIj7inJQgZG5zLXNlcnZlciDnmoQgNDQzL0hUVFBTIOWFrOe9keWPr+i+vjwvdGV4dD48dGV4dCB4PSI3MCIgeT0iMzA0IiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEuNSIgZmlsbD0iIzEwYjk4MSIgdGV4dC1hbmNob3I9InN0YXJ0IiBmb250LXdlaWdodD0iNTAwIj7inJQgaW1kIFtkbnNdLnVybCA9IGh0dHBzOi8vZG5zLmV4YW1wbGUuY29tL3BrYXJyPC90ZXh0Pjx0ZXh0IHg9IjcwIiB5PSIzMzAiIGZvbnQtZmFtaWx5PSItYXBwbGUtc3lzdGVtLEJsaW5rTWFjU3lzdGVtRm9udCwnU2Vnb2UgVUknLFJvYm90byxIZWx2ZXRpY2EsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMS41IiBmaWxsPSIjMTBiOTgxIiB0ZXh0LWFuY2hvcj0ic3RhcnQiIGZvbnQtd2VpZ2h0PSI1MDAiPuKclCDmnInmlYggVExTIOivgeS5pu+8iExldHNFbmNyeXB0IOiHquWKqO+8iTwvdGV4dD48dGV4dCB4PSI3MCIgeT0iMzU2IiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEuNSIgZmlsbD0iIzY0NzQ4YiIgdGV4dC1hbmNob3I9InN0YXJ0IiBmb250LXdlaWdodD0iNTAwIj7inJgg5LiN6ZyA6KaBIDUzIOerr+WPoyAvIE5TIOWnlOa0vjwvdGV4dD48dGV4dCB4PSI3MCIgeT0iMzgyIiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEuNSIgZmlsbD0iIzY0NzQ4YiIgdGV4dC1hbmNob3I9InN0YXJ0IiBmb250LXdlaWdodD0iNTAwIj7inJgg5LiN6ZyA6KaB5oul5pyJ5Lyg57ufIEROUyDljLrln588L3RleHQ+PHJlY3QgeD0iNjAiIHk9IjQzMCIgd2lkdGg9IjM5MCIgaGVpZ2h0PSI3MiIgcng9IjEwIiBmaWxsPSIjZmZmZmZmIiBzdHJva2U9IiMxMGI5ODEiIHN0cm9rZS13aWR0aD0iMS4yIi8+PHRleHQgeD0iNzIiIHk9IjQ1MiIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjExIiBmaWxsPSIjNDc1NTY5IiB0ZXh0LWFuY2hvcj0ic3RhcnQiIGZvbnQtd2VpZ2h0PSI2MDAiPnBrYXJyIEdFVCDmjInjgIzlhazpkqXjgI3lr7vlnYDvvIzkuI4gb3JpZ2luIOaXoOWFs++8mzwvdGV4dD48dGV4dCB4PSI3MiIgeT0iNDcyIiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM0NzU1NjkiIHRleHQtYW5jaG9yPSJzdGFydCIgZm9udC13ZWlnaHQ9IjYwMCI+5Zug5q2k5oyJ5YWs6ZKl5ouo5Y+377yIZGlhbC1ieS1rZXnvvInku4XpnaDmraTot6/lvoTljbPlj6/lrozmiJDjgII8L3RleHQ+PHRleHQgeD0iNzIiIHk9IjQ5MiIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjExIiBmaWxsPSIjMTBiOTgxIiB0ZXh0LWFuY2hvcj0ic3RhcnQiIGZvbnQtd2VpZ2h0PSI3MDAiPui/meaYr+acrOaMh+WNl+aOqOiNkOeahOm7mOiupOmDqOe9suW9ouaAgeOAgjwvdGV4dD48cmVjdCB4PSI0OTAiIHk9IjkyIiB3aWR0aD0iNDMwIiBoZWlnaHQ9IjQzMCIgcng9IjE0IiBmaWxsPSIjZmVmM2M3IiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMS42Ii8+PHRleHQgeD0iNTEwIiB5PSIxMjAiIGZvbnQtZmFtaWx5PSItYXBwbGUtc3lzdGVtLEJsaW5rTWFjU3lzdGVtRm9udCwnU2Vnb2UgVUknLFJvYm90byxIZWx2ZXRpY2EsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMyIgZmlsbD0iI2ExNjIwNyIgdGV4dC1hbmNob3I9InN0YXJ0IiBmb250LXdlaWdodD0iNzAwIj7ot6/lvoQgQiDCtyBETlMgLyBEb0jvvIjlj6/pgInlop7lvLrvvIzpnIDln5/lkI3lp5TmtL7vvIk8L3RleHQ+PHJlY3QgeD0iNTEwIiB5PSIxNDIiIHdpZHRoPSIzMDAiIGhlaWdodD0iNDIiIHJ4PSIxMiIgZmlsbD0iI2ZmZmZmZiIgc3Ryb2tlPSIjYTE2MjA3IiBzdHJva2Utd2lkdGg9IjEuOCIvPjxwYXRoIGQ9Ik01MjIsMTQyIGgyNzYgYTEyLDEyIDAgMCAxIDEyLDEyIHYxNCBoLTMwMCB2LTE0IGExMiwxMiAwIDAgMSAxMiwtMTIgeiIgZmlsbD0iI2ZlZjNjNyIvPjx0ZXh0IHg9IjUyNCIgeT0iMTYwIiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTIuNSIgZmlsbD0iI2ExNjIwNyIgdGV4dC1hbmNob3I9InN0YXJ0IiBmb250LXdlaWdodD0iNzAwIj7ln5/lkI3ms6jlhozllYY8L3RleHQ+PHRleHQgeD0iNTI0IiB5PSIxODAiIGZvbnQtZmFtaWx5PSItYXBwbGUtc3lzdGVtLEJsaW5rTWFjU3lzdGVtRm9udCwnU2Vnb2UgVUknLFJvYm90byxIZWx2ZXRpY2EsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzY0NzQ4YiIgdGV4dC1hbmNob3I9InN0YXJ0IiBmb250LXdlaWdodD0iNDAwIj5wYXJlbnQgem9uZTwvdGV4dD48bGluZSB4MT0iNjYwIiB5MT0iMTg0IiB4Mj0iNjYwIiB5Mj0iMTk2IiBzdHJva2U9IiNhMTYyMDciIHN0cm9rZS13aWR0aD0iMS42IiBtYXJrZXItZW5kPSJ1cmwoI20tYW1iKSIvPjxyZWN0IHg9IjUxMCIgeT0iMTk2IiB3aWR0aD0iMzAwIiBoZWlnaHQ9IjQyIiByeD0iMTIiIGZpbGw9IiNmZmZmZmYiIHN0cm9rZT0iI2ExNjIwNyIgc3Ryb2tlLXdpZHRoPSIxLjgiLz48cGF0aCBkPSJNNTIyLDE5NiBoMjc2IGExMiwxMiAwIDAgMSAxMiwxMiB2MTQgaC0zMDAgdi0xNCBhMTIsMTIgMCAwIDEgMTIsLTEyIHoiIGZpbGw9IiNmZWYzYzciLz48dGV4dCB4PSI1MjQiIHk9IjIxNCIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEyLjUiIGZpbGw9IiNhMTYyMDciIHRleHQtYW5jaG9yPSJzdGFydCIgZm9udC13ZWlnaHQ9IjcwMCI+54i25Yy6IE5TIOiusOW9lTwvdGV4dD48dGV4dCB4PSI1MjQiIHk9IjIzNCIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjExIiBmaWxsPSIjNjQ3NDhiIiB0ZXh0LWFuY2hvcj0ic3RhcnQiIGZvbnQtd2VpZ2h0PSI0MDAiPuWnlOa0viBleGFtcGxlLmNvbTwvdGV4dD48bGluZSB4MT0iNjYwIiB5MT0iMjM4IiB4Mj0iNjYwIiB5Mj0iMjUwIiBzdHJva2U9IiNhMTYyMDciIHN0cm9rZS13aWR0aD0iMS42IiBtYXJrZXItZW5kPSJ1cmwoI20tYW1iKSIvPjxyZWN0IHg9IjUxMCIgeT0iMjUwIiB3aWR0aD0iMzAwIiBoZWlnaHQ9IjQyIiByeD0iMTIiIGZpbGw9IiNmZmZmZmYiIHN0cm9rZT0iI2ExNjIwNyIgc3Ryb2tlLXdpZHRoPSIxLjgiLz48cGF0aCBkPSJNNTIyLDI1MCBoMjc2IGExMiwxMiAwIDAgMSAxMiwxMiB2MTQgaC0zMDAgdi0xNCBhMTIsMTIgMCAwIDEgMTIsLTEyIHoiIGZpbGw9IiNmZWYzYzciLz48dGV4dCB4PSI1MjQiIHk9IjI2OCIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEyLjUiIGZpbGw9IiNhMTYyMDciIHRleHQtYW5jaG9yPSJzdGFydCIgZm9udC13ZWlnaHQ9IjcwMCI+5L2g55qEIG5zMTwvdGV4dD48dGV4dCB4PSI1MjQiIHk9IjI4OCIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjExIiBmaWxsPSIjNjQ3NDhiIiB0ZXh0LWFuY2hvcj0ic3RhcnQiIGZvbnQtd2VpZ2h0PSI0MDAiPmdsdWUgQSDorrDlvZU8L3RleHQ+PGxpbmUgeDE9IjY2MCIgeTE9IjI5MiIgeDI9IjY2MCIgeTI9IjMwNCIgc3Ryb2tlPSIjYTE2MjA3IiBzdHJva2Utd2lkdGg9IjEuNiIgbWFya2VyLWVuZD0idXJsKCNtLWFtYikiLz48cmVjdCB4PSI1MTAiIHk9IjMwNCIgd2lkdGg9IjMwMCIgaGVpZ2h0PSI0MiIgcng9IjEyIiBmaWxsPSIjZmZmZmZmIiBzdHJva2U9IiNhMTYyMDciIHN0cm9rZS13aWR0aD0iMS44Ii8+PHBhdGggZD0iTTUyMiwzMDQgaDI3NiBhMTIsMTIgMCAwIDEgMTIsMTIgdjE0IGgtMzAwIHYtMTQgYTEyLDEyIDAgMCAxIDEyLC0xMiB6IiBmaWxsPSIjZmVmM2M3Ii8+PHRleHQgeD0iNTI0IiB5PSIzMjIiIGZvbnQtZmFtaWx5PSItYXBwbGUtc3lzdGVtLEJsaW5rTWFjU3lzdGVtRm9udCwnU2Vnb2UgVUknLFJvYm90byxIZWx2ZXRpY2EsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMi41IiBmaWxsPSIjYTE2MjA3IiB0ZXh0LWFuY2hvcj0ic3RhcnQiIGZvbnQtd2VpZ2h0PSI3MDAiPmlyb2gtZG5zLXNlcnZlcjwvdGV4dD48dGV4dCB4PSI1MjQiIHk9IjM0MiIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjExIiBmaWxsPSIjNjQ3NDhiIiB0ZXh0LWFuY2hvcj0ic3RhcnQiIGZvbnQtd2VpZ2h0PSI0MDAiPjUzIOadg+WogeW6lOetlDwvdGV4dD48dGV4dCB4PSI1MTAiIHk9IjM3MiIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEyIiBmaWxsPSIjNDc1NTY5IiB0ZXh0LWFuY2hvcj0ic3RhcnQiIGZvbnQtd2VpZ2h0PSI3MDAiPumineWklumcgOimge+8mjwvdGV4dD48dGV4dCB4PSI1MjAiIHk9IjM5OCIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjExLjUiIGZpbGw9IiNhMTYyMDciIHRleHQtYW5jaG9yPSJzdGFydCIgZm9udC13ZWlnaHQ9IjUwMCI+4peGIOaLpeacieS4gOS4quWPr+WnlOa0vueahOWfn+WQje+8iOaIluWtkOWfn++8iTwvdGV4dD48dGV4dCB4PSI1MjAiIHk9IjQyNCIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjExLjUiIGZpbGw9IiNhMTYyMDciIHRleHQtYW5jaG9yPSJzdGFydCIgZm9udC13ZWlnaHQ9IjUwMCI+4peGIOWFrOe9kSA1My91ZHAgKyA1My90Y3Ag5Y+v6L6+PC90ZXh0Pjx0ZXh0IHg9IjUyMCIgeT0iNDUwIiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEuNSIgZmlsbD0iI2ExNjIwNyIgdGV4dC1hbmNob3I9InN0YXJ0IiBmb250LXdlaWdodD0iNTAwIj7il4YgZG5zLXNlcnZlciBbZG5zXS5vcmlnaW5zIOWQq+ivpSBvcmlnaW48L3RleHQ+PHRleHQgeD0iNTIwIiB5PSI0NzYiIGZvbnQtZmFtaWx5PSItYXBwbGUtc3lzdGVtLEJsaW5rTWFjU3lzdGVtRm9udCwnU2Vnb2UgVUknLFJvYm90byxIZWx2ZXRpY2EsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMS41IiBmaWxsPSIjYTE2MjA3IiB0ZXh0LWFuY2hvcj0ic3RhcnQiIGZvbnQtd2VpZ2h0PSI1MDAiPuKXhiBpbWQgW2Ruc10ub3JpZ2luID0gImRucy5leGFtcGxlLmNvbS4iPC90ZXh0PjxyZWN0IHg9IjUwMCIgeT0iNTAwIiB3aWR0aD0iNDEwIiBoZWlnaHQ9IjE0IiByeD0iNyIgZmlsbD0ibm9uZSIvPjwvc3ZnPg=="/></p>
 
-- **路径 A · pkarr over HTTPS（推荐、最小可用）**：imd 的 `PkarrPublisher`/`PkarrResolver` 走 `https://dns.example.com/pkarr` 的 `PUT`/`GET`。**按公钥寻址、与 origin 无关**，只要 dns-server 的 **443/HTTPS 公网可达**即可完成 dial-by-key。**不需要 53 端口、不需要 NS 委派、不需要拥有传统 DNS 区域。**
+- **路径 A · pkarr over HTTPS（推荐、最小可用）**：nmd 的 `PkarrPublisher`/`PkarrResolver` 走 `https://dns.example.com/pkarr` 的 `PUT`/`GET`。**按公钥寻址、与 origin 无关**，只要 dns-server 的 **443/HTTPS 公网可达**即可完成 dial-by-key。**不需要 53 端口、不需要 NS 委派、不需要拥有传统 DNS 区域。**
 - **路径 B · DNS / DoH（可选增强）**：让节点也能通过标准 DNS 查询（UDP/TCP 53）或 DoH（`/dns-query`）解析。**需要你拥有可委派的域名、公网 53 可达、并在父区做 NS 委派**（把子域指向你的 `iroh-dns-server`）。
 
 > 结论：**先按路径 A 部署即可打通全部功能**。除非你要把 iroh 记录并入现有 DNS 体系、或需要 DoH，否则可跳过路径 B 的委派工作（本指南第 7.5 节单列）。
@@ -198,7 +198,7 @@ cert_dir   = "/var/lib/iroh-relay/certs"
 # ——访问控制（可选，公网生产强烈建议开启其一）——
 # 默认对所有人开放：
 # access = "everyone"
-# 只允许白名单节点公钥（IM_NODE_ID 的 hex）使用你的中继：
+# 只允许白名单节点公钥（NM_NODE_ID 的 hex）使用你的中继：
 # access.allowlist = ["<节点公钥hex-64>", "<另一个>"]
 # 或用共享令牌（客户端需在连接时带 Bearer 令牌）：
 # access.shared_token = ["put-a-long-random-token-here"]
@@ -252,7 +252,7 @@ openssl s_client -connect relay.example.com:443 -servername relay.example.com </
 sudo ss -lunp | grep 7842
 ```
 
-（功能层面的连通，见第 9 节用 imd 端到端验证。）
+（功能层面的连通，见第 9 节用 nmd 端到端验证。）
 
 ---
 
@@ -362,7 +362,7 @@ openssl s_client -connect dns.example.com:443 -servername dns.example.com </dev/
    dns.example.com.        NS   dns1.dns.example.com. ; 委派子域给它权威
    ```
 3. 确认 `dns.toml` 的 `[dns].origins` 含该 origin（如 `"dns.example.com"`）、`rr_a`/`rr_ns` 正确。
-4. 客户端侧再在 `imd.toml` 增加 `[dns].origin = "dns.example.com."`（见第 8 节）。
+4. 客户端侧再在 `nmd.toml` 增加 `[dns].origin = "dns.example.com."`（见第 8 节）。
 5. 校验：
    ```bash
    dig +short NS dns.example.com @8.8.8.8         # 应看到 dns1.dns.example.com.
@@ -372,17 +372,17 @@ openssl s_client -connect dns.example.com:443 -servername dns.example.com </dev/
 ---
 
 <a id="8"></a>
-## 8. 对接 imspace / imd
+## 8. 对接 nmspace / nmd
 
-imd 已内置 `mode = "selfhost"`（本仓库实现），把它指向你上面两台设施即可。
+nmd 已内置 `mode = "selfhost"`（本仓库实现），把它指向你上面两台设施即可。
 
 ### 8.1 最小配置（路径 A，推荐）
 
 ```toml
-# imd.toml —— 每台运行 imspace 的服务器各一份
+# nmd.toml —— 每台运行 nmspace 的服务器各一份
 mode      = "selfhost"
-identity  = "imd.identity"       # 每台一份，自动生成，勿共用/勿入库
-db        = "imd.redb"
+identity  = "nmd.identity"       # 每台一份，自动生成，勿共用/勿入库
+db        = "nmd.redb"
 bind_port = 0
 
 [relay]
@@ -394,18 +394,18 @@ url = "https://dns.example.com/pkarr"       # ← 你的 iroh-dns-server 的 /pk
 
 # 对端服务器：跨公网只需填对方的 node id（公钥），地址由发现自动解析
 [[peers]]
-id = "<对方 IM_NODE_ID（64 位 hex）>"
+id = "<对方 NM_NODE_ID（64 位 hex）>"
 ```
 
-### 8.2 配置对照表（imd ↔ 服务端）
+### 8.2 配置对照表（nmd ↔ 服务端）
 
-| imd.toml 字段 | 指向 | 服务端对应配置 |
+| nmd.toml 字段 | 指向 | 服务端对应配置 |
 |---|---|---|
 | `[relay] url = "https://relay.example.com"` | → | iroh-relay `[tls].hostname = "relay.example.com"`，https 443 |
 | 中继改了端口（如 `:8443`） | → | 写成 `url = "https://relay.example.com:8443"`；对应 relay `https_bind_addr` |
 | `[dns] url = "https://dns.example.com/pkarr"` | → | iroh-dns-server `[https].domains = ["dns.example.com"]` + 路由 `/pkarr` |
 | `[dns] origin = "dns.example.com."`（可选） | → | iroh-dns-server `[dns].origins` 含 `"dns.example.com"` **且**完成 53 委派 |
-| `[[peers]].id` | → | 对端 imd 启动时打印的 `IM_NODE_ID` |
+| `[[peers]].id` | → | 对端 nmd 启动时打印的 `NM_NODE_ID` |
 
 > `mode=selfhost` 若缺 `[dns] url` 会**直接报错**；缺 `[relay] url` 仅**告警**（退化为无中继、仅能直连可达对端，NAT 打洞不可用）。
 
@@ -421,25 +421,25 @@ urls = ["https://relay1.example.com", "https://relay2.example.com"]
 <a id="9"></a>
 ## 9. 端到端验证（两台 NAT 后的服务器）
 
-在**两台**不同内网的服务器上分别部署 imd（各自 `imd.toml` 如上），然后：
+在**两台**不同内网的服务器上分别部署 nmd（各自 `nmd.toml` 如上），然后：
 
 ```bash
 # 服务器 A
-./imd --config imd.toml
-# 记下输出：IM_NODE_ID=<A的公钥hex>
+./nmd --config nmd.toml
+# 记下输出：NM_NODE_ID=<A的公钥hex>
 
-# 服务器 B：把 A 的公钥填进 B 的 imd.toml 的 [[peers]].id，再启动
-./imd --config imd.toml
-# 记下：IM_NODE_ID=<B的公钥hex>
+# 服务器 B：把 A 的公钥填进 B 的 nmd.toml 的 [[peers]].id，再启动
+./nmd --config nmd.toml
+# 记下：NM_NODE_ID=<B的公钥hex>
 ```
 
 判定成功的信号：
 
 - 两端日志出现 `online — 可被按 node id 发现/拨号`（说明连上你的中继并已向你的 dns 发布地址）。
-- 用本仓库的客户端/回声工具（如 `im-echo`）从 A 侧向 B 侧的实体发消息，B 侧收到即打通。
+- 用本仓库的客户端/回声工具（如 `nm-echo`）从 A 侧向 B 侧的实体发消息，B 侧收到即打通。
 - 抓包可见与 `relay.example.com:443/7842`、`dns.example.com:443` 的流量，**无任何 `*.n0.iroh.link` 流量**（证明已完全走自建设施）。
 
-> 本仓库另有 `crates/im-node/tests/selfhost_smoke.rs`：以 selfhost 预设绑定并完成注册/目录往返，验证代码链路（不依赖真实公网设施）。
+> 本仓库另有 `crates/nm-node/tests/selfhost_smoke.rs`：以 selfhost 预设绑定并完成注册/目录往返，验证代码链路（不依赖真实公网设施）。
 
 ---
 
@@ -450,8 +450,8 @@ urls = ["https://relay1.example.com", "https://relay2.example.com"]
 - **监控**：relay `:9090`、dns `:9117` 暴露 Prometheus 指标（默认仅本机）。用 Prometheus 抓 `up`、连接数、pkarr 请求量等；建议只经内网/隧道访问。
 - **限流**：dns 端 `pkarr_put_rate_limit = "smart"` 抑制滥发；relay 端 `[limits]` 可设 `accept_conn_limit`/`accept_conn_burst` 与每客户端 `client.bytes_per_second`/`max_burst_bytes`。
 - **访问控制**：公网中继建议开 `access.allowlist`（只服务你的节点公钥）或 `access.shared_token`（令牌准入），否则任何人都能借用你的中继。dns 的 `/pkarr` 无鉴权（pkarr 记录自签名，人人可发自己的）——如需私有化可在防火墙层限制来源。
-- **升级**：`cargo install ...@<新版>` 或重编后替换二进制，`systemctl restart`。**保持 relay/dns/iroh 三者大版本一致**（本指南为 1.2.x）。灰度：先升 dns，再升 relay，最后滚动升级各 imd。
-- **备份**：dns 的 `signed-packets-1.db`（redb，可重建但备份省事）、relay 的 `cert_dir`（避免重签）、各 imd 的 `imd.identity`（**丢失=换公钥=对端需重配**）与 `imd.redb`。
+- **升级**：`cargo install ...@<新版>` 或重编后替换二进制，`systemctl restart`。**保持 relay/dns/iroh 三者大版本一致**（本指南为 1.2.x）。灰度：先升 dns，再升 relay，最后滚动升级各 nmd。
+- **备份**：dns 的 `signed-packets-1.db`（redb，可重建但备份省事）、relay 的 `cert_dir`（避免重签）、各 nmd 的 `nmd.identity`（**丢失=换公钥=对端需重配**）与 `nmd.redb`。
 - **`[mainline]`**：设 `true` 会与 BitTorrent mainline DHT 互通（借公共 DHT 提升记录可达/冗余）；要**完全自包含/隔离**则保持 `false`。
 
 ---
@@ -461,14 +461,14 @@ urls = ["https://relay1.example.com", "https://relay2.example.com"]
 
 | 症状 | 可能原因 | 排查 / 处理 |
 |---|---|---|
-| imd 日志 `online 超时` | 中继 443 不可达 / 证书无效 / DNS 未指向本机 | `openssl s_client` 验证 relay 443 与证书；确认安全组放通 443、7842/udp |
+| nmd 日志 `online 超时` | 中继 443 不可达 / 证书无效 / DNS 未指向本机 | `openssl s_client` 验证 relay 443 与证书；确认安全组放通 443、7842/udp |
 | 证书申请失败 / 反复重试 | 443 未放通；域名未解析到本机；用了 staging | 放通 443；`dig +short relay.example.com`；`prod_tls=true`/`letsencrypt_prod=true` |
 | `curl .../pkarr/<key>` 连接被拒 | dns-server 未起 / 443 被占 / 防火墙 | `systemctl status iroh-dns`；`ss -lntp | grep :443`；查冲突进程 |
-| 同机 relay 与 dns 都起不来 | 双方抢 443 | 分两 IP，或让其一改端口（方案②），imd 侧 url 带上端口 |
+| 同机 relay 与 dns 都起不来 | 双方抢 443 | 分两 IP，或让其一改端口（方案②），nmd 侧 url 带上端口 |
 | 能连中继但始终不打洞、走中转 | 对称型 NAT / UDP 被封 | 放通 7842/udp、开 `enable_quic_addr_discovery`；接受回退中转（仍可用） |
 | `cert_mode` 反序列化报错 | 大小写用错 | relay 用 `"LetsEncrypt"`（Pascal）、dns 用 `"lets_encrypt"`（snake） |
 | 路径 B `dig` 查不到 | 未委派 / 53 未放通 / origins 不含该域 | 校验父区 NS、放通 53/udp+tcp、核对 `[dns].origins` |
-| 仍看到 n0 流量 | imd 用了 `mode=nat` 或 url 配错 | 确认 `mode="selfhost"` 且 `[relay]/[dns]` 指向自建域名 |
+| 仍看到 n0 流量 | nmd 用了 `mode=nat` 或 url 配错 | 确认 `mode="selfhost"` 且 `[relay]/[dns]` 指向自建域名 |
 
 ---
 
@@ -507,8 +507,8 @@ echo "OK"
 
 - `iroh-dns-server` 说明与示例配置：`config.dev.toml`（本机自签，端口 8080/8443/5300）、`config.prod.toml`（LetsEncrypt，443/53）。
 - 路由：`GET|PUT /pkarr`（pkarr 签名包）、`GET /dns-query`（DoH, RFC 8484）。
-- 与 imspace 对接的代码侧说明见 [`docs/PLAN_D_public_internet.md`](./PLAN_D_public_internet.md) §5–§6。
+- 与 nmspace 对接的代码侧说明见 [`docs/PLAN_D_public_internet.md`](./PLAN_D_public_internet.md) §5–§6。
 
 ---
 
-> 一句话总结：**部署 `iroh-relay`（443+7842）与 `iroh-dns-server`（443 `/pkarr`）两件套，各配一个子域和 LetsEncrypt 证书；imd 里 `mode="selfhost"` 指向它们，即可在完全自主可控的设施上穿透 NAT、按公钥端到端互通。** 需要标准 DNS/DoH 再加做子域委派（路径 B）。
+> 一句话总结：**部署 `iroh-relay`（443+7842）与 `iroh-dns-server`（443 `/pkarr`）两件套，各配一个子域和 LetsEncrypt 证书；nmd 里 `mode="selfhost"` 指向它们，即可在完全自主可控的设施上穿透 NAT、按公钥端到端互通。** 需要标准 DNS/DoH 再加做子域委派（路径 B）。

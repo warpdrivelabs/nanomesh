@@ -1,7 +1,7 @@
 # 方案 C · 可扩展实体模型（人 / AI Agent / 物联网 / 车联网 / 算力网）
 
 > 需求：客户端不再只是「人」，而可能是 **AI 智能体(Agent)**、物联网设备、车联网中的车辆、算力网中的训练/推理算力服务，以及未来**可扩展的任意可寻址对象**。
-> 本文给出设计方案 + 落地实现方案，直接映射到现有 `imspace` scaffold（见 `PLAN_B_iroh_decentralized_im.md`）。
+> 本文给出设计方案 + 落地实现方案，直接映射到现有 `nmspace` scaffold（见 `PLAN_B_iroh_decentralized_im.md`）。
 > 版本：v1.0 · 日期：2026-09-21
 
 ---
@@ -89,7 +89,7 @@ Agent 是最能体现该模型价值的类型：它往往**同时**具备多种�
 
 ## 6. 寻址、发现与调度
 
-- **直连**：`connect(EntityId)`（dial-by-key），所有类型通用——已在 `im-transport::NodeEndpoint` 落地。
+- **直连**：`connect(EntityId)`（dial-by-key），所有类型通用——已在 `nm-transport::NodeEndpoint` 落地。
 - **Directory 目录**：全网可查的实体注册表（经 **iroh-docs** 最终一致同步），按 `kind 前缀 + 属性谓词 + 能力` 检索。
   例：`kind^=compute.inference AND attr.model=llama-3 AND attr.gpu>=A100 AND attr.status=idle AND cap=JOB`。
 - **Scheduler 调度/撮合（算力网核心）**：把「我要跑某推理」变成「派给服务 Y」。策略：能力匹配 → 负载/队列 → 价格 → 位置/时延 → 亲和性。训练偏「预留资源+排队」，推理偏「就近低延迟+并发」。
@@ -144,7 +144,7 @@ impl KindRegistry {
 
 ## 9. 线协议变更（proto 草图）
 
-对 `im-proto` 的**增量、向后兼容**改动（protobuf 字段号只增不改）：
+对 `nm-proto` 的**增量、向后兼容**改动（protobuf 字段号只增不改）：
 
 ```proto
 message Any { string type_url = 1; bytes value = 2; }  // 类型化载荷信封
@@ -192,21 +192,21 @@ message Grant { bytes issuer=1; bytes audience=2; string action=3; string resour
 
 | crate / 新增 | 改动 |
 |---|---|
-| `im-proto` | 加 `Any`/`Entity`/`Capability`/`Command*`/`Job*`/`Grant`；`Gram.payload` 升级为 `Any`（保留旧 tag 兼容） |
-| **`im-entity`（新）** | `EntityKind` trait、`KindRegistry`、内置类型（person/agent/device/vehicle/compute/service，feature-gated）、profile 校验 |
-| `im-core` | 新增 `Directory`（register/lookup/query）、`Rpc`、`Jobs` trait；`Deliver` 支持按**能力**路由 |
-| `im-store` | 表：entity 注册表、jobs、telemetry 保留、grants |
-| `im-federation` | 经 iroh-docs 同步**实体目录 + kind schema + 在线状态**（全网类型体系与发现） |
-| `im-gossip` | 遥测频道（按设备类/车队）、能力域频道；已有 `topic_for_channel` |
-| `im-crypto` | 供应证书、能力授权 Grant 的签发/校验、TEE/硬件证明校验钩子 |
-| `im-node` | 按**能力/kind 分发**；托管 Command/Job 处理器；内置 **Scheduler/撮合** |
-| `im-client` | 泛化：`register_as(kind, profile, capabilities)`；`rpc()`/`submit_job()`/`publish_telemetry()` |
-| **`im-agent`（新，二进制）** | 无界面的实体守护进程：给设备/车辆/算力/Agent 用（区别于 `imd` 全节点、人用 GUI） |
+| `nm-proto` | 加 `Any`/`Entity`/`Capability`/`Command*`/`Job*`/`Grant`；`Gram.payload` 升级为 `Any`（保留旧 tag 兼容） |
+| **`nm-entity`（新）** | `EntityKind` trait、`KindRegistry`、内置类型（person/agent/device/vehicle/compute/service，feature-gated）、profile 校验 |
+| `nm-core` | 新增 `Directory`（register/lookup/query）、`Rpc`、`Jobs` trait；`Deliver` 支持按**能力**路由 |
+| `nm-store` | 表：entity 注册表、jobs、telemetry 保留、grants |
+| `nm-federation` | 经 iroh-docs 同步**实体目录 + kind schema + 在线状态**（全网类型体系与发现） |
+| `nm-gossip` | 遥测频道（按设备类/车队）、能力域频道；已有 `topic_for_channel` |
+| `nm-crypto` | 供应证书、能力授权 Grant 的签发/校验、TEE/硬件证明校验钩子 |
+| `nm-node` | 按**能力/kind 分发**；托管 Command/Job 处理器；内置 **Scheduler/撮合** |
+| `nm-client` | 泛化：`register_as(kind, profile, capabilities)`；`rpc()`/`submit_job()`/`publish_telemetry()` |
+| **`nm-agent`（新，二进制）** | 无界面的实体守护进程：给设备/车辆/算力/Agent 用（区别于 `nmd` 全节点、人用 GUI） |
 
 关键 Rust 接口草图：
 
 ```rust
-// im-core
+// nm-core
 pub trait Directory {
     async fn upsert(&self, e: Entity) -> Result<()>;
     async fn lookup(&self, id: EntityId) -> Result<Option<Entity>>;
@@ -215,10 +215,10 @@ pub trait Directory {
 pub trait Rpc  { async fn call(&self, to: EntityId, cmd: Command) -> Result<CommandResult>; }
 pub trait Jobs { async fn submit(&self, to: EntityId, spec: JobSpec) -> Result<JobStream>; } // 进度流
 
-// im-node（算力网撮合）
+// nm-node（算力网撮合）
 pub trait Scheduler { async fn pick(&self, req: &ResourceReq, cap: Capability) -> Result<EntityId>; }
 
-// im-client（任意类型都用它上线）
+// nm-client（任意类型都用它上线）
 impl Client {
     pub async fn register_as(&self, kind: &str, profile: Any, caps: &[Capability]) -> Result<()>;
     pub async fn publish_telemetry(&self, topic: ChannelId, data: Any) -> Result<()>;
@@ -234,8 +234,8 @@ impl Client {
 | 里程碑 | 内容 | 增量 LOC |
 |---|---|---|
 | **E0** 协议泛化 | `Entity`/`Any`/`Capability` + `Gram.payload`→`Any`（不破坏） | +800–1,500 |
-| **E1** 类型注册 + 目录 | `im-entity` + `KindRegistry` + 内置类型 + 本地 `Directory` | +2,000–3,000 |
-| **E2** 命令 + 授权 + 设备 | Command/RPC 模式 + Grant 授权 + `im-agent`(设备遥测/命令) | +2,500–4,000 |
+| **E1** 类型注册 + 目录 | `nm-entity` + `KindRegistry` + 内置类型 + 本地 `Directory` | +2,000–3,000 |
+| **E2** 命令 + 授权 + 设备 | Command/RPC 模式 + Grant 授权 + `nm-agent`(设备遥测/命令) | +2,500–4,000 |
 | **E3** 任务 + 调度 | Job 模式 + 目录/Scheduler + 训练/推理服务对接 | +3,000–5,000 |
 | **E4** 证明 + 车队 + 全网目录 | TEE/硬件证明 + 车队 + iroh-docs 全网目录同步 | +2,500–4,500 |
 

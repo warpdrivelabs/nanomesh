@@ -1,0 +1,20 @@
+[package]
+name = "nm-echo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nm-echo"
+path = "src/main.rs"
+
+[dependencies]
+nm-client = { workspace = true }
+nm-entity = { workspace = true }
+nm-proto = { workspace = true }
+nm-transport = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }

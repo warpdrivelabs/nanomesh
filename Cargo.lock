@@ -1614,233 +1614,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "im-admind"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "argon2",
- "axum",
- "clap",
- "qrcode",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "im-agent"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "im-client",
- "im-entity",
- "im-proto",
- "im-transport",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "im-client"
-version = "0.1.0"
-dependencies = [
- "dashmap",
- "im-core",
- "im-crypto",
- "im-entity",
- "im-gossip",
- "im-proto",
- "im-transport",
- "prost",
- "thiserror 2.0.20",
- "tokio",
-]
-
-[[package]]
-name = "im-core"
-version = "0.1.0"
-dependencies = [
- "im-proto",
- "serde",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "im-crypto"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "blake3",
- "im-proto",
- "iroh",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "im-echo"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "im-client",
- "im-entity",
- "im-proto",
- "im-transport",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "im-entity"
-version = "0.1.0"
-dependencies = [
- "im-proto",
- "prost",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "im-federation"
-version = "0.1.0"
-dependencies = [
- "im-core",
- "im-proto",
- "im-transport",
- "iroh-docs",
- "thiserror 2.0.20",
- "tokio",
-]
-
-[[package]]
-name = "im-gateway"
-version = "0.1.0"
-dependencies = [
- "axum",
- "im-client",
- "im-core",
- "im-proto",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "im-gatewayd"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "im-gateway",
- "tokio",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "im-gossip"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "futures",
- "im-core",
- "im-crypto",
- "im-proto",
- "im-transport",
- "iroh",
- "iroh-gossip",
- "thiserror 2.0.20",
- "tokio",
-]
-
-[[package]]
-name = "im-node"
-version = "0.1.0"
-dependencies = [
- "dashmap",
- "im-client",
- "im-core",
- "im-crypto",
- "im-entity",
- "im-federation",
- "im-gossip",
- "im-proto",
- "im-store",
- "im-transport",
- "iroh",
- "iroh-gossip",
- "prost",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "im-proto"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "prost",
- "prost-build",
- "serde",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "im-store"
-version = "0.1.0"
-dependencies = [
- "im-core",
- "im-proto",
- "prost",
- "redb 4.3.0",
- "tempfile",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "im-transport"
-version = "0.1.0"
-dependencies = [
- "im-core",
- "im-proto",
- "iroh",
- "prost",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "imd"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "im-core",
- "im-node",
- "im-proto",
- "im-transport",
- "serde",
- "serde_json",
- "sysinfo",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2730,6 +2503,233 @@ dependencies = [
  "windows 0.62.2",
  "windows-result 0.4.1",
  "wmi",
+]
+
+[[package]]
+name = "nm-admind"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "axum",
+ "clap",
+ "qrcode",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "nm-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "nm-client",
+ "nm-entity",
+ "nm-proto",
+ "nm-transport",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "nm-client"
+version = "0.1.0"
+dependencies = [
+ "dashmap",
+ "nm-core",
+ "nm-crypto",
+ "nm-entity",
+ "nm-gossip",
+ "nm-proto",
+ "nm-transport",
+ "prost",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "nm-core"
+version = "0.1.0"
+dependencies = [
+ "nm-proto",
+ "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "nm-crypto"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "blake3",
+ "iroh",
+ "nm-proto",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "nm-echo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "nm-client",
+ "nm-entity",
+ "nm-proto",
+ "nm-transport",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "nm-entity"
+version = "0.1.0"
+dependencies = [
+ "nm-proto",
+ "prost",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "nm-federation"
+version = "0.1.0"
+dependencies = [
+ "iroh-docs",
+ "nm-core",
+ "nm-proto",
+ "nm-transport",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "nm-gateway"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "nm-client",
+ "nm-core",
+ "nm-proto",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "nm-gatewayd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "nm-gateway",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "nm-gossip"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures",
+ "iroh",
+ "iroh-gossip",
+ "nm-core",
+ "nm-crypto",
+ "nm-proto",
+ "nm-transport",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "nm-node"
+version = "0.1.0"
+dependencies = [
+ "dashmap",
+ "iroh",
+ "iroh-gossip",
+ "nm-client",
+ "nm-core",
+ "nm-crypto",
+ "nm-entity",
+ "nm-federation",
+ "nm-gossip",
+ "nm-proto",
+ "nm-store",
+ "nm-transport",
+ "prost",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "nm-proto"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "prost",
+ "prost-build",
+ "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "nm-store"
+version = "0.1.0"
+dependencies = [
+ "nm-core",
+ "nm-proto",
+ "prost",
+ "redb 4.3.0",
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "nm-transport"
+version = "0.1.0"
+dependencies = [
+ "iroh",
+ "nm-core",
+ "nm-proto",
+ "prost",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "nmd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "nm-core",
+ "nm-node",
+ "nm-proto",
+ "nm-transport",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

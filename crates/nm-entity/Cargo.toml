@@ -1,0 +1,10 @@
+[package]
+name = "nm-entity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nm-proto = { workspace = true }
+prost = "0.14"
+thiserror = { workspace = true }

@@ -1,6 +1,6 @@
-# 方案 B ·基于 iroh 的去中心化即时通讯系统（完整设计方案）
+# 方案 B ·基于 iroh 的去中心化网格系统（完整设计方案）
 
-> 目标：用 Rust 实现一套**去中心化**即时通讯系统，支持 **P2P 消息、群组、频道订阅、多服务器联邦**；QUIC 传输层放弃 s2n-quic，改用 **iroh**（其底层为 quinn）。
+> 目标：用 Rust 实现一套**去中心化**网格系统，支持 **P2P 消息、群组、频道订阅、多服务器联邦**；QUIC 传输层放弃 s2n-quic，改用 **iroh**（其底层为 quinn）。
 > 本文为完整技术方案（含架构图、时序图、里程碑与代码量估算）。所有插图为内嵌 base64 SVG。
 > 版本：v1.0 · 日期：2026-09-21
 
@@ -209,17 +209,17 @@
 ```
 im/                     # 统一 git 仓库（根，含 .gitignore / CI / xtask）
 ├── crates/
-│   ├── im-proto        # prost 消息定义、framing/codec、版本协商、ID
-│   ├── im-core         # 领域模型 entity/device/group/channel + trait
-│   ├── im-transport    # iroh endpoint/ALPN/流/身份、relay & dns 配置
-│   ├── im-store        # Store 抽象 + redb 后端（可选 sqlite/pg）
-│   ├── im-gossip       # 频道 pub/sub（封装 iroh-gossip）
-│   ├── im-federation   # 跨节点状态（封装 iroh-docs）+ 路由/重试/防环
-│   ├── im-node         # 服务端：会话/在线、路由、p2p/群/频道/联邦 服务装配
-│   ├── im-crypto       # 身份、令牌、可选 E2E(openmls)
-│   └── im-client       # 参考客户端 SDK（Rust 库）
+│   ├── nm-proto        # prost 消息定义、framing/codec、版本协商、ID
+│   ├── nm-core         # 领域模型 entity/device/group/channel + trait
+│   ├── nm-transport    # iroh endpoint/ALPN/流/身份、relay & dns 配置
+│   ├── nm-store        # Store 抽象 + redb 后端（可选 sqlite/pg）
+│   ├── nm-gossip       # 频道 pub/sub（封装 iroh-gossip）
+│   ├── nm-federation   # 跨节点状态（封装 iroh-docs）+ 路由/重试/防环
+│   ├── nm-node         # 服务端：会话/在线、路由、p2p/群/频道/联邦 服务装配
+│   ├── nm-crypto       # 身份、令牌、可选 E2E(openmls)
+│   └── nm-client       # 参考客户端 SDK（Rust 库）
 ├── bin/
-│   └── imd             # 守护进程入口：config/日志/指标/信号/supervision
+│   └── nmd             # 守护进程入口：config/日志/指标/信号/supervision
 └── xtask/              # 构建/proto 生成/多节点 e2e 编排
 ```
 
@@ -264,7 +264,7 @@ im/                     # 统一 git 仓库（根，含 .gitignore / CI / xtask�
 | 存储（抽象 + redb） | 1,500–2,500 | ↓ |
 | 认证 / 授权 | 1,000–1,800 | ↓ 身份多来自 iroh |
 | 配置 / 日志 / 指标 / 运维 | 1,200–2,000 | ≈ |
-| 装配 / 监督（imd） | 500–900 | ≈ |
+| 装配 / 监督（nmd） | 500–900 | ≈ |
 | **生产代码小计** | **≈ 16,000–26,000** | |
 | 测试（多节点集成为主，约 50%） | 8,000–13,000 | |
 | **服务端整体** | **≈ 24,000–40,000（现实目标 ~28–32K）** | |
@@ -281,7 +281,7 @@ im/                     # 统一 git 仓库（根，含 .gitignore / CI / xtask�
 - **指标**：Prometheus 暴露 `连接数 / 在线会话 / 投递延迟 / 离线队列深度 / gossip 扇出耗时 / docs 同步滞后 / 重试队列长度`。
 - **健康检查**：`/healthz` + `/readyz`；节点自检中继/DNS 可达性。
 - **优雅停机**：捕获 SIGINT/SIGTERM，停止 accept → 排空在途 → 落盘 → 退出。
-- **部署**：单二进制 `imd` + `config.toml`（密钥/密文从环境注入）；建议自托管 `iroh-relay` 与 `iroh-dns-server`。
+- **部署**：单二进制 `nmd` + `config.toml`（密钥/密文从环境注入）；建议自托管 `iroh-relay` 与 `iroh-dns-server`。
 
 ---
 
@@ -318,7 +318,7 @@ im/                     # 统一 git 仓库（根，含 .gitignore / CI / xtask�
 > 仅为方向性签名，非最终实现。
 
 ```rust
-// im-transport：节点端点
+// nm-transport：节点端点
 pub struct NodeEndpoint { /* iroh::Endpoint 封装 */ }
 impl NodeEndpoint {
     pub async fn bind(cfg: &TransportCfg) -> Result<Self>;
@@ -326,32 +326,32 @@ impl NodeEndpoint {
     pub async fn accept(&self) -> Result<Conn>;
 }
 
-// im-core：投递抽象
+// nm-core：投递抽象
 #[async_trait]
 pub trait Deliver {
     async fn deliver(&self, to: UserId, gram: Gram) -> Result<Delivery>; // 在线直达/离线入队
     async fn ack(&self, gram_id: GramId, kind: ReceiptKind) -> Result<()>;
 }
 
-// im-gossip：频道
+// nm-gossip：频道
 pub struct Channel { topic: TopicId /* blake3(channel_id) */ }
 impl Channel {
     pub async fn subscribe(&self) -> Result<SubStream>;
     pub async fn publish(&self, msg: ChannelMsg) -> Result<()>;   // O(log N) 扩散
 }
 
-// im-federation：跨节点状态
+// nm-federation：跨节点状态
 #[async_trait]
 pub trait FederationState {
     async fn home_node_of(&self, user: UserId) -> Result<NodeId>; // docs 查询
     async fn sync(&self) -> Result<()>;                           // iroh-docs 最终一致
 }
 
-// im-node：路由分发
+// nm-node：路由分发
 pub enum GramKind { Message, Receipt, Reply, GroupMessage, ChannelPublish, Relay, /* … */ }
 pub async fn route(node: &Node, conn: &Conn, gram: Gram) -> Result<()>; // 本地 or Relay 转发
 ```
 
 ---
 
-*本方案基于对现有 `imspace` 工程的分析（见同仓 `ANALYSIS.md`）。QUIC/去中心栈选型依据：iroh 1.0（2026-06 稳定发布，QUIC + NAT 穿透 + relay + 按公钥发现，含 iroh-gossip / iroh-docs），底层为 quinn（rustls / TLS 1.3）。*
+*本方案基于对现有 `nmspace` 工程的分析（见同仓 `ANALYSIS.md`）。QUIC/去中心栈选型依据：iroh 1.0（2026-06 稳定发布，QUIC + NAT 穿透 + relay + 按公钥发现，含 iroh-gossip / iroh-docs），底层为 quinn（rustls / TLS 1.3）。*

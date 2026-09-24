@@ -4,9 +4,9 @@ import type { ConnectMode, ConnectParams } from "../core";
 /** 一条保存的服务器记录（持久化到 localStorage）。 */
 export interface SavedServer {
   id: string;
-  label: string; // 用户起的名字，如 "公司 imd"
+  label: string; // 用户起的名字，如 "公司 nmd"
   mode: ConnectMode; // nat | selfhost | lan
-  node: string; // node id(hex) 或 IM_NODE_ADDR(JSON)
+  node: string; // node id(hex) 或 NM_NODE_ADDR(JSON)
   displayName: string; // 登录昵称（注册为 person 的展示名）
   relayUrls?: string[]; // 仅 selfhost
   pkarrUrl?: string; // 仅 selfhost
@@ -14,7 +14,7 @@ export interface SavedServer {
   lastConnectedAt?: number;
 }
 
-const KEY = "imspace.servers.v1";
+const KEY = "nmspace.servers.v1";
 
 function load(): SavedServer[] {
   try {

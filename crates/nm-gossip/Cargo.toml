@@ -1,0 +1,17 @@
+[package]
+name = "nm-gossip"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nm-proto = { workspace = true }
+nm-core = { workspace = true }
+nm-transport = { workspace = true }
+nm-crypto = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+iroh-gossip = { workspace = true }
+iroh = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }

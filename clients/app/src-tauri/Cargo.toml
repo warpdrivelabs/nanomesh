@@ -1,13 +1,13 @@
 [package]
-name = "imspace-app"
+name = "nmspace-app"
 version = "0.1.0"
 edition = "2024"
-description = "imspace desktop/mobile app"
+description = "nmspace desktop/mobile app"
 license = "MIT OR Apache-2.0"
 
 # 独立于后端 workspace（根 Cargo.toml 已 exclude "clients"），用 `tauri` CLI 构建。
 [lib]
-name = "imspace_app_lib"
+name = "nmspace_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -19,7 +19,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 # 原生端进程内内嵌客户端核心（iroh）：
-im-client = { path = "../../../crates/im-client" }
-im-transport = { path = "../../../crates/im-transport" }
-im-entity = { path = "../../../crates/im-entity" }
-im-proto = { path = "../../../crates/im-proto" }
+nm-client = { path = "../../../crates/nm-client" }
+nm-transport = { path = "../../../crates/nm-transport" }
+nm-entity = { path = "../../../crates/nm-entity" }
+nm-proto = { path = "../../../crates/nm-proto" }

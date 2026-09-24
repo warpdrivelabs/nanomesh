@@ -16,12 +16,12 @@ export interface Entity {
 
 export type CoreEvent = { type: "message"; msg: Message };
 
-// 连接模式（与后端 imd 对齐）。
+// 连接模式（与后端 nmd 对齐）。
 export type ConnectMode = "nat" | "selfhost" | "lan";
 
 export interface ConnectParams {
   mode: ConnectMode;
-  /** nat/selfhost: 节点公钥(hex, 64位)；lan: 节点地址(JSON, IM_NODE_ADDR)。 */
+  /** nat/selfhost: 节点公钥(hex, 64位)；lan: 节点地址(JSON, NM_NODE_ADDR)。 */
   node: string;
   displayName: string;
   // 仅 selfhost：

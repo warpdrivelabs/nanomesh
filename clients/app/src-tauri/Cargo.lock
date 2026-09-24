@@ -2107,107 +2107,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "im-client"
-version = "0.1.0"
-dependencies = [
- "dashmap",
- "im-core",
- "im-crypto",
- "im-entity",
- "im-gossip",
- "im-proto",
- "im-transport",
- "prost",
- "thiserror 2.0.20",
- "tokio",
-]
-
-[[package]]
-name = "im-core"
-version = "0.1.0"
-dependencies = [
- "im-proto",
- "serde",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "im-crypto"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "blake3",
- "im-proto",
- "iroh",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "im-entity"
-version = "0.1.0"
-dependencies = [
- "im-proto",
- "prost",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "im-gossip"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "futures",
- "im-core",
- "im-crypto",
- "im-proto",
- "im-transport",
- "iroh",
- "iroh-gossip",
- "thiserror 2.0.20",
- "tokio",
-]
-
-[[package]]
-name = "im-proto"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "prost",
- "prost-build",
- "serde",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "im-transport"
-version = "0.1.0"
-dependencies = [
- "im-core",
- "im-proto",
- "iroh",
- "prost",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "imspace-app"
-version = "0.1.0"
-dependencies = [
- "im-client",
- "im-entity",
- "im-proto",
- "im-transport",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tokio",
-]
-
-[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3200,6 +3099,107 @@ name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
+
+[[package]]
+name = "nm-client"
+version = "0.1.0"
+dependencies = [
+ "dashmap",
+ "nm-core",
+ "nm-crypto",
+ "nm-entity",
+ "nm-gossip",
+ "nm-proto",
+ "nm-transport",
+ "prost",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "nm-core"
+version = "0.1.0"
+dependencies = [
+ "nm-proto",
+ "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "nm-crypto"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "blake3",
+ "iroh",
+ "nm-proto",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "nm-entity"
+version = "0.1.0"
+dependencies = [
+ "nm-proto",
+ "prost",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "nm-gossip"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures",
+ "iroh",
+ "iroh-gossip",
+ "nm-core",
+ "nm-crypto",
+ "nm-proto",
+ "nm-transport",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "nm-proto"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "prost",
+ "prost-build",
+ "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "nm-transport"
+version = "0.1.0"
+dependencies = [
+ "iroh",
+ "nm-core",
+ "nm-proto",
+ "prost",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "nmspace-app"
+version = "0.1.0"
+dependencies = [
+ "nm-client",
+ "nm-entity",
+ "nm-proto",
+ "nm-transport",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tokio",
+]
 
 [[package]]
 name = "noq"

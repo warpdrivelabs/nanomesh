@@ -1,10 +1,10 @@
-# imspace 项目分析报告
+# nmspace 项目分析报告
 
 > 分析日期：2026-09-21 · 工具链：rustc 1.98.0 · 分析范围：工作区全部 crate
 
 ## 一、结论先行
 
-`imspace` 是一套用 Rust 编写的**去中心化即时通讯（IM）系统**工作区，内部品牌为 **Bitcomm**（配置模块又叫 Nanomesh），核心是基于 QUIC（s2n-quic）的服务端，采用「planet/entity/device」宇宙学隐喻建模，支持 p2p/群组/客户端-服务端/服务端间联邦四类路由。
+`nmspace` 是一套用 Rust 编写的**去中心化即时通讯（IM）系统**工作区，内部品牌为 **Bitcomm**（配置模块又叫 Nanomesh），核心是基于 QUIC（s2n-quic）的服务端，采用「planet/entity/device」宇宙学隐喻建模，支持 p2p/群组/客户端-服务端/服务端间联邦四类路由。
 
 **整体判断：这是一个处于「重构中途」的早期原型，不是一个可运行的服务。** 工作区能通过 `cargo check`（退出码 0，31 条 warning），但：主程序 `main` 90% 被注释、跑起来什么都不做；消息投递、联邦、桥接全部是 `//todo` 或空桩；一次未完成的「抽取公共库」重构在磁盘上留下了约 4,200 行（≈37%）永不编译的死代码副本。此外还存在**严重的版本控制卫生问题**、**多处必然 panic 的正确性缺陷**、以及 **Web 端零鉴权 + 硬编码密钥**的安全问题。
 
@@ -31,7 +31,7 @@
 
 ### A. 版本控制与仓库卫生 —— 最严重
 
-- **根目录 `imspace` 有 0 个 git 追踪文件**，无根 `.gitignore`、无 `.gitmodules`。
+- **根目录 `nmspace` 有 0 个 git 追踪文件**，无根 `.gitignore`、无 `.gitmodules`。
 - 内嵌 **7 个各自独立的 `.git` 仓库**（均指向 `github.com/bitcomm-io/*`），**上一次提交都在约 2 年前**，且积压大量未提交改动：`atomlinksys` **85 个脏文件**、`bitutils` 27、`bitwave` 23、`bitwebsvr` 17、`nanomesh` 6；`sqlite_manager` 干脆从未提交。
   - 后果：**当前真实代码只存在于这块本地磁盘上、未提交、已 2 年**——一旦磁盘损坏或误删即全部丢失，且无法追溯变更。
 - **`certs/` 里存有真实私钥**：`key.pem`、`key.der`、`mtls/{client,server}-key.pem`、`untrusted_key.pem`（`-----BEGIN PRIVATE KEY-----`）。虽是测试证书，但混在源码树里极易被误提交/泄露。
@@ -71,7 +71,7 @@
 
 ### F. 许可与第三方
 
-- **bitwave 与 IM 系统毫无关系**：确认是 Vadoola/Tomotroid 番茄钟的分支（脚手架来自 SurrealismUI 模板），`grep bitcomm|atombase|redis|jwt` 在其源码里零命中。其 `LICENSE` 是**未填写的 MIT 模板**（`Copyright (c) <year> <copyright holders>`，法律上无效），上游 Tomotroid/Pomotroid 出处也未在树内体现。**它不应留在 `imspace` 仓库里。**
+- **bitwave 与 IM 系统毫无关系**：确认是 Vadoola/Tomotroid 番茄钟的分支（脚手架来自 SurrealismUI 模板），`grep bitcomm|atombase|redis|jwt` 在其源码里零命中。其 `LICENSE` 是**未填写的 MIT 模板**（`Copyright (c) <year> <copyright holders>`，法律上无效），上游 Tomotroid/Pomotroid 出处也未在树内体现。**它不应留在 `nmspace` 仓库里。**
 - **bitwebsvr 的 `admin/` 前端是第三方商业模板**（来自 17sucai.com，附带「未经许可不得擅自商业使用」说明）——**存在再分发/授权风险**。
 
 ### G. 构建与工程化
@@ -88,7 +88,7 @@
 ## 四、改进建议（按优先级）
 
 ### 🔴 立即（本周内，止血）
-1. **建立统一版本控制**：在 `imspace` 根建单一 git 仓库并**立即提交当前全部改动**（2 年积压 + 85 个脏文件正裸奔）。决定内嵌子仓库的去留——要么正式转为 `git submodule`，要么合并为单仓库 monorepo（推荐后者）。
+1. **建立统一版本控制**：在 `nmspace` 根建单一 git 仓库并**立即提交当前全部改动**（2 年积压 + 85 个脏文件正裸奔）。决定内嵌子仓库的去留——要么正式转为 `git submodule`，要么合并为单仓库 monorepo（推荐后者）。
 2. **清理机密与杂物**：把 `certs/` 私钥移出源码树（改由部署时注入）；加根 `.gitignore`（忽略 `target/`、`.DS_Store`、`.idea/`、`*.pid`、`certs/*.pem|*.der`）；删除 `bitcomm.pid`、空 `config.toml`。
 3. **替换所有占位密钥**：`nanomesh_config.toml` 的 `jwt_secret`/DB 密码等一律改为从环境变量读取，仓库内只保留 `*.example` 模板。
 4. **删除 bitwebsvr 的孤儿鉴权脚本**（`jwt.rs`、`usermanager*.rs`、`jwt*.js`）——它们不编译、无人用，却是硬编码密钥/静态盐/明文密码的复制源，属净负债。

@@ -1,22 +1,22 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/im-proto",
-    "crates/im-core",
-    "crates/im-transport",
-    "crates/im-store",
-    "crates/im-gossip",
-    "crates/im-federation",
-    "crates/im-crypto",
-    "crates/im-entity",
-    "crates/im-node",
-    "crates/im-client",
-    "crates/im-gateway",
-    "bin/imd",
-    "bin/im-gatewayd",
-    "bin/im-agent",
-    "bin/im-echo",
-    "bin/im-admind",
+    "crates/nm-proto",
+    "crates/nm-core",
+    "crates/nm-transport",
+    "crates/nm-store",
+    "crates/nm-gossip",
+    "crates/nm-federation",
+    "crates/nm-crypto",
+    "crates/nm-entity",
+    "crates/nm-node",
+    "crates/nm-client",
+    "crates/nm-gateway",
+    "bin/nmd",
+    "bin/nm-gatewayd",
+    "bin/nm-agent",
+    "bin/nm-echo",
+    "bin/nm-admind",
     "xtask",
 ]
 exclude = ["old_space", "clients"]
@@ -29,17 +29,17 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 # --- internal ---
-im-proto      = { path = "crates/im-proto" }
-im-core       = { path = "crates/im-core" }
-im-transport  = { path = "crates/im-transport" }
-im-store      = { path = "crates/im-store" }
-im-gossip     = { path = "crates/im-gossip" }
-im-federation = { path = "crates/im-federation" }
-im-crypto     = { path = "crates/im-crypto" }
-im-entity     = { path = "crates/im-entity" }
-im-node       = { path = "crates/im-node" }
-im-client     = { path = "crates/im-client" }
-im-gateway    = { path = "crates/im-gateway" }
+nm-proto      = { path = "crates/nm-proto" }
+nm-core       = { path = "crates/nm-core" }
+nm-transport  = { path = "crates/nm-transport" }
+nm-store      = { path = "crates/nm-store" }
+nm-gossip     = { path = "crates/nm-gossip" }
+nm-federation = { path = "crates/nm-federation" }
+nm-crypto     = { path = "crates/nm-crypto" }
+nm-entity     = { path = "crates/nm-entity" }
+nm-node       = { path = "crates/nm-node" }
+nm-client     = { path = "crates/nm-client" }
+nm-gateway    = { path = "crates/nm-gateway" }
 # --- runtime / util ---
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }

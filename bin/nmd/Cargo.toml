@@ -1,0 +1,25 @@
+[package]
+name = "nmd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nmd"
+path = "src/main.rs"
+
+[dependencies]
+nm-node = { workspace = true }
+nm-transport = { workspace = true }
+nm-proto = { workspace = true }
+nm-core = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+axum = { workspace = true }
+sysinfo = "0.33"
+toml = "0.8"

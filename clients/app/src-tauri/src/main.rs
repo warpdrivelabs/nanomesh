@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    imspace_app_lib::run();
+    nmspace_app_lib::run();
 }

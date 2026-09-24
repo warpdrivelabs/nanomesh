@@ -162,8 +162,8 @@ export function ConnectScreen() {
         <header className="panel__brand">
           <div className="logo">im</div>
           <div>
-            <h1>imspace</h1>
-            <p>去中心即时通讯 · 连接一个 imd 节点</p>
+            <h1>nmspace</h1>
+            <p>去中心网格 · 连接一个 nmd 节点</p>
           </div>
         </header>
 
@@ -182,7 +182,7 @@ export function ConnectScreen() {
               <div className="empty">
                 <div className="empty__icon">{Icon.server}</div>
                 <p className="empty__title">还没有保存的服务器</p>
-                <p className="empty__sub">添加一个 imd 节点，下次一键连接（同网/跨网自动切换）</p>
+                <p className="empty__sub">添加一个 nmd 节点，下次一键连接（同网/跨网自动切换）</p>
                 <button className="btn btn--primary" onClick={() => setDraft(emptyDraft())}>
                   {Icon.plus}<span>添加第一个</span>
                 </button>
@@ -248,7 +248,7 @@ export function ConnectScreen() {
             <div className="form">
               <label className="field">
                 <span className="field__label">名称</span>
-                <input placeholder="例如：公司 imd / 家里的节点" value={draft.label} onChange={(e) => patch({ label: e.target.value })} />
+                <input placeholder="例如：公司 nmd / 家里的节点" value={draft.label} onChange={(e) => patch({ label: e.target.value })} />
               </label>
 
               <div className="field">
@@ -270,11 +270,11 @@ export function ConnectScreen() {
 
               <label className="field">
                 <span className="field__label">
-                  {draft.mode === "lan" ? "节点地址 (IM_NODE_ADDR / JSON)" : "节点公钥 (IM_NODE_ID) 或完整地址"}
+                  {draft.mode === "lan" ? "节点地址 (NM_NODE_ADDR / JSON)" : "节点公钥 (NM_NODE_ID) 或完整地址"}
                 </span>
                 <textarea
                   rows={draft.mode === "lan" ? 3 : 2}
-                  placeholder={draft.mode === "lan" ? '{"id":"…","addrs":[…]}' : "64 位十六进制公钥，或粘贴完整 IM_NODE_ADDR"}
+                  placeholder={draft.mode === "lan" ? '{"id":"…","addrs":[…]}' : "64 位十六进制公钥，或粘贴完整 NM_NODE_ADDR"}
                   value={draft.node}
                   onChange={(e) => patch({ node: e.target.value })}
                 />

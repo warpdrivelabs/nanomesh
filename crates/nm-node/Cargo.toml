@@ -1,0 +1,29 @@
+[package]
+name = "nm-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nm-proto = { workspace = true }
+nm-core = { workspace = true }
+nm-transport = { workspace = true }
+nm-store = { workspace = true }
+nm-gossip = { workspace = true }
+nm-federation = { workspace = true }
+nm-crypto = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+dashmap = { workspace = true }
+iroh = { workspace = true }
+iroh-gossip = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+prost = "0.14"
+
+[dev-dependencies]
+nm-client = { workspace = true }
+nm-entity = { workspace = true }
+tempfile = "3"
+tracing-subscriber = { workspace = true }

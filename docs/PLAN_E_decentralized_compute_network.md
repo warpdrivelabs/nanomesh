@@ -1,22 +1,22 @@
-# 去中心化算力网络方案（基于 imspace 通讯网络）
+# 去中心化算力网络方案（基于 nmspace 通讯网络）
 
-> 在 **imspace 去中心即时通讯网络**（iroh + gossip + 联邦 + 能力授权 + 黑名单）之上，构建一个
+> 在 **nmspace 去中心网格网络**（iroh + gossip + 联邦 + 能力授权 + 黑名单）之上，构建一个
 > **无需注册、按公钥参与、经济学保证、以推理算力为主** 的去中心算力网络（DePIN）。
-> 算力与数据在链下(imspace)流动；一条**现成公链**只承载代币/托管/质押/罚没/结算/仲裁。
+> 算力与数据在链下(nmspace)流动；一条**现成公链**只承载代币/托管/质押/罚没/结算/仲裁。
 
 | 关键设计选择 | 取值 | 说明 |
 |---|---|---|
 | 验证/安全 | **经济学保证** | 质押 + 罚没 + 随机抽检；非密码学(zk)、非硬件(TEE) |
 | 区块链 | **现成公链** | 不自建 L1；用 L2 / Solana / 应用链发币与结算 |
 | 算力类型 | **推理为主，训练为辅** | 推理短、可重放、易抽检；训练弱保证、受限开放 |
-| 准入 | **无白名单，只设黑名单** | 承自 imspace：默认放行，仅拒绝名单内公钥 |
-| 身份 | **公钥即身份，无需注册** | 承自 imspace：Ed25519 / iroh EndpointId |
+| 准入 | **无白名单，只设黑名单** | 承自 nmspace：默认放行，仅拒绝名单内公钥 |
+| 身份 | **公钥即身份，无需注册** | 承自 nmspace：Ed25519 / iroh EndpointId |
 
 ---
 
 ## 目录
 1. [设计目标与非目标](#1)
-2. [与 imspace 的关系：能力复用](#2)
+2. [与 nmspace 的关系：能力复用](#2)
 3. [参与角色与身份模型](#3)
 4. [实体、目录与发现/撮合](#4)
 5. [任务全生命周期](#5)
@@ -24,7 +24,7 @@
 7. [经济与安全层](#7)
 8. [可验证计算：经济学保证下的推理验证](#8)
 9. [链上/链下边界与预言机](#9)
-10. [协议扩展（im.proto / GramKind / gossip 频道）](#10)
+10. [协议扩展（nm.proto / GramKind / gossip 频道）](#10)
 11. [组件与代码落地（新增 crate）](#11)
 12. [反女巫 / 声誉 / 冷启动](#12)
 13. [训练类算力（辅）](#13)
@@ -40,7 +40,7 @@
 
 **目标**
 - **无许可接入**：任何持合法公钥的实体（人 / 设备 / 智能体 / **算力服务** / 车辆）皆可作为买方或提供方加入，无需账户注册。
-- **穿透 NAT 的算力直供**：家用/机房 GPU 多在 NAT 后，复用 imspace 的 nat/selfhost 打洞，让买方直连提供方跑推理。
+- **穿透 NAT 的算力直供**：家用/机房 GPU 多在 NAT 后，复用 nmspace 的 nat/selfhost 打洞，让买方直连提供方跑推理。
 - **可信计量与结算**：在不可信提供方上，用**经济学**手段（质押+抽检+罚没）保证“算力如实提供且大致正确”，并在链上完成价值结算。
 - **自主可控**：中继/发现可自建（selfhost）；代币用现成公链；不依赖任何中心化调度器。
 
@@ -53,23 +53,23 @@
 ---
 
 <a id="2"></a>
-## 2. 与 imspace 的关系：能力复用
+## 2. 与 nmspace 的关系：能力复用
 
-算力网络 = **imspace 通讯底座（复用）** + **市场控制面（扩展）** + **执行面（新增）** + **结算面（现成公链，新增）**。
+算力网络 = **nmspace 通讯底座（复用）** + **市场控制面（扩展）** + **执行面（新增）** + **结算面（现成公链，新增）**。
 
 <p align="center"><img alt="分层架构" width="960" style="max-width:100%;height:auto" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5ODAgNjIwIiB3aWR0aD0iOTgwIiBoZWlnaHQ9IjYyMCI+PGRlZnM+PG1hcmtlciBpZD0ibS1pbmQiIG1hcmtlcldpZHRoPSIxMCIgbWFya2VySGVpZ2h0PSIxMCIgcmVmWD0iOCIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIiBtYXJrZXJVbml0cz0ic3Ryb2tlV2lkdGgiPjxwYXRoIGQ9Ik0wLDAgTDgsMyBMMCw2IFoiIGZpbGw9IiM2MzY2ZjEiLz48L21hcmtlcj48bWFya2VyIGlkPSJtLXZpbyIgbWFya2VyV2lkdGg9IjEwIiBtYXJrZXJIZWlnaHQ9IjEwIiByZWZYPSI4IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iIG1hcmtlclVuaXRzPSJzdHJva2VXaWR0aCI+PHBhdGggZD0iTTAsMCBMOCwzIEwwLDYgWiIgZmlsbD0iIzhiNWNmNiIvPjwvbWFya2VyPjxtYXJrZXIgaWQ9Im0tZW1lIiBtYXJrZXJXaWR0aD0iMTAiIG1hcmtlckhlaWdodD0iMTAiIHJlZlg9IjgiIHJlZlk9IjMiIG9yaWVudD0iYXV0byIgbWFya2VyVW5pdHM9InN0cm9rZVdpZHRoIj48cGF0aCBkPSJNMCwwIEw4LDMgTDAsNiBaIiBmaWxsPSIjMTBiOTgxIi8+PC9tYXJrZXI+PG1hcmtlciBpZD0ibS1za3kiIG1hcmtlcldpZHRoPSIxMCIgbWFya2VySGVpZ2h0PSIxMCIgcmVmWD0iOCIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIiBtYXJrZXJVbml0cz0ic3Ryb2tlV2lkdGgiPjxwYXRoIGQ9Ik0wLDAgTDgsMyBMMCw2IFoiIGZpbGw9IiMwZWE1ZTkiLz48L21hcmtlcj48bWFya2VyIGlkPSJtLWFtYiIgbWFya2VyV2lkdGg9IjEwIiBtYXJrZXJIZWlnaHQ9IjEwIiByZWZYPSI4IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iIG1hcmtlclVuaXRzPSJzdHJva2VXaWR0aCI+PHBhdGggZD0iTTAsMCBMOCwzIEwwLDYgWiIgZmlsbD0iI2Y1OWUwYiIvPjwvbWFya2VyPjxtYXJrZXIgaWQ9Im0tc2xhIiBtYXJrZXJXaWR0aD0iMTAiIG1hcmtlckhlaWdodD0iMTAiIHJlZlg9IjgiIHJlZlk9IjMiIG9yaWVudD0iYXV0byIgbWFya2VyVW5pdHM9InN0cm9rZVdpZHRoIj48cGF0aCBkPSJNMCwwIEw4LDMgTDAsNiBaIiBmaWxsPSIjNDc1NTY5Ii8+PC9tYXJrZXI+PG1hcmtlciBpZD0ibS1yb3MiIG1hcmtlcldpZHRoPSIxMCIgbWFya2VySGVpZ2h0PSIxMCIgcmVmWD0iOCIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIiBtYXJrZXJVbml0cz0ic3Ryb2tlV2lkdGgiPjxwYXRoIGQ9Ik0wLDAgTDgsMyBMMCw2IFoiIGZpbGw9IiNmNDNmNWUiLz48L21hcmtlcj48bWFya2VyIGlkPSJtLW11dCIgbWFya2VyV2lkdGg9IjEwIiBtYXJrZXJIZWlnaHQ9IjEwIiByZWZYPSI4IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iIG1hcmtlclVuaXRzPSJzdHJva2VXaWR0aCI+PHBhdGggZD0iTTAsMCBMOCwzIEwwLDYgWiIgZmlsbD0iIzY0NzQ4YiIvPjwvbWFya2VyPjwvZGVmcz48cmVjdCB4PSIwIiB5PSIwIiB3aWR0aD0iOTgwIiBoZWlnaHQ9IjYyMCIgcng9IjE4IiBmaWxsPSIjZjhmYWZjIi8+PHRleHQgeD0iNDAiIHk9IjQwIiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTgiIGZpbGw9IiMxZTI5M2IiIHRleHQtYW5jaG9yPSJzdGFydCIgZm9udC13ZWlnaHQ9IjcwMCI+5Zu+IDEgwrcg5Y675Lit5b+D5YyW566X5Yqb572R57uc77ya5YiG5bGC5p625p6E77yI5aSN55SoIGltc3BhY2Ug6YCa6K6v5bqV5bqnICsg5paw5aKe57uT566X6Z2i77yJPC90ZXh0Pjx0ZXh0IHg9IjQwIiB5PSI2MSIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEyIiBmaWxsPSIjNjQ3NDhiIiB0ZXh0LWFuY2hvcj0ic3RhcnQiIGZvbnQtd2VpZ2h0PSI0MDAiPue7vz3nm7TmjqXlpI3nlKggaW1zcGFjZSDnjrDmnInog73lipvvvJvok5095Zyo5YW25LiK5omp5bGV77yb57SrPeaWsOWinu+8m+apmT3pk77kuIrnu5PnrpflsYLjgII8L3RleHQ+PHJlY3QgeD0iNDAiIHk9IjQ3MCIgd2lkdGg9IjY2MCIgaGVpZ2h0PSI5MCIgcng9IjEyIiBmaWxsPSIjZmZmZmZmIiBzdHJva2U9IiMxMGI5ODEiIHN0cm9rZS13aWR0aD0iMS44Ii8+PHJlY3QgeD0iNDAiIHk9IjQ3MCIgd2lkdGg9IjY2MCIgaGVpZ2h0PSIyNiIgcng9IjEyIiBmaWxsPSIjZWNmZGY1IiBzdHJva2U9IiMxMGI5ODEiIHN0cm9rZS13aWR0aD0iMCIvPjx0ZXh0IHg9IjU2IiB5PSI0ODgiIGZvbnQtZmFtaWx5PSItYXBwbGUtc3lzdGVtLEJsaW5rTWFjU3lzdGVtRm9udCwnU2Vnb2UgVUknLFJvYm90byxIZWx2ZXRpY2EsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMi41IiBmaWxsPSIjMTBiOTgxIiB0ZXh0LWFuY2hvcj0ic3RhcnQiIGZvbnQtd2VpZ2h0PSI3MDAiPkwxIOWfuuehgOWxgiDCtyBpbXNwYWNlL2lyb2jvvIjlpI3nlKjvvIk8L3RleHQ+PHRleHQgeD0iNTYiIHk9IjUyMiIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjExIiBmaWxsPSIjNDc1NTY5IiB0ZXh0LWFuY2hvcj0ic3RhcnQiIGZvbnQtd2VpZ2h0PSI1MDAiPui6q+S7vSBFZDI1NTE5IOWFrOmSpcK35peg5rOo5YaMICAgfCAgIFFVSUMgKyBOQVQg56m/6YCPIG5hdC9zZWxmaG9zdC9sYW4gICB8ICAg6buR5ZCN5Y2V5YeG5YWlKOaXoOeZveWQjeWNlSk8L3RleHQ+PHJlY3QgeD0iNDAiIHk9IjM2MCIgd2lkdGg9IjY2MCIgaGVpZ2h0PSI5MCIgcng9IjEyIiBmaWxsPSIjZmZmZmZmIiBzdHJva2U9IiMwZWE1ZTkiIHN0cm9rZS13aWR0aD0iMS44Ii8+PHJlY3QgeD0iNDAiIHk9IjM2MCIgd2lkdGg9IjY2MCIgaGVpZ2h0PSIyNiIgcng9IjEyIiBmaWxsPSIjZTBmMmZlIiBzdHJva2U9IiMwZWE1ZTkiIHN0cm9rZS13aWR0aD0iMCIvPjx0ZXh0IHg9IjU2IiB5PSIzNzgiIGZvbnQtZmFtaWx5PSItYXBwbGUtc3lzdGVtLEJsaW5rTWFjU3lzdGVtRm9udCwnU2Vnb2UgVUknLFJvYm90byxIZWx2ZXRpY2EsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMi41IiBmaWxsPSIjMGVhNWU5IiB0ZXh0LWFuY2hvcj0ic3RhcnQiIGZvbnQtd2VpZ2h0PSI3MDAiPkwyIOWPkeeOsOS4jui3r+eUsSDCtyBpbXNwYWNl77yI5aSN55SoL+aJqeWxle+8iTwvdGV4dD48dGV4dCB4PSI1NiIgeT0iNDEyIiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM0NzU1NjkiIHRleHQtYW5jaG9yPSJzdGFydCIgZm9udC13ZWlnaHQ9IjUwMCI+5a6e5L2T55uu5b2VIGNvbXB1dGUuaW5mZXJlbmNlICAgfCAgIOWNleaSrS/lkb3ku6RSUEMgKyBHcmFudCDog73lipvmjojmnYMgICB8ICAgczJzIOiBlOmCpiAgIHwgICByZWRiIOWtmOWCqC/nprvnur/pmJ/liJc8L3RleHQ+PHJlY3QgeD0iNDAiIHk9IjI1MCIgd2lkdGg9IjY2MCIgaGVpZ2h0PSI5MCIgcng9IjEyIiBmaWxsPSIjZmZmZmZmIiBzdHJva2U9IiM2MzY2ZjEiIHN0cm9rZS13aWR0aD0iMS44Ii8+PHJlY3QgeD0iNDAiIHk9IjI1MCIgd2lkdGg9IjY2MCIgaGVpZ2h0PSIyNiIgcng9IjEyIiBmaWxsPSIjZWVmMmZmIiBzdHJva2U9IiM2MzY2ZjEiIHN0cm9rZS13aWR0aD0iMCIvPjx0ZXh0IHg9IjU2IiB5PSIyNjgiIGZvbnQtZmFtaWx5PSItYXBwbGUtc3lzdGVtLEJsaW5rTWFjU3lzdGVtRm9udCwnU2Vnb2UgVUknLFJvYm90byxIZWx2ZXRpY2EsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMi41IiBmaWxsPSIjNjM2NmYxIiB0ZXh0LWFuY2hvcj0ic3RhcnQiIGZvbnQtd2VpZ2h0PSI3MDAiPkwzIOW4guWcuuaOp+WItumdoiDCtyBnb3NzaXAg6aKR6YGT77yI5omp5bGV77yJPC90ZXh0Pjx0ZXh0IHg9IjU2IiB5PSIzMDIiIGZvbnQtZmFtaWx5PSItYXBwbGUtc3lzdGVtLEJsaW5rTWFjU3lzdGVtRm9udCwnU2Vnb2UgVUknLFJvYm90byxIZWx2ZXRpY2EsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzQ3NTU2OSIgdGV4dC1hbmNob3I9InN0YXJ0IiBmb250LXdlaWdodD0iNTAwIj7ku7vliqHlhazlkYrmnb8gam9iLWJvYXJkICAgfCAgIOaKpeS7ty/nq57ku7cgYmlkICAgfCAgIOW/g+i3sy/lnKjnur8gaGVhcnRiZWF0ICAgfCAgIOS7t+agvMK35a656YeP55yL5p2/PC90ZXh0PjxyZWN0IHg9IjQwIiB5PSIxNDAiIHdpZHRoPSI2NjAiIGhlaWdodD0iOTAiIHJ4PSIxMiIgZmlsbD0iI2ZmZmZmZiIgc3Ryb2tlPSIjOGI1Y2Y2IiBzdHJva2Utd2lkdGg9IjEuOCIvPjxyZWN0IHg9IjQwIiB5PSIxNDAiIHdpZHRoPSI2NjAiIGhlaWdodD0iMjYiIHJ4PSIxMiIgZmlsbD0iI2Y1ZjNmZiIgc3Ryb2tlPSIjOGI1Y2Y2IiBzdHJva2Utd2lkdGg9IjAiLz48dGV4dCB4PSI1NiIgeT0iMTU4IiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTIuNSIgZmlsbD0iIzhiNWNmNiIgdGV4dC1hbmNob3I9InN0YXJ0IiBmb250LXdlaWdodD0iNzAwIj5MNCDmiafooYzpnaIgwrcg566X5Yqb5Luj55CG77yI5paw5aKe77yJPC90ZXh0Pjx0ZXh0IHg9IjU2IiB5PSIxOTIiIGZvbnQtZmFtaWx5PSItYXBwbGUtc3lzdGVtLEJsaW5rTWFjU3lzdGVtRm9udCwnU2Vnb2UgVUknLFJvYm90byxIZWx2ZXRpY2EsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzQ3NTU2OSIgdGV4dC1hbmNob3I9InN0YXJ0IiBmb250LXdlaWdodD0iNTAwIj5HUFUg5o6o55CG5omn6KGMKHZMTE0vbGxhbWEuY3Bw4oCmKSAgIHwgICDorqHph48gbWV0ZXJpbmcgICB8ICAg57uT5p6c5Lqk5LuYKGlyb2gtYmxvYnMg5Y+v6YCJKTwvdGV4dD48bGluZSB4MT0iMzcwLjAiIHkxPSI0NzAiIHgyPSIzNzAuMCIgeTI9IjQ0NiIgc3Ryb2tlPSIjNDc1NTY5IiBzdHJva2Utd2lkdGg9IjEuNCIgbWFya2VyLWVuZD0idXJsKCNtLXNsYSkiLz48bGluZSB4MT0iMzcwLjAiIHkxPSIzNjAiIHgyPSIzNzAuMCIgeTI9IjMzNiIgc3Ryb2tlPSIjNDc1NTY5IiBzdHJva2Utd2lkdGg9IjEuNCIgbWFya2VyLWVuZD0idXJsKCNtLXNsYSkiLz48bGluZSB4MT0iMzcwLjAiIHkxPSIyNTAiIHgyPSIzNzAuMCIgeTI9IjIyNiIgc3Ryb2tlPSIjNDc1NTY5IiBzdHJva2Utd2lkdGg9IjEuNCIgbWFya2VyLWVuZD0idXJsKCNtLXNsYSkiLz48cmVjdCB4PSI3MzAiIHk9IjE0MCIgd2lkdGg9IjIxMCIgaGVpZ2h0PSI0MTAiIHJ4PSIxMiIgZmlsbD0iI2ZmZmZmZiIgc3Ryb2tlPSIjZjU5ZTBiIiBzdHJva2Utd2lkdGg9IjEuOCIvPjxyZWN0IHg9IjczMCIgeT0iMTQwIiB3aWR0aD0iMjEwIiBoZWlnaHQ9IjI4IiByeD0iMTIiIGZpbGw9IiNmZWYzYzciIHN0cm9rZT0iI2Y1OWUwYiIgc3Ryb2tlLXdpZHRoPSIwIi8+PHRleHQgeD0iODM1LjAiIHk9IjE1OSIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEyLjUiIGZpbGw9IiNhMTYyMDciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSI3MDAiPue7k+eul+mdoiDCtyDnjrDmiJDlhazpk77vvIjmlrDlop7vvIk8L3RleHQ+PHJlY3QgeD0iNzQ2IiB5PSIxODYiIHdpZHRoPSIxNzgiIGhlaWdodD0iMzQiIHJ4PSIxNy4wIiBmaWxsPSIjZmVmM2M3IiBzdHJva2U9IiNhMTYyMDciIHN0cm9rZS13aWR0aD0iMS4xIi8+PHRleHQgeD0iODM1LjAiIHk9IjIwNy4wIiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiNhMTYyMDciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSI2MDAiPuS7o+W4gSBUb2tlbihFUkMtMjAvU1BMKTwvdGV4dD48cmVjdCB4PSI3NDYiIHk9IjI0NCIgd2lkdGg9IjE3OCIgaGVpZ2h0PSIzNCIgcng9IjE3LjAiIGZpbGw9IiNmZWYzYzciIHN0cm9rZT0iI2ExNjIwNyIgc3Ryb2tlLXdpZHRoPSIxLjEiLz48dGV4dCB4PSI4MzUuMCIgeT0iMjY1LjAiIGZvbnQtZmFtaWx5PSItYXBwbGUtc3lzdGVtLEJsaW5rTWFjU3lzdGVtRm9udCwnU2Vnb2UgVUknLFJvYm90byxIZWx2ZXRpY2EsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMSIgZmlsbD0iI2ExNjIwNyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9IjYwMCI+5omY566hIEVzY3JvdyjkubDmlrnpooTku5gpPC90ZXh0PjxyZWN0IHg9Ijc0NiIgeT0iMzAyIiB3aWR0aD0iMTc4IiBoZWlnaHQ9IjM0IiByeD0iMTcuMCIgZmlsbD0iI2ZlZjNjNyIgc3Ryb2tlPSIjYTE2MjA3IiBzdHJva2Utd2lkdGg9IjEuMSIvPjx0ZXh0IHg9IjgzNS4wIiB5PSIzMjMuMCIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjExIiBmaWxsPSIjYTE2MjA3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iNjAwIj7otKjmirwgU3Rha2Uo5o+Q5L6b5pa55oq15oq8KTwvdGV4dD48cmVjdCB4PSI3NDYiIHk9IjM2MCIgd2lkdGg9IjE3OCIgaGVpZ2h0PSIzNCIgcng9IjE3LjAiIGZpbGw9IiNmZWYzYzciIHN0cm9rZT0iI2ExNjIwNyIgc3Ryb2tlLXdpZHRoPSIxLjEiLz48dGV4dCB4PSI4MzUuMCIgeT0iMzgxLjAiIGZvbnQtZmFtaWx5PSItYXBwbGUtc3lzdGVtLEJsaW5rTWFjU3lzdGVtRm9udCwnU2Vnb2UgVUknLFJvYm90byxIZWx2ZXRpY2EsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMSIgZmlsbD0iI2ExNjIwNyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9IjYwMCI+572a5rKhIFNsYXNoKOS9nOW8iuaDqee9mik8L3RleHQ+PHJlY3QgeD0iNzQ2IiB5PSI0MTgiIHdpZHRoPSIxNzgiIGhlaWdodD0iMzQiIHJ4PSIxNy4wIiBmaWxsPSIjZmVmM2M3IiBzdHJva2U9IiNhMTYyMDciIHN0cm9rZS13aWR0aD0iMS4xIi8+PHRleHQgeD0iODM1LjAiIHk9IjQzOS4wIiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiNhMTYyMDciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSI2MDAiPue7k+eulyBTZXR0bGVtZW50KOaMiei9ruasoSk8L3RleHQ+PHJlY3QgeD0iNzQ2IiB5PSI0NzYiIHdpZHRoPSIxNzgiIGhlaWdodD0iMzQiIHJ4PSIxNy4wIiBmaWxsPSIjZmVmM2M3IiBzdHJva2U9IiNhMTYyMDciIHN0cm9rZS13aWR0aD0iMS4xIi8+PHRleHQgeD0iODM1LjAiIHk9IjQ5Ny4wIiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiNhMTYyMDciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSI2MDAiPuS6ieiuriBEaXNwdXRlKOaMkeaImOS7suijgSk8L3RleHQ+PHJlY3QgeD0iNzMwIiB5PSI0NjgiIHdpZHRoPSIyMTAiIGhlaWdodD0iNzIiIHJ4PSIxMiIgZmlsbD0iI2ZmZjFmMiIgc3Ryb2tlPSIjZjQzZjVlIiBzdHJva2Utd2lkdGg9IjEuNCIvPjx0ZXh0IHg9IjgzNS4wIiB5PSI0OTAiIGZvbnQtZmFtaWx5PSItYXBwbGUtc3lzdGVtLEJsaW5rTWFjU3lzdGVtRm9udCwnU2Vnb2UgVUknLFJvYm90byxIZWx2ZXRpY2EsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMS41IiBmaWxsPSIjYmUxMjNjIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iNzAwIj7pqozor4HogIUv6aKE6KiA5py6IFZhbGlkYXRvcjwvdGV4dD48dGV4dCB4PSI3NDYiIHk9IjUxMCIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEwLjUiIGZpbGw9IiNiZTEyM2MiIHRleHQtYW5jaG9yPSJzdGFydCIgZm9udC13ZWlnaHQ9IjUwMCI+5oq95qOA6YeN566Xwrfnrb7lkI3nu5PnrpfCt+WPkei1t+e9muayoTwvdGV4dD48dGV4dCB4PSI3NDYiIHk9IjUyNiIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEwIiBmaWxsPSIjNjQ3NDhiIiB0ZXh0LWFuY2hvcj0ic3RhcnQiIGZvbnQtd2VpZ2h0PSI0MDAiPijpk77kuIvmiafooYwg4oaSIOmTvuS4iueUn+aViCDnmoTmoaUpPC90ZXh0PjxsaW5lIHgxPSI3MDAiIHkxPSIzMDAiIHgyPSI3MzAiIHkyPSIzMDAiIHN0cm9rZT0iI2Y1OWUwYiIgc3Ryb2tlLXdpZHRoPSIxLjYiIHN0cm9rZS1kYXNoYXJyYXk9IjUgNCIgbWFya2VyLWVuZD0idXJsKCNtLWFtYikiLz48dGV4dCB4PSI3MDMiIHk9IjI5MiIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEwIiBmaWxsPSIjYTE2MjA3IiB0ZXh0LWFuY2hvcj0ic3RhcnQiIGZvbnQtd2VpZ2h0PSI2MDAiPuiuoemHjy/nu5Pmnpwg4oaSIOe7k+eulzwvdGV4dD48dGV4dCB4PSI0MCIgeT0iNTg4IiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEuNSIgZmlsbD0iIzY0NzQ4YiIgdGV4dC1hbmNob3I9InN0YXJ0IiBmb250LXdlaWdodD0iNTAwIj7lhbPplK7vvJrnrpflipvkuI7mlbDmja7lnKjpk77kuIsoaW1zcGFjZSnmtYHliqjvvJvpk77lj6rmib/ovb3ku6PluIEv5omY566hL+i0qOaKvC/nvZrmsqEv57uT566XL+S7suijge+8m+mqjOivgeiAheaYr+S4pOiAheS5i+mXtOeahOahpeOAgjwvdGV4dD48L3N2Zz4="/></p>
 
-| imspace 现有能力 | 在算力网络中的角色 |
+| nmspace 现有能力 | 在算力网络中的角色 |
 |---|---|
 | iroh 传输 + NAT 穿透（nat/selfhost/lan、按公钥拨号、同网优先） | 买方↔提供方、验证者↔提供方的连接与打洞 |
 | Ed25519 身份 + 无注册 + **黑名单** | 参与者身份与准入 |
 | 实体目录 `compute.inference` + `directory_query` + s2s 联邦 | 提供方注册与跨节点发现/撮合 |
-| **命令 RPC + Grant 能力授权**（`im-crypto`） | 派单调用 `compute.infer` 并授权（复用 routed-command 鉴权） |
-| **gossip 频道 pub/sub**（`im-gossip`，Router 多协议） | 任务公告板 / 报价 / 心跳 / 价格看板 |
+| **命令 RPC + Grant 能力授权**（`nm-crypto`） | 派单调用 `compute.infer` 并授权（复用 routed-command 鉴权） |
+| **gossip 频道 pub/sub**（`nm-gossip`，Router 多协议） | 任务公告板 / 报价 / 心跳 / 价格看板 |
 | redb 存储 + 离线队列 | 任务记录 / 计量回执 / 结果补投 |
 | Grant（UCAN 风格：issuer/audience/action/resource/expires/签名） | 把“已托管付费”表达为对提供方的调用授权 |
 
-> 结论：算力网络**约 60–70% 的下层能力已在 imspace 就绪**，新增集中在“执行面 + 经济结算面 + 验证”。
+> 结论：算力网络**约 60–70% 的下层能力已在 nmspace 就绪**，新增集中在“执行面 + 经济结算面 + 验证”。
 
 ---
 
@@ -78,12 +78,12 @@
 
 <p align="center"><img alt="角色与身份" width="960" style="max-width:100%;height:auto" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5ODAgNDcwIiB3aWR0aD0iOTgwIiBoZWlnaHQ9IjQ3MCI+PGRlZnM+PG1hcmtlciBpZD0ibS1pbmQiIG1hcmtlcldpZHRoPSIxMCIgbWFya2VySGVpZ2h0PSIxMCIgcmVmWD0iOCIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIiBtYXJrZXJVbml0cz0ic3Ryb2tlV2lkdGgiPjxwYXRoIGQ9Ik0wLDAgTDgsMyBMMCw2IFoiIGZpbGw9IiM2MzY2ZjEiLz48L21hcmtlcj48bWFya2VyIGlkPSJtLXZpbyIgbWFya2VyV2lkdGg9IjEwIiBtYXJrZXJIZWlnaHQ9IjEwIiByZWZYPSI4IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iIG1hcmtlclVuaXRzPSJzdHJva2VXaWR0aCI+PHBhdGggZD0iTTAsMCBMOCwzIEwwLDYgWiIgZmlsbD0iIzhiNWNmNiIvPjwvbWFya2VyPjxtYXJrZXIgaWQ9Im0tZW1lIiBtYXJrZXJXaWR0aD0iMTAiIG1hcmtlckhlaWdodD0iMTAiIHJlZlg9IjgiIHJlZlk9IjMiIG9yaWVudD0iYXV0byIgbWFya2VyVW5pdHM9InN0cm9rZVdpZHRoIj48cGF0aCBkPSJNMCwwIEw4LDMgTDAsNiBaIiBmaWxsPSIjMTBiOTgxIi8+PC9tYXJrZXI+PG1hcmtlciBpZD0ibS1za3kiIG1hcmtlcldpZHRoPSIxMCIgbWFya2VySGVpZ2h0PSIxMCIgcmVmWD0iOCIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIiBtYXJrZXJVbml0cz0ic3Ryb2tlV2lkdGgiPjxwYXRoIGQ9Ik0wLDAgTDgsMyBMMCw2IFoiIGZpbGw9IiMwZWE1ZTkiLz48L21hcmtlcj48bWFya2VyIGlkPSJtLWFtYiIgbWFya2VyV2lkdGg9IjEwIiBtYXJrZXJIZWlnaHQ9IjEwIiByZWZYPSI4IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iIG1hcmtlclVuaXRzPSJzdHJva2VXaWR0aCI+PHBhdGggZD0iTTAsMCBMOCwzIEwwLDYgWiIgZmlsbD0iI2Y1OWUwYiIvPjwvbWFya2VyPjxtYXJrZXIgaWQ9Im0tc2xhIiBtYXJrZXJXaWR0aD0iMTAiIG1hcmtlckhlaWdodD0iMTAiIHJlZlg9IjgiIHJlZlk9IjMiIG9yaWVudD0iYXV0byIgbWFya2VyVW5pdHM9InN0cm9rZVdpZHRoIj48cGF0aCBkPSJNMCwwIEw4LDMgTDAsNiBaIiBmaWxsPSIjNDc1NTY5Ii8+PC9tYXJrZXI+PG1hcmtlciBpZD0ibS1yb3MiIG1hcmtlcldpZHRoPSIxMCIgbWFya2VySGVpZ2h0PSIxMCIgcmVmWD0iOCIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIiBtYXJrZXJVbml0cz0ic3Ryb2tlV2lkdGgiPjxwYXRoIGQ9Ik0wLDAgTDgsMyBMMCw2IFoiIGZpbGw9IiNmNDNmNWUiLz48L21hcmtlcj48bWFya2VyIGlkPSJtLW11dCIgbWFya2VyV2lkdGg9IjEwIiBtYXJrZXJIZWlnaHQ9IjEwIiByZWZYPSI4IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iIG1hcmtlclVuaXRzPSJzdHJva2VXaWR0aCI+PHBhdGggZD0iTTAsMCBMOCwzIEwwLDYgWiIgZmlsbD0iIzY0NzQ4YiIvPjwvbWFya2VyPjwvZGVmcz48cmVjdCB4PSIwIiB5PSIwIiB3aWR0aD0iOTgwIiBoZWlnaHQ9IjQ3MCIgcng9IjE4IiBmaWxsPSIjZjhmYWZjIi8+PHRleHQgeD0iNDAiIHk9IjQwIiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTgiIGZpbGw9IiMxZTI5M2IiIHRleHQtYW5jaG9yPSJzdGFydCIgZm9udC13ZWlnaHQ9IjcwMCI+5Zu+IDIgwrcg5Y+C5LiO6KeS6Imy5LiO6Lqr5Lu95qih5Z6L77yI5peg6ZyA5rOo5YaMwrflhazpkqXljbPouqvku73Ct+aXoOeZveWQjeWNleWPquiuvum7keWQjeWNle+8iTwvdGV4dD48cmVjdCB4PSI0MCIgeT0iNTgiIHdpZHRoPSI5MDAiIGhlaWdodD0iMzQiIHJ4PSIxMiIgZmlsbD0iI2ZlZjNjNyIgc3Ryb2tlPSIjZjU5ZTBiIiBzdHJva2Utd2lkdGg9IjEuMiIvPjx0ZXh0IHg9IjQ5MCIgeT0iODAiIGZvbnQtZmFtaWx5PSItYXBwbGUtc3lzdGVtLEJsaW5rTWFjU3lzdGVtRm9udCwnU2Vnb2UgVUknLFJvYm90byxIZWx2ZXRpY2EsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMS41IiBmaWxsPSIjYTE2MjA3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iNjAwIj7ku7vkvZXmjIHmnInlkIjms5XlhazpkqXnmoTlrp7kvZPnmoblj6/liqDlhaXvvJrkurogLyDorr7lpIcgLyDmmbrog73kvZMgLyDnrpflipvmnI3liqEgLyDovabovoYg4oCmIOm7mOiupOaUvuihjO+8jOS7hem7keWQjeWNleWFrOmSpeiiq+aLkuOAgjwvdGV4dD48cmVjdCB4PSI2MCIgeT0iMTIwIiB3aWR0aD0iMjAwIiBoZWlnaHQ9IjE0MCIgcng9IjEyIiBmaWxsPSIjZmZmZmZmIiBzdHJva2U9IiMwZWE1ZTkiIHN0cm9rZS13aWR0aD0iMS44Ii8+PHBhdGggZD0iTTcyLDEyMCBoMTc2IGExMiwxMiAwIDAgMSAxMiwxMiB2MTQgaC0yMDAgdi0xNCBhMTIsMTIgMCAwIDEgMTIsLTEyIHoiIGZpbGw9IiNlMGYyZmUiLz48dGV4dCB4PSI3NCIgeT0iMTM4IiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTIuNSIgZmlsbD0iIzBlYTVlOSIgdGV4dC1hbmNob3I9InN0YXJ0IiBmb250LXdlaWdodD0iNzAwIj7kubDmlrkgQnV5ZXI8L3RleHQ+PHJlY3QgeD0iNzQiIHk9IjE1MCIgd2lkdGg9IjEyMCIgaGVpZ2h0PSIyMiIgcng9IjExLjAiIGZpbGw9IiNlMGYyZmUiIHN0cm9rZT0iIzBlYTVlOSIgc3Ryb2tlLXdpZHRoPSIxLjEiLz48dGV4dCB4PSIxMzQuMCIgeT0iMTY1LjAiIGZvbnQtZmFtaWx5PSItYXBwbGUtc3lzdGVtLEJsaW5rTWFjU3lzdGVtRm9udCwnU2Vnb2UgVUknLFJvYm90byxIZWx2ZXRpY2EsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzBlYTVlOSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9IjYwMCI+5raI6LS5566X5Yqbwrfku5jotLk8L3RleHQ+PHRleHQgeD0iNzQiIHk9IjE5NiIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEwLjUiIGZpbGw9IiM0NzU1NjkiIHRleHQtYW5jaG9yPSJzdGFydCIgZm9udC13ZWlnaHQ9IjUwMCI+5Y+R546wL+aSruWQiMK36ZO+5LiK5omY566hwrfmtL7ljZUoR3I8L3RleHQ+PHRleHQgeD0iNzQiIHk9IjIxMiIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEwLjUiIGZpbGw9IiM0NzU1NjkiIHRleHQtYW5jaG9yPSJzdGFydCIgZm9udC13ZWlnaHQ9IjUwMCI+YW50KTwvdGV4dD48dGV4dCB4PSI3NCIgeT0iMjI4IiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTAuNSIgZmlsbD0iIzQ3NTU2OSIgdGV4dC1hbmNob3I9InN0YXJ0IiBmb250LXdlaWdodD0iNTAwIj48L3RleHQ+PHRleHQgeD0iNzQiIHk9IjI1MCIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEwIiBmaWxsPSIjNjQ3NDhiIiB0ZXh0LWFuY2hvcj0ic3RhcnQiIGZvbnQtd2VpZ2h0PSI3MDAiPj0gRWQyNTUxOSDlhazpkqU8L3RleHQ+PHJlY3QgeD0iMjkwIiB5PSIxMjAiIHdpZHRoPSIyMDAiIGhlaWdodD0iMTQwIiByeD0iMTIiIGZpbGw9IiNmZmZmZmYiIHN0cm9rZT0iIzhiNWNmNiIgc3Ryb2tlLXdpZHRoPSIxLjgiLz48cGF0aCBkPSJNMzAyLDEyMCBoMTc2IGExMiwxMiAwIDAgMSAxMiwxMiB2MTQgaC0yMDAgdi0xNCBhMTIsMTIgMCAwIDEgMTIsLTEyIHoiIGZpbGw9IiNmNWYzZmYiLz48dGV4dCB4PSIzMDQiIHk9IjEzOCIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEyLjUiIGZpbGw9IiM4YjVjZjYiIHRleHQtYW5jaG9yPSJzdGFydCIgZm9udC13ZWlnaHQ9IjcwMCI+5o+Q5L6b5pa5IFByb3ZpZGVyPC90ZXh0PjxyZWN0IHg9IjMwNCIgeT0iMTUwIiB3aWR0aD0iMTIwIiBoZWlnaHQ9IjIyIiByeD0iMTEuMCIgZmlsbD0iI2Y1ZjNmZiIgc3Ryb2tlPSIjOGI1Y2Y2IiBzdHJva2Utd2lkdGg9IjEuMSIvPjx0ZXh0IHg9IjM2NC4wIiB5PSIxNjUuMCIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEwIiBmaWxsPSIjOGI1Y2Y2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iNjAwIj5jb21wdXRlLmluZmVyZW5jZTwvdGV4dD48dGV4dCB4PSIzMDQiIHk9IjE5NiIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEwLjUiIGZpbGw9IiM0NzU1NjkiIHRleHQtYW5jaG9yPSJzdGFydCIgZm9udC13ZWlnaHQ9IjUwMCI+5rOo5YaMR1BVL+aooeWeiy/miqXku7fCt+i0qOaKvMK35omnPC90ZXh0Pjx0ZXh0IHg9IjMwNCIgeT0iMjEyIiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTAuNSIgZmlsbD0iIzQ3NTU2OSIgdGV4dC1hbmNob3I9InN0YXJ0IiBmb250LXdlaWdodD0iNTAwIj7ooYzCt+iuoemHjzwvdGV4dD48dGV4dCB4PSIzMDQiIHk9IjIyOCIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEwLjUiIGZpbGw9IiM0NzU1NjkiIHRleHQtYW5jaG9yPSJzdGFydCIgZm9udC13ZWlnaHQ9IjUwMCI+PC90ZXh0Pjx0ZXh0IHg9IjMwNCIgeT0iMjUwIiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM2NDc0OGIiIHRleHQtYW5jaG9yPSJzdGFydCIgZm9udC13ZWlnaHQ9IjcwMCI+PSBFZDI1NTE5IOWFrOmSpTwvdGV4dD48cmVjdCB4PSI1MjAiIHk9IjEyMCIgd2lkdGg9IjIwMCIgaGVpZ2h0PSIxNDAiIHJ4PSIxMiIgZmlsbD0iI2ZmZmZmZiIgc3Ryb2tlPSIjZjQzZjVlIiBzdHJva2Utd2lkdGg9IjEuOCIvPjxwYXRoIGQ9Ik01MzIsMTIwIGgxNzYgYTEyLDEyIDAgMCAxIDEyLDEyIHYxNCBoLTIwMCB2LTE0IGExMiwxMiAwIDAgMSAxMiwtMTIgeiIgZmlsbD0iI2ZmZjFmMiIvPjx0ZXh0IHg9IjUzNCIgeT0iMTM4IiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTIuNSIgZmlsbD0iI2Y0M2Y1ZSIgdGV4dC1hbmNob3I9InN0YXJ0IiBmb250LXdlaWdodD0iNzAwIj7pqozor4HogIUgVmFsaWRhdG9yPC90ZXh0PjxyZWN0IHg9IjUzNCIgeT0iMTUwIiB3aWR0aD0iMTIwIiBoZWlnaHQ9IjIyIiByeD0iMTEuMCIgZmlsbD0iI2ZmZjFmMiIgc3Ryb2tlPSIjZjQzZjVlIiBzdHJva2Utd2lkdGg9IjEuMSIvPjx0ZXh0IHg9IjU5NC4wIiB5PSIxNjUuMCIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEwIiBmaWxsPSIjZjQzZjVlIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iNjAwIj7mir3mo4DCt+e7k+eulzwvdGV4dD48dGV4dCB4PSI1MzQiIHk9IjE5NiIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEwLjUiIGZpbGw9IiM0NzU1NjkiIHRleHQtYW5jaG9yPSJzdGFydCIgZm9udC13ZWlnaHQ9IjUwMCI+6ZqP5py66YeN566X5q+U5a+5wrfnrb7lkI3nu5PnrpfCt+WPkei1t+e9muayoTwvdGV4dD48dGV4dCB4PSI1MzQiIHk9IjIxMiIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEwLjUiIGZpbGw9IiM0NzU1NjkiIHRleHQtYW5jaG9yPSJzdGFydCIgZm9udC13ZWlnaHQ9IjUwMCI+PC90ZXh0Pjx0ZXh0IHg9IjUzNCIgeT0iMjI4IiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTAuNSIgZmlsbD0iIzQ3NTU2OSIgdGV4dC1hbmNob3I9InN0YXJ0IiBmb250LXdlaWdodD0iNTAwIj48L3RleHQ+PHRleHQgeD0iNTM0IiB5PSIyNTAiIGZvbnQtZmFtaWx5PSItYXBwbGUtc3lzdGVtLEJsaW5rTWFjU3lzdGVtRm9udCwnU2Vnb2UgVUknLFJvYm90byxIZWx2ZXRpY2EsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzY0NzQ4YiIgdGV4dC1hbmNob3I9InN0YXJ0IiBmb250LXdlaWdodD0iNzAwIj49IEVkMjU1MTkg5YWs6ZKlPC90ZXh0PjxyZWN0IHg9Ijc1MCIgeT0iMTIwIiB3aWR0aD0iMjAwIiBoZWlnaHQ9IjE0MCIgcng9IjEyIiBmaWxsPSIjZmZmZmZmIiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMS44Ii8+PHBhdGggZD0iTTc2MiwxMjAgaDE3NiBhMTIsMTIgMCAwIDEgMTIsMTIgdjE0IGgtMjAwIHYtMTQgYTEyLDEyIDAgMCAxIDEyLC0xMiB6IiBmaWxsPSIjZmVmM2M3Ii8+PHRleHQgeD0iNzY0IiB5PSIxMzgiIGZvbnQtZmFtaWx5PSItYXBwbGUtc3lzdGVtLEJsaW5rTWFjU3lzdGVtRm9udCwnU2Vnb2UgVUknLFJvYm90byxIZWx2ZXRpY2EsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMi41IiBmaWxsPSIjZjU5ZTBiIiB0ZXh0LWFuY2hvcj0ic3RhcnQiIGZvbnQtd2VpZ2h0PSI3MDAiPumHkeW6ky/lkIjnuqYgVHJlYXN1cnk8L3RleHQ+PHJlY3QgeD0iNzY0IiB5PSIxNTAiIHdpZHRoPSIxMjAiIGhlaWdodD0iMjIiIHJ4PSIxMS4wIiBmaWxsPSIjZmVmM2M3IiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMS4xIi8+PHRleHQgeD0iODI0LjAiIHk9IjE2NS4wIiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiNmNTllMGIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSI2MDAiPumTvuS4iui0puacrDwvdGV4dD48dGV4dCB4PSI3NjQiIHk9IjE5NiIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEwLjUiIGZpbGw9IiM0NzU1NjkiIHRleHQtYW5jaG9yPSJzdGFydCIgZm9udC13ZWlnaHQ9IjUwMCI+5omY566hL+i0qOaKvC/nvZrmsqEv57uT566XL+aJi+e7rei0uS88L3RleHQ+PHRleHQgeD0iNzY0IiB5PSIyMTIiIGZvbnQtZmFtaWx5PSItYXBwbGUtc3lzdGVtLEJsaW5rTWFjU3lzdGVtRm9udCwnU2Vnb2UgVUknLFJvYm90byxIZWx2ZXRpY2EsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMC41IiBmaWxsPSIjNDc1NTY5IiB0ZXh0LWFuY2hvcj0ic3RhcnQiIGZvbnQtd2VpZ2h0PSI1MDAiPuS6ieiurjwvdGV4dD48dGV4dCB4PSI3NjQiIHk9IjIyOCIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEwLjUiIGZpbGw9IiM0NzU1NjkiIHRleHQtYW5jaG9yPSJzdGFydCIgZm9udC13ZWlnaHQ9IjUwMCI+PC90ZXh0Pjx0ZXh0IHg9Ijc2NCIgeT0iMjUwIiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM2NDc0OGIiIHRleHQtYW5jaG9yPSJzdGFydCIgZm9udC13ZWlnaHQ9IjcwMCI+PSDpk77kuIrlkIjnuqblnLDlnYA8L3RleHQ+PGxpbmUgeDE9IjI2MCIgeTE9IjE5MCIgeDI9IjI5MCIgeTI9IjE5MCIgc3Ryb2tlPSIjMGVhNWU5IiBzdHJva2Utd2lkdGg9IjEuOCIgbWFya2VyLWVuZD0idXJsKCNtLXNreSkiLz48dGV4dCB4PSIyNzUiIHk9IjE4MiIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sQmxpbmtNYWNTeXN0ZW1Gb250LCdTZWdvZSBVSScsUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjkuNSIgZmlsbD0iIzBlYTVlOSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9IjcwMCI+5rS+5Y2VPC90ZXh0PjxsaW5lIHgxPSI1MjAiIHkxPSIyMDUiIHgyPSI0OTAiIHkyPSIyMDUiIHN0cm9rZT0iI2Y0M2Y1ZSIgc3Ryb2tlLXdpZHRoPSIxLjgiIG1hcmtlci1lbmQ9InVybCgjbS1yb3MpIi8+PHRleHQgeD0iNTA1IiB5PSIyMjIiIGZvbnQtZmFtaWx5PSItYXBwbGUtc3lzdGVtLEJsaW5rTWFjU3lzdGVtRm9udCwnU2Vnb2UgVUknLFJvYm90byxIZWx2ZXRpY2EsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSI5LjUiIGZpbGw9IiNmNDNmNWUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSI3MDAiPuaKveajgDwvdGV4dD48bGluZSB4MT0iMTYwIiB5MT0iMjYwIiB4Mj0iMTYwIiB5Mj0iMzAwIiBzdHJva2U9IiMwZWE1ZTkiIHN0cm9rZS13aWR0aD0iMS40IiBzdHJva2UtZGFzaGFycmF5PSI1IDQiIG1hcmtlci1lbmQ9InVybCgjbS1za3kpIi8+PGxpbmUgeDE9IjM5MCIgeTE9IjI2MCIgeDI9IjM5MCIgeTI9IjMwMCIgc3Ryb2tlPSIjOGI1Y2Y2IiBzdHJva2Utd2lkdGg9IjEuNCIgc3Ryb2tlLWRhc2hhcnJheT0iNSA0IiBtYXJrZXItZW5kPSJ1cmwoI20tdmlvKSIvPjxsaW5lIHgxPSI2MjAiIHkxPSIyNjAiIHgyPSI2MjAiIHkyPSIzMDAiIHN0cm9rZT0iI2Y0M2Y1ZSIgc3Ryb2tlLXdpZHRoPSIxLjQiIHN0cm9rZS1kYXNoYXJyYXk9IjUgNCIgbWFya2VyLWVuZD0idXJsKCNtLXJvcykiLz48cmVjdCB4PSI2MCIgeT0iMzAwIiB3aWR0aD0iODgwIiBoZWlnaHQ9IjYwIiByeD0iMTIiIGZpbGw9IiNmOGZhZmMiIHN0cm9rZT0iIzQ3NTU2OSIgc3Ryb2tlLXdpZHRoPSIxLjEiIHN0cm9rZS1kYXNoYXJyYXk9IjUgNSIvPjx0ZXh0IHg9IjQ5MCIgeT0iMzI0IiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEuNSIgZmlsbD0iIzQ3NTU2OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9IjYwMCI+6ZO+5LiK77ya5Lmw5pa55omY566h6aKE5LuYIMK3IOaPkOS+m+aWuei0qOaKvOaKteaKvCDCtyDpqozor4HogIXnrb7lkI3nu5Pnrpcgwrcg5omL57ut6LS55YWl6YeR5bqTPC90ZXh0Pjx0ZXh0IHg9IjQ5MCIgeT0iMzQ0IiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiNiZTEyM2MiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSI2MDAiPuS9nOW8iuiiq+aKkyDihpIg572a5rKh5o+Q5L6b5pa56LSo5oq877yI6YOo5YiG5L2c5Li66LWP6YeR57uZ5oyR5oiY6ICFL+mqjOivgeiAhe+8iTwvdGV4dD48dGV4dCB4PSI0MCIgeT0iNDAwIiBmb250LWZhbWlseT0iLWFwcGxlLXN5c3RlbSxCbGlua01hY1N5c3RlbUZvbnQsJ1NlZ29lIFVJJyxSb2JvdG8sSGVsdmV0aWNhLEFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEuNSIgZmlsbD0iIzY0NzQ4YiIgdGV4dC1hbmNob3I9InN0YXJ0IiBmb250LXdlaWdodD0iNTAwIj7ouqvku7095YWs6ZKl77yM5peg6LSm5oi35rOo5YaM77yb5YeG5YWlPem7keWQjeWNle+8iOWPr+iiq+iKgueCuS/npL7ljLrmi4npu5HvvInvvJvmipflpbPlt6vpnaDigJzotKjmirzpl6jmp5sr5aOw6KqJ4oCd77yM6Z2e6Z2g5rOo5YaM5a6h5qC444CCPC90ZXh0Pjx0ZXh0IHg9IjQwIiB5PSI0MjQiIGZvbnQtZmFtaWx5PSItYXBwbGUtc3lzdGVtLEJsaW5rTWFjU3lzdGVtRm9udCwnU2Vnb2UgVUknLFJvYm90byxIZWx2ZXRpY2EsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMS41IiBmaWxsPSIjNjQ3NDhiIiB0ZXh0LWFuY2hvcj0ic3RhcnQiIGZvbnQtd2VpZ2h0PSI1MDAiPuaPkOS+m+aWueS7pSBjb21wdXRlLmluZmVyZW5jZSDlrp7kvZPms6jlhozov5vnm67lvZXvvIjlpI3nlKggaW0tZW50aXR5IOaXouacieexu+Wei++8ie+8jOWxnuaAp+aQuuW4piBHUFUv5qih5Z6LL+S7t+agvC/ljLrln58v5a656YeP44CCPC90ZXh0Pjwvc3ZnPg=="/></p>
 
-- **买方 Buyer**：消费算力。发现/撮合 → 链上托管预付 → 派单（Command + Grant）→ 收结果。用 `im-client`（或 Tauri 客户端）。
-- **提供方 Provider**：以 `compute.inference` 实体注册（GPU/模型/报价/区域/容量），链上**质押**抵押，执行推理、出具**签名计量回执**。= imd + `im-compute` 代理。
-- **验证者 Validator**：随机**抽检**（重算比对）、对结算/罚没结果**签名上链**（预言机）。自身也质押、可被挑战。= imd + `im-verify`。
+- **买方 Buyer**：消费算力。发现/撮合 → 链上托管预付 → 派单（Command + Grant）→ 收结果。用 `nm-client`（或 Tauri 客户端）。
+- **提供方 Provider**：以 `compute.inference` 实体注册（GPU/模型/报价/区域/容量），链上**质押**抵押，执行推理、出具**签名计量回执**。= nmd + `nm-compute` 代理。
+- **验证者 Validator**：随机**抽检**（重算比对）、对结算/罚没结果**签名上链**（预言机）。自身也质押、可被挑战。= nmd + `nm-verify`。
 - **金库/合约 Treasury**：链上账本，托管/质押/罚没/结算/手续费/争议。
 
-**身份与准入**：公钥即身份，无账户注册；准入为**黑名单**（可被节点/社区拉黑，复用 imspace 机制）；抗女巫靠**质押门槛 + 声誉**，而非注册审核（§12）。
+**身份与准入**：公钥即身份，无账户注册；准入为**黑名单**（可被节点/社区拉黑，复用 nmspace 机制）；抗女巫靠**质押门槛 + 声誉**，而非注册审核（§12）。
 
 ---
 
@@ -110,7 +110,7 @@ attributes = {
   "require_grant":"true"                         # 调用需能力授权(复用鉴权)
 }
 capabilities  = [CAPABILITY_INFER, ...]
-home_node     = <其归属 imd 公钥>               # 联邦寻址
+home_node     = <其归属 nmd 公钥>               # 联邦寻址
 ```
 
 **发现/撮合**：买方 `directory_query(kind_prefix="compute.inference", match_attributes={model, region}, require_capabilities=[INFER])`；s2s 联邦让跨节点提供方也可见。撮合两种模式：
@@ -127,13 +127,13 @@ home_node     = <其归属 imd 公钥>               # 联邦寻址
 1. **质押上线**：提供方链上 `stake`，并注册 `compute.inference` + 周期心跳/报价（gossip）。
 2. **发现/撮合**：买方 `directory_query` 或读 job-board。
 3. **托管预付**：买方链上 `escrow` 锁定一笔代币（可为单任务或预付信用额度）。
-4. **派单**：买方向提供方发 `Command{method:"compute.infer", params:JobSpec, grant:<能力授权>}`。Grant 证明“已托管、被授权调用”，提供方用 `im-crypto::authorize` 校验（复用现有 routed-command 鉴权：issuer=资源方、audience=买方、action=infer、resource=model）。
-5. **执行**：`im-compute` 拉起推理引擎（vLLM/llama.cpp/TGI）按 JobSpec 执行。
+4. **派单**：买方向提供方发 `Command{method:"compute.infer", params:JobSpec, grant:<能力授权>}`。Grant 证明“已托管、被授权调用”，提供方用 `nm-crypto::authorize` 校验（复用现有 routed-command 鉴权：issuer=资源方、audience=买方、action=infer、resource=model）。
+5. **执行**：`nm-compute` 拉起推理引擎（vLLM/llama.cpp/TGI）按 JobSpec 执行。
 6. **交付 + 计量**：结果经 iroh 单播回传（大响应可走 iroh-blobs）；附**提供方签名的 `MeterReport`**（输入/输出 token 数、耗时、模型指纹）。
 7. **抽检**：验证者按概率 p 抽中该任务 → 重算比对（§8）。
 8. **结算/罚没**：通过 → `escrow` 放款给提供方（扣手续费入金库）；不通过 → `slash` 提供方质押（部分作为赏金给挑战者）。**按轮次(epoch)批量上链**。
 
-> 步骤 ②③⑤⑦ 全程**公钥认证 + 黑名单准入**；②发现、⑤命令+Grant、⑥交付均直接复用 imspace。
+> 步骤 ②③⑤⑦ 全程**公钥认证 + 黑名单准入**；②发现、⑤命令+Grant、⑥交付均直接复用 nmspace。
 
 ---
 
@@ -207,7 +207,7 @@ E[作弊损失] = P(被抓) × 罚没额   >   作弊收益
 <a id="9"></a>
 ## 9. 链上/链下边界与预言机
 
-**边界原则**：链存“**钱与承诺**”（托管/质押/结算/罚没/争议）；imspace 存“**算力与数据**”（发现/派单/执行/交付/计量/抽检）。二者由**验证者/预言机**桥接。
+**边界原则**：链存“**钱与承诺**”（托管/质押/结算/罚没/争议）；nmspace 存“**算力与数据**”（发现/派单/执行/交付/计量/抽检）。二者由**验证者/预言机**桥接。
 
 **预言机（把链下结果安全投影上链）**：
 - 结算/罚没由**验证者委员会**对本轮结果做**门限签名/多签**后提交，避免单点预言机作恶；
@@ -219,11 +219,11 @@ E[作弊损失] = P(被抓) × 罚没额   >   作弊收益
 ---
 
 <a id="10"></a>
-## 10. 协议扩展（im.proto / GramKind / gossip 频道）
+## 10. 协议扩展（nm.proto / GramKind / gossip 频道）
 
-**直接复用**：`Entity`(compute.inference)、`Command`(method=`compute.infer`)、`Grant`、`GramKind::CHANNEL_*`(job-board)、`JobSpec`(im.proto 已存在)。
+**直接复用**：`Entity`(compute.inference)、`Command`(method=`compute.infer`)、`Grant`、`GramKind::CHANNEL_*`(job-board)、`JobSpec`(nm.proto 已存在)。
 
-**新增 proto 消息**（`crates/im-proto/proto/im.proto`）：
+**新增 proto 消息**（`crates/nm-proto/proto/nm.proto`）：
 
 ```proto
 // 任务规格（已存在 JobSpec，可扩展这些字段）
@@ -269,23 +269,23 @@ message SettlementBatch {     // 一个 epoch 的结算汇总(上链 root + 明�
 
 | crate | 职责 | 依赖 |
 |---|---|---|
-| `im-compute` | 提供方算力代理：注册 compute.inference、拉起推理引擎、执行、计量、交付。imd 插件形态。 | im-node, im-client, im-crypto, im-proto |
-| `im-market` | 撮合/竞价：job-board 协议、SLA、调度、价格发现。 | im-gossip, im-client, im-proto |
-| `im-verify` | 验证者：随机抽检、重算、容差比对、出具 Attestation。 | im-client, im-compute(重算), im-crypto |
-| `im-settle` | 链桥/预言机客户端：Escrow/Stake/Settlement/Slash 合约调用与 epoch 提交。 | 现成链 SDK(ethers/solana) + im-proto |
+| `nm-compute` | 提供方算力代理：注册 compute.inference、拉起推理引擎、执行、计量、交付。nmd 插件形态。 | nm-node, nm-client, nm-crypto, nm-proto |
+| `nm-market` | 撮合/竞价：job-board 协议、SLA、调度、价格发现。 | nm-gossip, nm-client, nm-proto |
+| `nm-verify` | 验证者：随机抽检、重算、容差比对、出具 Attestation。 | nm-client, nm-compute(重算), nm-crypto |
+| `nm-settle` | 链桥/预言机客户端：Escrow/Stake/Settlement/Slash 合约调用与 epoch 提交。 | 现成链 SDK(ethers/solana) + nm-proto |
 
-**复用（链下）**：im-node/imd、im-transport、im-client、im-gossip、im-crypto、im-store、im-entity。
+**复用（链下）**：nm-node/nmd、nm-transport、nm-client、nm-gossip、nm-crypto、nm-store、nm-entity。
 
 **链上**：Token / Escrow / Staking / Slashing / Settlement / Dispute 合约（现成链上部署）。
 
-**部署组合**：提供方 = `imd`(nat/selfhost) + `im-compute` + GPU + 链上质押；买方 = `im-client`/Tauri；验证者 = `imd` + `im-verify` + GPU(重算) + 质押 + `im-settle`。
+**部署组合**：提供方 = `nmd`(nat/selfhost) + `nm-compute` + GPU + 链上质押；买方 = `nm-client`/Tauri；验证者 = `nmd` + `nm-verify` + GPU(重算) + 质押 + `nm-settle`。
 
 ---
 
 <a id="12"></a>
 ## 12. 反女巫 / 声誉 / 冷启动
 
-- **无白名单、默认放行、黑名单拒绝**（复用 imspace）——恶意公钥可被节点/社区拉黑。
+- **无白名单、默认放行、黑名单拒绝**（复用 nmspace）——恶意公钥可被节点/社区拉黑。
 - **抗女巫 = 质押门槛**：注册/接单需质押，制造大量身份的成本 = 大量质押，且都可被罚没。
 - **声誉系统**：链下累计每公钥的历史成功率、在线率、抽检通过率、被罚记录 → 影响撮合排序与抽检概率 p（低声誉高抽检）。声誉可锚定到质押与结算历史（防洗白）。
 - **冷启动/币价自反性**：初期 TVL/币价低 → 质押价值低 → 攻击便宜。过渡策略：早期**许可/邀请或高声誉门槛**、限制单任务价值上限、提高抽检 p；随网络有用度与币价上升逐步放开到全无许可。
@@ -306,9 +306,9 @@ message SettlementBatch {     // 一个 epoch 的结算汇总(上链 root + 明�
 <a id="14"></a>
 ## 14. 部署形态
 
-- **提供方**：`imd`（nat 或 selfhost，穿透 NAT）+ `im-compute`（连本地 vLLM/llama.cpp）+ 链上质押。家用 GPU 亦可（NAT 后）。
-- **买方**：`im-client` 或 Tauri 客户端（同网优先、穿透兜底），链上托管钱包。
-- **验证者**：`imd` + `im-verify`（需 GPU 做重算）+ 质押 + `im-settle` 提交结算。
+- **提供方**：`nmd`（nat 或 selfhost，穿透 NAT）+ `nm-compute`（连本地 vLLM/llama.cpp）+ 链上质押。家用 GPU 亦可（NAT 后）。
+- **买方**：`nm-client` 或 Tauri 客户端（同网优先、穿透兜底），链上托管钱包。
+- **验证者**：`nmd` + `nm-verify`（需 GPU 做重算）+ 质押 + `nm-settle` 提交结算。
 - **自建设施（可选）**：用 selfhost 搭自有 iroh-relay + iroh-dns-server（见 `DEPLOY_selfhost_relay_dns.md`），全链路自主可控。
 
 ---
@@ -318,10 +318,10 @@ message SettlementBatch {     // 一个 epoch 的结算汇总(上链 root + 明�
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| 0 · 通讯底座 | iroh 传输/NAT穿透/目录/gossip/联邦/Grant/黑名单 | **已完成(imspace)** |
-| 1 · 算力接入 | provider 注册 compute.inference + 发现/撮合 + 派单(Grant) + 计量回执（链下，无币，测试） | 待建 `im-compute`/`im-market` |
-| 2 · 经济结算 | 托管 + 质押 + epoch 结算（测试网代币） | 待建 `im-settle` + 合约 |
-| 3 · 验证与罚没 | 随机抽检 + 委员会重算 + 容差比对 + 罚没 + 争议 | 待建 `im-verify` |
+| 0 · 通讯底座 | iroh 传输/NAT穿透/目录/gossip/联邦/Grant/黑名单 | **已完成(nmspace)** |
+| 1 · 算力接入 | provider 注册 compute.inference + 发现/撮合 + 派单(Grant) + 计量回执（链下，无币，测试） | 待建 `nm-compute`/`nm-market` |
+| 2 · 经济结算 | 托管 + 质押 + epoch 结算（测试网代币） | 待建 `nm-settle` + 合约 |
+| 3 · 验证与罚没 | 随机抽检 + 委员会重算 + 容差比对 + 罚没 + 争议 | 待建 `nm-verify` |
 | 4 · 市场化 | 反向拍卖/声誉/分层抽检/训练辅助/主网上线 | 规划 |
 
 > MVP = 阶段 0–2（可跑通“发现→托管→派单→执行→计量→结算”），阶段 3 加上验证使其可信。
@@ -345,7 +345,7 @@ message SettlementBatch {     // 一个 epoch 的结算汇总(上链 root + 明�
 
 **A. Grant 用于派单（复用现有能力授权）**
 - 资源方（提供方或其归属节点）对模型资源签发 Grant：`issuer=提供方, audience=买方, action="infer", resource=model, expires`。
-- 买方派单时携带该 Grant；提供方 `im_crypto::authorize(grant, caller=买方, action="infer", resource=model, now)` 校验（复用 routed-command 鉴权路径）。
+- 买方派单时携带该 Grant；提供方 `nm_crypto::authorize(grant, caller=买方, action="infer", resource=model, now)` 校验（复用 routed-command 鉴权路径）。
 - “已托管付费”可作为签发 Grant 的前置条件，把**支付**与**调用授权**绑定。
 
 **B. 结算 Merkle 叶子（epoch 批处理）**
@@ -363,4 +363,4 @@ slash(provider, amount, proof)        # 罚没凭 proof
 
 ---
 
-> 一句话总览：**把 imspace 的“公钥身份 + NAT 穿透 + 目录发现 + 能力授权 + gossip + 黑名单”当作算力市场的控制与传输面，新增“执行面(算力代理) + 现成公链结算面(托管/质押/罚没) + 验证者抽检”，用经济学保证在不可信 GPU 上做可信、可结算的去中心推理算力。**
+> 一句话总览：**把 nmspace 的“公钥身份 + NAT 穿透 + 目录发现 + 能力授权 + gossip + 黑名单”当作算力市场的控制与传输面，新增“执行面(算力代理) + 现成公链结算面(托管/质押/罚没) + 验证者抽检”，用经济学保证在不可信 GPU 上做可信、可结算的去中心推理算力。**

@@ -1,4 +1,4 @@
-# imspace 前端（clients/）
+# nmspace 前端（clients/）
 
 一套 **React + TypeScript** UI，覆盖 **web / desktop / iOS / android**。
 
@@ -8,8 +8,8 @@
 
 | 目标 | 渲染 | 接入核心的方式 |
 |---|---|---|
-| desktop / iOS / android | Tauri WebView | `TauriTransport` → Tauri IPC → 进程内 Rust `im-client`(iroh) |
-| web(浏览器) | 同一 React 产物(PWA) | `WebGatewayTransport` → WebSocket/WebTransport → `im-gatewayd` |
+| desktop / iOS / android | Tauri WebView | `TauriTransport` → Tauri IPC → 进程内 Rust `nm-client`(iroh) |
+| web(浏览器) | 同一 React 产物(PWA) | `WebGatewayTransport` → WebSocket/WebTransport → `nm-gatewayd` |
 
 因此**业务界面与状态只写一次**，四端复用。
 
@@ -24,7 +24,7 @@ clients/app/
 │   ├── App.tsx / main.tsx / styles.css
 │   └── vite-env.d.ts
 ├── index.html · vite.config.ts · tsconfig*.json · package.json
-└── src-tauri/           # Tauri 2 原生壳（独立 crate，内嵌 im-client）
+└── src-tauri/           # Tauri 2 原生壳（独立 crate，内嵌 nm-client）
 ```
 
 ## 运行
@@ -32,7 +32,7 @@ clients/app/
 ```bash
 npm install
 
-# 1) Web（先在另一终端跑 `cargo run -p im-gatewayd`）
+# 1) Web（先在另一终端跑 `cargo run -p nm-gatewayd`）
 npm run dev                 # http://localhost:1420
 npm run build               # 产出 dist/ → 部署为 PWA
 
@@ -48,6 +48,6 @@ npm run tauri android init && npm run tauri android dev
 ## 注意
 
 - `src-tauri` 为最小骨架。若遇 Tauri 2.x 配置/能力(capabilities)细节，建议先用
-  `npm create tauri-app@latest` 生成官方校验基线，再并入本仓前端与 `im-client` 桥接命令。
+  `npm create tauri-app@latest` 生成官方校验基线，再并入本仓前端与 `nm-client` 桥接命令。
 - 应用图标：用 `npm run tauri icon <png>` 生成 `src-tauri/icons/`。
 - Web 端网关地址通过环境变量 `VITE_GATEWAY_URL` 覆盖（默认 `ws://localhost:8088/ws`）。

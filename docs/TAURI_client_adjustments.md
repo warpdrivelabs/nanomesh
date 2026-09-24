@@ -8,9 +8,9 @@
 现状（`clients/app`）：
 
 - 桥接 `connect(nodeAddr, displayName)`（`src-tauri/src/lib.rs`）用 **`Client::bind_local_random()`**——即 `Minimal` 预设：**只能同网直连、无中继/发现、无法穿透 NAT**，且每次启动都是**随机新身份**。
-- 前端要求用户把 `imd` 打印的 **`IM_NODE_ADDR` 整段 JSON** 粘进来（`ChatScreen.tsx`）——地址会变、跨网无效、体验脆弱。
+- 前端要求用户把 `nmd` 打印的 **`NM_NODE_ADDR` 整段 JSON** 粘进来（`ChatScreen.tsx`）——地址会变、跨网无效、体验脆弱。
 
-这与本轮已落地的能力脱节：`Client::bind`(N0) / `Client::bind_selfhosted(...)` / `Client::online_by_id(node_pubkey)` 都已就绪（见 `crates/im-client`）。**客户端↔节点本就是又一条 iroh 连接**，用同一套 relay + 打洞 + 按公钥发现即可穿透 NAT。
+这与本轮已落地的能力脱节：`Client::bind`(N0) / `Client::bind_selfhosted(...)` / `Client::online_by_id(node_pubkey)` 都已就绪（见 `crates/nm-client`）。**客户端↔节点本就是又一条 iroh 连接**，用同一套 relay + 打洞 + 按公钥发现即可穿透 NAT。
 
 ## 2. 目标与范围
 
@@ -18,15 +18,15 @@
 
 1. 桥接 `connect` 支持三种模式：`nat`(N0 公共设施) / `selfhost`(自建 relay+dns) / `lan`(仅同网)。
 2. `nat`/`selfhost` 下**按节点公钥（hex）拨号** → `online_by_id`，发现服务解析地址、穿透 NAT；`lan` 保留**按地址(JSON)** 连。
-3. **持久客户端身份**：把 32 字节种子存到应用数据目录（`app_data_dir/imspace.identity`），启动复用——身份稳定（可被寻址、可被授权/拉黑，与黑名单模型一致）。
+3. **持久客户端身份**：把 32 字节种子存到应用数据目录（`app_data_dir/nmspace.identity`），启动复用——身份稳定（可被寻址、可被授权/拉黑，与黑名单模型一致）。
 4. `selfhost` 的 relay/dns 参数从界面传入（与节点指向**同一套**设施）。
 5. 前端：连接表单加「模式选择 + 公钥/地址输入 + selfhost 字段」；`CoreTransport` 接口相应调整。
 
 **不做（本次范围外，注明原因）：**
 
-- **频道 pub/sub（gossip）UI**：客户端侧频道 API 尚未实现（`im-client` 无 subscribe/publish；节点侧 gossip 已就绪但"客户端经 home 节点收发频道"是**增量 2**）。待其落地再加频道界面。
-- **黑名单管理 UI**：黑名单是**节点(imd)** 侧能力，客户端不是节点，不涉及。
-- **Web 端**：浏览器需 `im-gateway`（仍为骨架），`WebGatewayTransport` 维持占位。
+- **频道 pub/sub（gossip）UI**：客户端侧频道 API 尚未实现（`nm-client` 无 subscribe/publish；节点侧 gossip 已就绪但"客户端经 home 节点收发频道"是**增量 2**）。待其落地再加频道界面。
+- **黑名单管理 UI**：黑名单是**节点(nmd)** 侧能力，客户端不是节点，不涉及。
+- **Web 端**：浏览器需 `nm-gateway`（仍为骨架），`WebGatewayTransport` 维持占位。
 
 ## 3. 设计
 
@@ -38,7 +38,7 @@
 async fn connect(
     app: AppHandle, state: State<'_, AppState>,
     mode: String,               // "nat" | "selfhost" | "lan"
-    node: String,               // nat/selfhost: 节点公钥hex(64)；lan: IM_NODE_ADDR(JSON)
+    node: String,               // nat/selfhost: 节点公钥hex(64)；lan: NM_NODE_ADDR(JSON)
     display_name: String,
     relay_urls: Vec<String>,    // selfhost（其余模式传 []）
     pkarr_url: Option<String>,  // selfhost 必填
@@ -66,7 +66,7 @@ async fn connect(
 fn load_or_create_seed(app: &AppHandle) -> Result<[u8;32], String> {
     let dir = app.path().app_data_dir()?;           // 需 use tauri::Manager
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join("imspace.identity");
+    let path = dir.join("nmspace.identity");
     // 存在且 32B 则复用；否则 SecretKey::generate() 写盘。
 }
 ```
@@ -104,17 +104,17 @@ interface CoreTransport { connect(p: ConnectParams): Promise<string>; /* 其余�
 - `clients/app/src-tauri/src/lib.rs`（connect 重写 + 身份持久化 + disconnect）
 - `clients/app/src/core/transport.ts`、`tauriTransport.ts`、`webTransport.ts`
 - `clients/app/src/state/store.ts`、`clients/app/src/screens/ChatScreen.tsx`
-- 不改后端 crate（本次纯客户端适配，复用既有 `im-client` API）。
+- 不改后端 crate（本次纯客户端适配，复用既有 `nm-client` API）。
 
 ## 5. 验证
 
 1. `cargo build`（`clients/app/src-tauri`，独立 workspace）通过；`tsc && vite build` 前端类型/构建通过。
-2. **lan 冒烟**：本机跑 `imd`（lan 模式），客户端选 lan + 粘 `IM_NODE_ADDR` → 连上、注册、目录、收发（等价现状回归）。
-3. **nat 冒烟**：`imd`（nat）打印 `IM_NODE_ID`，客户端选 nat + 填该公钥 → `online_by_id` 连上（跨网/NAT 后同样成立）。
+2. **lan 冒烟**：本机跑 `nmd`（lan 模式），客户端选 lan + 粘 `NM_NODE_ADDR` → 连上、注册、目录、收发（等价现状回归）。
+3. **nat 冒烟**：`nmd`（nat）打印 `NM_NODE_ID`，客户端选 nat + 填该公钥 → `online_by_id` 连上（跨网/NAT 后同样成立）。
 4. **selfhost**：客户端选 selfhost + 同一 relay/dns + 节点公钥 → 连上（依赖自建设施可达）。
 
 ## 6. 后续（承接本设计）
 
 - 增量 2 落地后：加频道 pub/sub 界面（订阅/发布、频道列表）。
 - 身份导入/导出、多身份切换。
-- Web：接 `im-gateway`。
+- Web：接 `nm-gateway`。

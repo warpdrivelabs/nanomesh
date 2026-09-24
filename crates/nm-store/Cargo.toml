@@ -1,0 +1,15 @@
+[package]
+name = "nm-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nm-proto = { workspace = true }
+nm-core = { workspace = true }
+redb = { workspace = true }
+prost = "0.14"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

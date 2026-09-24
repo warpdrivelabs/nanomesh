@@ -2,11 +2,11 @@
 
 ## 📋 概述
 
-Nanomesh 配置管理系统是一个灵活、类型安全的配置管理解决方案，支持多种即时消息服务器配置、存储服务配置、Web管理配置等，并提供开放的扩展机制。
+Nanomesh 配置管理系统是一个灵活、类型安全的配置管理解决方案，支持多种网格服务器配置、存储服务配置、Web管理配置等，并提供开放的扩展机制。
 
 ## 🚀 特性
 
-- ✅ **多IM服务器支持**: 配置多个即时消息服务器实例
+- ✅ **多网格服务器支持**: 配置多个网格服务器实例
 - ✅ **负载均衡**: 支持轮询、权重、最少连接等策略
 - ✅ **动态配置**: 运行时动态添加/删除服务器实例
 - ✅ **类型安全**: 基于Rust类型系统的配置验证
@@ -20,7 +20,7 @@ Nanomesh 配置管理系统是一个灵活、类型安全的配置管理解决�
 ### 主要配置部分
 
 ```toml
-[im_servers]           # IM服务器集群配置
+[nm_servers]           # 网格服务器集群配置
 [storage]              # 存储服务配置
 [web_server]           # Web管理服务器配置
 [network]              # 网络传输配置
@@ -30,16 +30,16 @@ Nanomesh 配置管理系统是一个灵活、类型安全的配置管理解决�
 [extensions]           # 自定义扩展配置
 ```
 
-### IM服务器配置
+### 网格服务器配置
 
 ```toml
-[im_servers]
+[nm_servers]
 load_balance_strategy = "round_robin"  # 负载均衡策略
 health_check_interval = 30             # 健康检查间隔（秒）
 failover_enabled = true                # 故障转移
 
-[[im_servers.instances]]
-name = "im-server-1"
+[[nm_servers.instances]]
+name = "nm-server-1"
 server_id = 1001
 address = "127.0.0.1"
 port = 9001
@@ -106,8 +106,8 @@ init_config_from_toml("./config.toml")?;
 let config = get_config()?;
 println!("Web服务器端口: {}", config.web_server.port);
 
-// 获取启用的IM服务器
-let servers = get_enabled_im_servers()?;
+// 获取启用的网格服务器
+let servers = get_enabled_nm_servers()?;
 for server in servers {
     println!("服务器: {}:{}", server.address, server.port);
 }
@@ -116,7 +116,7 @@ for server in servers {
 ### 2. 动态配置管理
 
 ```rust
-// 添加新的IM服务器
+// 添加新的网格服务器
 let new_server = ImServerInstance {
     name: "new-server".to_string(),
     server_id: 2001,
@@ -131,7 +131,7 @@ let new_server = ImServerInstance {
 };
 
 update_config(|config| {
-    config.add_im_server(new_server)?;
+    config.add_nm_server(new_server)?;
     Ok(())
 })?;
 
@@ -198,7 +198,7 @@ with_config(|config| {
 
 ### 便捷访问函数
 
-- `get_enabled_im_servers()` - 获取启用的IM服务器列表
+- `get_enabled_nm_servers()` - 获取启用的网格服务器列表
 - `get_web_server_config()` - 获取Web服务器配置
 - `get_storage_config()` - 获取存储配置
 - `get_network_config()` - 获取网络配置
@@ -295,7 +295,7 @@ with_config(|config| {
 
 // 验证特定配置部分
 with_config(|config| {
-    for server in &config.im_servers.instances {
+    for server in &config.nm_servers.instances {
         if server.port == 0 {
             println!("警告: 服务器 {} 端口为0", server.name);
         }

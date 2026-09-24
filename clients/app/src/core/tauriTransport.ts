@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { ConnectParams, CoreEvent, CoreTransport, Entity } from "./transport";
 
-// 原生端：直接调用 Tauri 后端(src-tauri)里进程内运行的 Rust im-client + iroh。
+// 原生端：直接调用 Tauri 后端(src-tauri)里进程内运行的 Rust nm-client + iroh。
 export class TauriTransport implements CoreTransport {
   connect(p: ConnectParams): Promise<string> {
     return invoke<string>("connect", {
