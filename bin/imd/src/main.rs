@@ -70,6 +70,53 @@ struct Config {
     /// 后端管理控制 API（供 im-admind 取数/下发控制）。缺省不启用。
     #[serde(default)]
     admin: AdminCfg,
+    /// 联邦成员自动发现（gossip 成员频道）。缺省启用；[[peers]] 降级为「种子」。
+    #[serde(default)]
+    membership: MembershipCfg,
+}
+
+/// 联邦成员自动发现配置。每台只需配少量种子([[peers]])，其余成员经 gossip 自动发现自维护。
+#[derive(Deserialize)]
+struct MembershipCfg {
+    /// 是否启用成员发现。
+    #[serde(default = "default_true")]
+    enabled: bool,
+    /// 联邦名：同名者组成同一叠加网；改名即隔离出独立联邦。
+    #[serde(default = "default_federation")]
+    federation: String,
+    /// 自身卡片广播间隔（秒）。
+    #[serde(default = "default_announce_iv")]
+    announce_interval_secs: u64,
+    /// 发现节点存活 TTL（秒）：超时未再广播即剔除。
+    #[serde(default = "default_ttl")]
+    ttl_secs: u64,
+    /// 本节点对外广播的成员卡片（名称/物理地址/email/mobile/gps），用于其他节点展示。
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    address: String,
+    #[serde(default)]
+    email: String,
+    #[serde(default)]
+    mobile: String,
+    #[serde(default)]
+    gps: String,
+}
+
+impl Default for MembershipCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            federation: default_federation(),
+            announce_interval_secs: default_announce_iv(),
+            ttl_secs: default_ttl(),
+            name: String::new(),
+            address: String::new(),
+            email: String::new(),
+            mobile: String::new(),
+            gps: String::new(),
+        }
+    }
 }
 
 /// 后端管理控制 API 配置。绑定本机地址 + 共享 token（同机 im-admind 调用）。
@@ -143,6 +190,18 @@ fn default_identity() -> String {
 }
 fn default_db() -> String {
     "imd.redb".to_string()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_federation() -> String {
+    "imspace".to_string()
+}
+fn default_announce_iv() -> u64 {
+    30
+}
+fn default_ttl() -> u64 {
+    90
 }
 
 fn hex(b: &[u8]) -> String {
@@ -248,20 +307,26 @@ async fn main() -> anyhow::Result<()> {
     let needs_online = matches!(mode, Mode::Nat | Mode::SelfHost);
     tracing::info!(mode = %label, "bound");
 
-    // 配置对等：nat/selfhost 按 id(公钥)，lan 按 addr（每条 peer 按其字段自动选择）。
+    // 配置对等（种子）：nat/selfhost 按 id(公钥)，lan 按 addr。标注为「手工」以免被自动发现降级/清扫。
     for p in &cfg.peers {
         if let Some(id_hex) = &p.id {
             match parse_id_hex(id_hex) {
                 Ok(id) => {
                     if let Err(e) = node.add_peer_by_id(id) {
                         tracing::warn!("add peer by id failed: {e}");
+                    } else {
+                        node.note_manual_peer(id);
                     }
                 }
                 Err(e) => tracing::warn!("bad peer id: {e}"),
             }
         } else if let Some(addr) = &p.addr {
             match im_transport::addr_from_string(addr) {
-                Ok(a) => node.add_peer_addr(a),
+                Ok(a) => {
+                    let id = *a.id.as_bytes();
+                    node.add_peer_addr(a);
+                    node.note_manual_peer(id);
+                }
                 Err(e) => tracing::warn!("bad peer addr: {e}"),
             }
         }
@@ -286,9 +351,31 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    if node.peer_count() > 0 {
-        node.clone().spawn_federation_sync(Duration::from_secs(15));
-        tracing::info!(peers = node.peer_count(), "federation sync started");
+    // 始终启动联邦同步：即使当前无对等，也便于运行时经管理台动态加对等后立即生效（无需重启）。
+    node.clone().spawn_federation_sync(Duration::from_secs(15));
+    tracing::info!(peers = node.peer_count(), "federation sync started");
+
+    // 联邦成员自动发现（gossip 成员频道）：每台只配少量种子([[peers]])，其余成员自动发现自维护。
+    if cfg.membership.enabled {
+        let m = &cfg.membership;
+        let card = im_node::PeerInfo {
+            name: m.name.clone(),
+            address: m.address.clone(),
+            email: m.email.clone(),
+            mobile: m.mobile.clone(),
+            gps: m.gps.clone(),
+            ..Default::default()
+        };
+        node.clone().spawn_membership(im_node::MembershipCfg {
+            federation: m.federation.clone(),
+            announce_interval_secs: m.announce_interval_secs,
+            ttl_secs: m.ttl_secs,
+            card,
+        });
+        tracing::info!(
+            federation = %cfg.membership.federation,
+            "membership auto-discovery started"
+        );
     }
 
     // 后端管理控制 API（若配置了 [admin] api_addr + api_token）：供 im-admind 取数/下发控制。

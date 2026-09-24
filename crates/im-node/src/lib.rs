@@ -52,6 +52,93 @@ pub struct StoreStat {
     pub groups: usize,
 }
 
+/// 联邦对等元数据（管理台展示/持久化，可扩展）。连接一律按 node id（公钥）解析。
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct PeerInfo {
+    #[serde(default)]
+    pub name: String,
+    /// 物理所在位置（街道门牌等），仅作展示元数据，与网络连接无关。
+    #[serde(default)]
+    pub address: String,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub mobile: String,
+    #[serde(default)]
+    pub gps: String,
+    /// 来源：`"manual"`(手工/种子，常驻不过期) / `"discovered"`(gossip 自动发现，有 TTL)。
+    /// 空串按 manual 处理（兼容旧持久化行）。不参与成员卡片签名（本地元数据）。
+    #[serde(default)]
+    pub source: String,
+    /// 最近一次被广播/确认存活的 Unix 秒（0=未知/手工）。不参与签名（本地元数据）。
+    #[serde(default)]
+    pub last_seen: u64,
+}
+
+/// 联邦成员广播卡片（成员频道上以 JSON 广播）。`sig` 覆盖 node_id+ts+info 五个展示字段，
+/// 按 `node_id` 验签以自证作者（gossip 无逐条作者签名）；`addr` 为未签名的拨号提示。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MembershipAnnounce {
+    node_id: String,
+    ts: u64,
+    #[serde(default)]
+    info: PeerInfo,
+    #[serde(default)]
+    addr: String,
+    sig: String,
+}
+
+/// 联邦成员发现配置（imd 透传）。
+pub struct MembershipCfg {
+    /// 联邦名：同名者组成同一 gossip 叠加网；改名即隔离独立联邦。
+    pub federation: String,
+    /// 自身卡片广播间隔（秒）。
+    pub announce_interval_secs: u64,
+    /// 发现节点的存活 TTL（秒）：超时未再广播即剔除。
+    pub ttl_secs: u64,
+    /// 本节点对外广播的成员卡片（名称/物理地址/email/mobile/gps）。
+    pub card: PeerInfo,
+}
+
+fn hex_encode(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+fn hex_decode_n<const N: usize>(s: &str) -> Option<[u8; N]> {
+    if s.len() != N * 2 {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for i in 0..N {
+        out[i] = u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+/// 成员卡片的规范签名字节（node_id||ts||name||address||email||mobile||gps，以 0 分隔）。
+/// 只覆盖会广播的展示字段——`source`/`last_seen` 是本地元数据，不参与签名。
+fn membership_signing_bytes(node_id: &[u8; 32], ts: u64, info: &PeerInfo) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(node_id);
+    b.push(0);
+    b.extend_from_slice(&ts.to_be_bytes());
+    b.push(0);
+    b.extend_from_slice(info.name.as_bytes());
+    b.push(0);
+    b.extend_from_slice(info.address.as_bytes());
+    b.push(0);
+    b.extend_from_slice(info.email.as_bytes());
+    b.push(0);
+    b.extend_from_slice(info.mobile.as_bytes());
+    b.push(0);
+    b.extend_from_slice(info.gps.as_bytes());
+    b
+}
+
 /// 处理器共享上下文（含联邦所需的本节点端点/身份/对等表）。
 #[derive(Clone)]
 struct Ctx {
@@ -132,6 +219,7 @@ pub struct Node {
     gossip: Gossip,                                    // 频道 pub/sub（与单播共用同一 endpoint）
     blacklist: Arc<DashSet<[u8; 32]>>,                 // 黑名单：被禁公钥（无白名单，默认放行）
     sessions_meta: Arc<SessionsMeta>,                  // 会话旁挂元数据（接入时间）
+    peer_info: Arc<DashMap<Vec<u8>, PeerInfo>>,        // 对等元数据（名称/地址/email/mobile/gps）
 }
 
 impl Node {
@@ -232,7 +320,9 @@ impl Node {
         let dir = Arc::new(MemDirectory::new());
         let groups: Arc<DashMap<Vec<u8>, Group>> = Arc::new(DashMap::new());
         let blacklist: Arc<DashSet<[u8; 32]>> = Arc::new(DashSet::new());
-        // 从持久层回填内存目录/群组/黑名单（重启恢复）。
+        let peers: Arc<DashMap<Vec<u8>, im_transport::Addr>> = Arc::new(DashMap::new());
+        let peer_info: Arc<DashMap<Vec<u8>, PeerInfo>> = Arc::new(DashMap::new());
+        // 从持久层回填内存目录/群组/黑名单/对等（重启恢复）。
         if let Some(s) = &store {
             for e in s.all_entities()? {
                 dir.entities.insert(e.entity_id.clone(), e);
@@ -243,6 +333,14 @@ impl Node {
             for b in s.all_banned()? {
                 blacklist.insert(b);
             }
+            for (id, meta_json) in s.all_peers()? {
+                let info: PeerInfo = serde_json::from_str(&meta_json).unwrap_or_default();
+                // 连接一律按公钥发现（`address` 是物理位置，与网络无关）。
+                if let Ok(a) = im_transport::addr_from_id(id) {
+                    peers.insert(id.to_vec(), a);
+                }
+                peer_info.insert(id.to_vec(), info);
+            }
         }
         // 频道 pub/sub：与单播共用同一 iroh endpoint（accept 侧由 serve() 的 Router 分流）。
         let gossip = Gossip::builder().spawn(ep.iroh().clone());
@@ -252,10 +350,11 @@ impl Node {
             sessions: Arc::new(Sessions::new()),
             groups,
             store,
-            peers: Arc::new(DashMap::new()),
+            peers,
             gossip,
             blacklist,
             sessions_meta: Arc::new(SessionsMeta::new()),
+            peer_info,
         })
     }
 
@@ -408,6 +507,66 @@ impl Node {
         self.groups.len()
     }
 
+    /// 当前联邦对等节点公钥列表（管理台「对等节点」用）。
+    pub fn peers_list(&self) -> Vec<[u8; 32]> {
+        self.peers
+            .iter()
+            .filter_map(|e| <[u8; 32]>::try_from(e.key().as_slice()).ok())
+            .collect()
+    }
+
+    /// 添加/更新一个带元数据的对等（名称/物理地址/email/mobile/gps）——运行时生效 + 持久化。
+    /// 连接一律按 node id（公钥）发现；`info.address` 仅为物理位置元数据。重复 id 即为编辑(覆盖)。
+    pub fn add_peer_full(&self, node_id: [u8; 32], info: PeerInfo) -> Result<(), NodeError> {
+        let a =
+            im_transport::addr_from_id(node_id).map_err(|e| NodeError::Other(e.to_string()))?;
+        self.peers.insert(node_id.to_vec(), a);
+        self.peer_info.insert(node_id.to_vec(), info.clone());
+        if let Some(s) = &self.store {
+            if let Ok(js) = serde_json::to_string(&info) {
+                if let Err(e) = s.put_peer(&node_id, &js) {
+                    tracing::warn!("persist peer failed: {e}");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 标注一个对等为手工/种子来源（不改拨号信息，仅登记 peer_info）：
+    /// 用于配置文件 `[[peers]]` 种子——使其在管理台显示为「手工」，且不被自动发现降级/清扫。
+    pub fn note_manual_peer(&self, node_id: [u8; 32]) {
+        let mut info = self
+            .peer_info
+            .get(&node_id[..])
+            .map(|i| i.clone())
+            .unwrap_or_default();
+        info.source = "manual".to_string();
+        self.peer_info.insert(node_id.to_vec(), info);
+    }
+
+    /// 移除一个对等（运行时 + 持久化）。返回是否存在过。
+    pub fn remove_peer(&self, node_id: [u8; 32]) -> bool {
+        let existed = self.peers.remove(&node_id[..]).is_some();
+        self.peer_info.remove(&node_id[..]);
+        if let Some(s) = &self.store {
+            let _ = s.remove_peer(&node_id);
+        }
+        existed
+    }
+
+    /// 对等详情（node id hex + 元数据）——管理台列表用。
+    pub fn peers_detail(&self) -> Vec<(String, PeerInfo)> {
+        self.peers
+            .iter()
+            .map(|e| {
+                let id = e.key();
+                let hexid: String = id.iter().map(|x| format!("{x:02x}")).collect();
+                let info = self.peer_info.get(id).map(|i| i.clone()).unwrap_or_default();
+                (hexid, info)
+            })
+            .collect()
+    }
+
     /// 存储统计（实体/群组数，内存计数，与持久层一致）。
     pub fn store_stats(&self) -> StoreStat {
         StoreStat {
@@ -471,6 +630,175 @@ impl Node {
             .join(channel, bootstrap)
             .await
             .map_err(|e| NodeError::Other(e.to_string()))
+    }
+
+    // ---- 联邦成员自动发现（gossip 成员频道）----
+
+    /// 本节点成员频道的 topic（`blake3("imspace-federation:<federation>")`）。
+    fn membership_channel(federation: &str) -> [u8; 32] {
+        im_crypto::content_hash(format!("imspace-federation:{federation}").as_bytes())
+    }
+
+    /// 用本节点私钥签发一张自身成员卡片，序列化为待广播的 JSON 字节。
+    fn membership_card(&self, card: &PeerInfo) -> Vec<u8> {
+        let node_id = self.ep.id_bytes();
+        let ts = now_secs();
+        let sig = im_crypto::sign_bytes(
+            self.ep.secret_key(),
+            &membership_signing_bytes(&node_id, ts, card),
+        );
+        let ann = MembershipAnnounce {
+            node_id: hex_encode(&node_id),
+            ts,
+            info: card.clone(),
+            addr: im_transport::addr_to_string(&self.addr()),
+            sig: hex_encode(&sig),
+        };
+        serde_json::to_vec(&ann).unwrap_or_default()
+    }
+
+    /// 处理一条收到的成员广播：验签(按声明的 node_id) → 反重放窗口 → 学习/刷新。
+    fn on_membership_msg(&self, content: &[u8]) {
+        let ann: MembershipAnnounce = match serde_json::from_slice(content) {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+        let node_id = match hex_decode_n::<32>(&ann.node_id) {
+            Some(x) => x,
+            None => return,
+        };
+        // 不学自己；黑名单（永久排除）直接跳过。
+        if node_id == self.ep.id_bytes() || self.blacklist.contains(&node_id) {
+            return;
+        }
+        // 验签：gossip 的 delivered_from 非原作者，必须按声明 node_id 验应用层签名。
+        let sig = match hex_decode_n::<64>(&ann.sig) {
+            Some(s) => s,
+            None => return,
+        };
+        let signing = membership_signing_bytes(&node_id, ann.ts, &ann.info);
+        if im_crypto::verify_bytes(&node_id, &signing, &sig).is_err() {
+            tracing::debug!(peer = %ann.node_id, "membership: bad signature, dropped");
+            return;
+        }
+        // 反重放/防陈旧：拒绝过旧(>1 天)或来自明显未来(>5 分钟)的卡片。
+        let now = now_secs();
+        if ann.ts + 86_400 < now || ann.ts > now + 300 {
+            return;
+        }
+        // 拨号提示仅当其内嵌 id 与声明 node_id 一致才采用（addr 未签名，防注入错配）。
+        let addr_hint = im_transport::addr_from_string(&ann.addr)
+            .ok()
+            .filter(|a| *a.id.as_bytes() == node_id);
+        self.learn_peer(node_id, ann.info, addr_hint);
+    }
+
+    /// 发现专用 upsert：不降级手工/种子 peer（仅刷新存活）；否则登记为 discovered 并持久化。
+    fn learn_peer(&self, node_id: [u8; 32], info: PeerInfo, addr_hint: Option<im_transport::Addr>) {
+        // 已是手工/种子（source 为空或 "manual"）：保留其元数据，仅刷新 last_seen。
+        if let Some(existing) = self.peer_info.get(&node_id[..]) {
+            if existing.source.is_empty() || existing.source == "manual" {
+                let mut e = existing.clone();
+                drop(existing);
+                e.last_seen = now_secs();
+                self.persist_peer(node_id, e);
+                return;
+            }
+        }
+        // 加入 peers（可拨号）：有 addr 提示优先（LAN 也能拨），否则按 id（N0 发现解析）。
+        match addr_hint {
+            Some(a) => self.add_peer_addr(a),
+            None => {
+                let _ = self.add_peer_by_id(node_id);
+            }
+        }
+        let mut info = info;
+        info.source = "discovered".to_string();
+        info.last_seen = now_secs();
+        self.persist_peer(node_id, info);
+    }
+
+    /// 写入 peer_info + 持久化（供 learn_peer 复用）。
+    fn persist_peer(&self, node_id: [u8; 32], info: PeerInfo) {
+        self.peer_info.insert(node_id.to_vec(), info.clone());
+        if let Some(s) = &self.store {
+            if let Ok(js) = serde_json::to_string(&info) {
+                if let Err(e) = s.put_peer(&node_id, &js) {
+                    tracing::warn!("persist discovered peer failed: {e}");
+                }
+            }
+        }
+    }
+
+    /// 清扫过期的 discovered peer（超过 TTL 未再广播）；manual/种子 peer 不受影响。
+    fn sweep_discovered(&self, ttl_secs: u64) {
+        let now = now_secs();
+        let stale: Vec<[u8; 32]> = self
+            .peer_info
+            .iter()
+            .filter(|e| {
+                let i = e.value();
+                i.source == "discovered"
+                    && i.last_seen != 0
+                    && now.saturating_sub(i.last_seen) > ttl_secs
+            })
+            .filter_map(|e| <[u8; 32]>::try_from(e.key().as_slice()).ok())
+            .collect();
+        for id in stale {
+            self.remove_peer(id);
+            tracing::info!(peer = %hex_encode(&id[..4]), "discovered peer expired (TTL)");
+        }
+    }
+
+    /// 后台联邦成员发现：加入成员频道，周期广播自身卡片、收播他人卡片(验签后入表)、TTL 清扫。
+    /// 镜像 `spawn_federation_sync`。内部对 join 做重试以吸收 `serve()` 顺序（Router 起来后才能收发）。
+    pub fn spawn_membership(self: Arc<Self>, cfg: MembershipCfg) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let channel = Self::membership_channel(&cfg.federation);
+            let announce_iv = std::time::Duration::from_secs(cfg.announce_interval_secs.max(5));
+            let ttl_secs = cfg.ttl_secs.max(announce_iv.as_secs() * 3);
+            // 重试 join：serve() 的 Router 起来后 gossip 才能收发。
+            let mut topic = loop {
+                match self.join_channel(channel, self.peers_list()).await {
+                    Ok(t) => break t,
+                    Err(e) => {
+                        tracing::debug!("membership join retry: {e}");
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
+                }
+            };
+            tracing::info!(federation = %cfg.federation, "membership gossip joined");
+            // 先立即广播一次，加速被发现。
+            let _ = topic.publish(self.membership_card(&cfg.card)).await;
+            let mut last_announce = tokio::time::Instant::now();
+            let mut last_sweep = tokio::time::Instant::now();
+            loop {
+                if last_announce.elapsed() >= announce_iv {
+                    if let Err(e) = topic.publish(self.membership_card(&cfg.card)).await {
+                        tracing::debug!("membership publish failed: {e}");
+                    }
+                    last_announce = tokio::time::Instant::now();
+                }
+                // 带 1s 超时的收播：既能及时收，又能周期回到顶部广播/清扫。
+                match tokio::time::timeout(std::time::Duration::from_secs(1), topic.recv()).await {
+                    Ok(Some(msg)) => self.on_membership_msg(&msg.content),
+                    Ok(None) => {
+                        // 频道关闭：重新加入。
+                        match self.join_channel(channel, self.peers_list()).await {
+                            Ok(t) => topic = t,
+                            Err(_) => {
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await
+                            }
+                        }
+                    }
+                    Err(_) => {} // 超时：正常，回到循环顶部。
+                }
+                if last_sweep.elapsed() >= announce_iv {
+                    self.sweep_discovered(ttl_secs);
+                    last_sweep = tokio::time::Instant::now();
+                }
+            }
+        })
     }
 }
 

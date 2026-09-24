@@ -70,9 +70,13 @@ pub async fn serve(
         .route("/storage", get(storage))
         .route("/traffic", get(traffic))
         .route("/system", get(system))
+        .route("/identity", get(identity))
+        .route("/peers", get(peers))
         .route("/ban", post(ban))
         .route("/unban", post(unban))
         .route("/kick", post(kick))
+        .route("/add-peer", post(add_peer))
+        .route("/remove-peer", post(remove_peer))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth))
         .with_state(state);
 
@@ -195,6 +199,35 @@ async fn system(State(st): State<AppState>) -> Json<Value> {
     }))
 }
 
+async fn identity(State(st): State<AppState>) -> Json<Value> {
+    Json(json!({
+        "node_id": hex(st.node.id().as_bytes()),
+        "addr": im_transport::addr_to_string(&st.node.addr()),
+    }))
+}
+
+async fn peers(State(st): State<AppState>) -> Json<Value> {
+    let peers: Vec<Value> = st
+        .node
+        .peers_detail()
+        .into_iter()
+        .map(|(id, info)| {
+            // 空 source（旧行/配置种子）按 manual 呈现。
+            let source = if info.source.is_empty() {
+                "manual"
+            } else {
+                info.source.as_str()
+            };
+            json!({
+                "id": id, "name": info.name, "address": info.address,
+                "email": info.email, "mobile": info.mobile, "gps": info.gps,
+                "source": source, "last_seen": info.last_seen,
+            })
+        })
+        .collect();
+    Json(json!({ "peers": peers }))
+}
+
 #[derive(serde::Deserialize)]
 struct IdReq {
     id: String,
@@ -214,6 +247,53 @@ async fn kick(State(st): State<AppState>, Json(r): Json<IdReq>) -> Result<Json<V
     let id = parse_id(&r.id).ok_or(StatusCode::BAD_REQUEST)?;
     let cut = st.node.kick(id);
     Ok(Json(json!({ "ok": true, "cut": cut })))
+}
+
+/// 运行时添加/编辑联邦对等（node id + 名称/物理地址/email/mobile/gps）——无需重启；重复 id 即编辑。
+#[derive(serde::Deserialize, Default)]
+struct PeerReq {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    address: String,
+    #[serde(default)]
+    email: String,
+    #[serde(default)]
+    mobile: String,
+    #[serde(default)]
+    gps: String,
+}
+
+async fn add_peer(
+    State(st): State<AppState>,
+    Json(r): Json<PeerReq>,
+) -> Result<Json<Value>, StatusCode> {
+    let node_id = parse_id(&r.id).ok_or(StatusCode::BAD_REQUEST)?;
+    let info = im_node::PeerInfo {
+        name: r.name,
+        address: r.address,
+        email: r.email,
+        mobile: r.mobile,
+        gps: r.gps,
+        source: "manual".to_string(),
+        last_seen: 0,
+    };
+    st.node
+        .add_peer_full(node_id, info)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    tracing::info!("peer added/updated at runtime");
+    Ok(Json(json!({ "ok": true, "peers": st.node.peer_count() })))
+}
+
+async fn remove_peer(
+    State(st): State<AppState>,
+    Json(r): Json<IdReq>,
+) -> Result<Json<Value>, StatusCode> {
+    let id = parse_id(&r.id).ok_or(StatusCode::BAD_REQUEST)?;
+    let existed = st.node.remove_peer(id);
+    Ok(Json(json!({ "ok": true, "existed": existed, "peers": st.node.peer_count() })))
 }
 
 /// 后台每 2s 采样本进程 CPU%/RSS。

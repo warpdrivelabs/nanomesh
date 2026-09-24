@@ -15,6 +15,8 @@ const ENTITIES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("entities")
 const GROUPS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("groups");
 /// 黑名单：key = 被禁公钥(32)，value 置空（存在即被禁）。无白名单——默认放行，仅拒绝名单内公钥。
 const BLACKLIST: TableDefinition<&[u8], &[u8]> = TableDefinition::new("blacklist");
+/// 联邦对等：key = 对端公钥(32)，value = 元数据 JSON（name/addr/email/mobile/gps，可扩展）。
+const PEERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("peers");
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -46,6 +48,7 @@ impl RedbStore {
             wtx.open_table(ENTITIES).map_err(db_err)?;
             wtx.open_table(GROUPS).map_err(db_err)?;
             wtx.open_table(BLACKLIST).map_err(db_err)?;
+            wtx.open_table(PEERS).map_err(db_err)?;
         }
         wtx.commit().map_err(db_err)?;
         Ok(Self { db })
@@ -210,6 +213,44 @@ impl RedbStore {
             let (k, _v) = item.map_err(db_err)?;
             if let Ok(arr) = <[u8; 32]>::try_from(k.value()) {
                 out.push(arr);
+            }
+        }
+        Ok(out)
+    }
+
+    // ---- 联邦对等持久化（value 为不透明元数据 JSON 串，上层自解释）----
+
+    /// 写入/更新一个对等（公钥 → 元数据 JSON）。
+    pub fn put_peer(&self, id: &[u8], meta_json: &str) -> Result<()> {
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        {
+            let mut t = wtx.open_table(PEERS).map_err(db_err)?;
+            t.insert(id, meta_json.as_bytes()).map_err(db_err)?;
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 移除一个对等（幂等）。
+    pub fn remove_peer(&self, id: &[u8]) -> Result<()> {
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        {
+            let mut t = wtx.open_table(PEERS).map_err(db_err)?;
+            t.remove(id).map_err(db_err)?;
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 加载全部对等（node id + 元数据 JSON 串）。
+    pub fn all_peers(&self) -> Result<Vec<([u8; 32], String)>> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(PEERS).map_err(db_err)?;
+        let mut out = Vec::new();
+        for item in t.iter().map_err(db_err)? {
+            let (k, v) = item.map_err(db_err)?;
+            if let Ok(id) = <[u8; 32]>::try_from(k.value()) {
+                out.push((id, String::from_utf8_lossy(v.value()).into_owned()));
             }
         }
         Ok(out)

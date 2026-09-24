@@ -131,3 +131,44 @@ strong { font-weight: 700; }
   .side__brand { padding: 0 8px; } .side__nav { flex-direction: row; } .side__foot { border: none; padding: 0; }
   .navitem span { display: none; }
 }
+
+/* ---------- 服务标识 / 二维码 ---------- */
+.idcards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-bottom: 14px; }
+.idcard { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.idcard__head { align-self: flex-start; }
+.qr { width: 200px; height: 200px; background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 8px; }
+.idcard__val { width: 100%; }
+.idcard__val .wrap { display: block; font-size: 11.5px; color: var(--text-2); word-break: break-all; line-height: 1.5;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; max-height: 92px; overflow: auto; }
+.badge--node { background: var(--accent-soft); color: var(--accent); }
+.badge--addr { background: color-mix(in srgb, var(--sky) 16%, transparent); color: var(--sky); }
+/* 对等来源徽标：手工/种子 vs gossip 自动发现 */
+.badge--manual { background: var(--accent-soft); color: var(--accent); }
+.badge--discovered { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+
+/* ---------- 对等节点 添加表单 ---------- */
+.addpeer { display: flex; gap: 9px; }
+.addpeer input { flex: 1; background: var(--surface); color: var(--text); border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm); padding: 10px 12px; }
+.addpeer input:focus { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
+
+/* ---------- 修改密码 表单 ---------- */
+.auth-inline { max-width: 420px; }
+.pwform { display: flex; flex-direction: column; gap: 13px; margin-top: 6px; }
+.okmsg { background: var(--ok-soft); color: var(--ok); border: 1px solid color-mix(in srgb, var(--ok) 30%, transparent);
+  padding: 9px 12px; border-radius: var(--r-sm); font-size: 13px; font-weight: 600; }
+
+/* ---------- 对等节点 多字段表单 ---------- */
+.peerform { display: flex; flex-direction: column; gap: 12px; margin-top: 4px; }
+.peergrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.peerform .field input { width: 100%; background: var(--surface); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: var(--r-sm); padding: 10px 12px;
+  transition: border-color .15s, box-shadow .15s; }
+.peerform .field input:focus { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
+.peerform .field > span { font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+@media (max-width: 640px) { .peergrid { grid-template-columns: 1fr; } }
+
+/* 对等节点 操作列 / 表单按钮 */
+.nowrap { white-space: nowrap; }
+.peerbtns { display: flex; gap: 9px; }
+.tbl .btn--sm + .btn--sm { margin-left: 6px; }

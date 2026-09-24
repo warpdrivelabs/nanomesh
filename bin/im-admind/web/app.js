@@ -40,15 +40,23 @@ const ICONS = {
   storage: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>',
   traffic: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l5-6 4 3 4-7 5 5"/></svg>',
   system: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="4" width="16" height="12" rx="2"/><path d="M8 20h8M12 16v4" stroke-linecap="round"/></svg>',
+  peers: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="6" cy="6" r="2.4"/><circle cx="18" cy="6" r="2.4"/><circle cx="12" cy="18" r="2.4"/><path d="M7.6 7.6 12 15.6 16.4 7.6M8.4 6h7.2" stroke-linecap="round"/></svg>',
+  identity: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="11" r="2"/><path d="M5.5 16c.6-1.6 4.2-1.6 6 0M14 9h4M14 12h4M14 15h2" stroke-linecap="round"/></svg>',
+  password: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v2" stroke-linecap="round"/></svg>',
 };
 const TABS = [
   { k: "overview", label: "总览" },
   { k: "connections", label: "连接监控" },
   { k: "users", label: "用户管理" },
+  { k: "peers", label: "对等节点" },
   { k: "storage", label: "存储管理" },
   { k: "traffic", label: "流量监控" },
   { k: "system", label: "系统资源" },
+  { k: "identity", label: "服务标识" },
+  { k: "password", label: "修改密码" },
 ];
+// 无需轮询的静态面板（表单/稳定信息）——渲染一次即可，避免定时重渲染打断输入。
+const STATIC_TABS = new Set(["identity", "password"]);
 
 /* ---------------- 根：鉴权路由 ---------------- */
 class AdminApp extends HTMLElement {
@@ -156,10 +164,15 @@ class AdminShell extends HTMLElement {
     this.querySelector(".top__title").textContent = TABS.find((t) => t.k === k).label;
     clearInterval(this.timer);
     this.refresh();
-    this.timer = setInterval(() => this.refresh(), 3000);
+    if (!STATIC_TABS.has(k)) this.timer = setInterval(() => this.refresh(), 3000);
   }
   async refresh() {
     const host = this.querySelector(".host"), meta = this.querySelector(".top__meta");
+    if (this.tab === "password") {
+      meta.textContent = "";
+      renderPassword(host);
+      return;
+    }
     try {
       const data = await api("/api/" + this.tab);
       meta.textContent = "刷新于 " + new Date().toLocaleTimeString();
@@ -256,7 +269,136 @@ function renderPanel(tab, host, d, refresh) {
       ${metric("在线连接", d.online)}
     </div>
     <div class="card"><p class="muted">CPU / 内存为进程实时监控。真正的 CPU / 内存<strong>硬配额</strong>属部署级（systemd / cgroup），此处仅展示用量，不做强制限制。</p></div>`;
+  } else if (tab === "identity") {
+    host.innerHTML = `
+    <div class="idcards">
+      <div class="card idcard">
+        <div class="idcard__head"><span class="badge badge--node">Node ID · 节点公钥</span></div>
+        <img class="qr" src="/api/qr?kind=node&t=${Date.now()}" alt="node id QR" />
+        <div class="idcard__val"><code class="mono wrap">${esc(d.node_id)}</code></div>
+        <button class="btn btn--sm btn--block" data-copy="${esc(d.node_id)}">复制 Node ID</button>
+      </div>
+      <div class="card idcard">
+        <div class="idcard__head"><span class="badge badge--addr">完整地址 · IM_NODE_ADDR</span></div>
+        <img class="qr" src="/api/qr?kind=addr&t=${Date.now()}" alt="addr QR" />
+        <div class="idcard__val"><code class="mono wrap">${esc(d.addr)}</code></div>
+        <button class="btn btn--sm btn--block" data-copy="${esc(d.addr)}">复制完整地址</button>
+      </div>
+    </div>
+    <p class="muted">二维码按类型着色（<b style="color:var(--accent)">靛蓝=Node ID</b> / <b style="color:var(--sky)">天蓝=完整地址</b>），载荷带类型前缀 <code>imspace:node:</code> / <code>imspace:addr:</code> 以区分类型。</p>`;
+    host.querySelectorAll("[data-copy]").forEach((b) => (b.onclick = () => {
+      navigator.clipboard?.writeText(b.dataset.copy);
+      const t = b.textContent; b.textContent = "已复制 ✓"; setTimeout(() => (b.textContent = t), 1200);
+    }));
+  } else if (tab === "peers") {
+    const peers = d.peers || [];
+    const ago = (s) => {
+      if (!s) return "";
+      const d = Math.max(0, Math.floor(Date.now() / 1000) - s);
+      if (d < 60) return d + "s前";
+      if (d < 3600) return Math.floor(d / 60) + "分前";
+      if (d < 86400) return Math.floor(d / 3600) + "时前";
+      return Math.floor(d / 86400) + "天前";
+    };
+    const rows = peers.map((p, i) => {
+      const disc = p.source === "discovered";
+      const badge = disc
+        ? `<span class="badge badge--discovered">自动发现</span>${p.last_seen ? ` <span class="muted">${ago(p.last_seen)}</span>` : ""}`
+        : `<span class="badge badge--manual">手工</span>`;
+      const actions = disc
+        ? `<button class="btn btn--sm btn--danger" data-ban="${p.id}" title="永久排除：断开连接且不再被自动发现学回">封禁</button>
+           <button class="btn btn--sm" data-del="${p.id}" title="瞬时移除；对方仍在广播会被再次发现">移除</button>`
+        : `<button class="btn btn--sm" data-edit="${i}">编辑</button>
+           <button class="btn btn--sm btn--danger" data-del="${p.id}">删除</button>`;
+      return `<tr>
+      <td><b>${esc(p.name) || '<span class="muted">—</span>'}</b></td>
+      <td class="nowrap">${badge}</td>
+      <td><code class="mono">${shortId(p.id)}</code></td>
+      <td>${esc(p.address) || '<span class="muted">—</span>'}</td>
+      <td>${esc(p.email) || '<span class="muted">—</span>'}</td>
+      <td>${esc(p.mobile) || '<span class="muted">—</span>'}</td>
+      <td>${esc(p.gps) || '<span class="muted">—</span>'}</td>
+      <td class="right nowrap">${actions}</td>
+    </tr>`;
+    }).join("");
+    host.innerHTML = `
+    <div class="card">
+      <div class="card__title" id="pf-title">添加对等节点（手工/种子 · 运行时生效 · 无需重启 · 连接按 Node ID 发现）</div>
+      <p class="muted" style="margin:-4px 0 12px">手工添加的即「种子」，同时作为 gossip 引导；其余成员经成员频道<b>自动发现</b>，每台只需配少量种子。</p>
+      <form class="peerform">
+        <label class="field"><span>名称</span><input name="name" placeholder="如：北京机房 imd"></label>
+        <label class="field"><span>Node ID（64 位 hex，必填）</span><input name="id" spellcheck="false" placeholder="对端 node 公钥"></label>
+        <label class="field"><span>物理地址（街道门牌等）</span><input name="address" placeholder="如：北京市海淀区 XX 路 8 号"></label>
+        <div class="peergrid">
+          <label class="field"><span>Email</span><input name="email" placeholder="ops@example.com"></label>
+          <label class="field"><span>手机</span><input name="mobile" placeholder="+86 …"></label>
+          <label class="field"><span>GPS</span><input name="gps" placeholder="39.90,116.40"></label>
+        </div>
+        <div class="err" hidden></div>
+        <div class="peerbtns"><button class="btn btn--primary" type="submit">保存对等</button>
+          <button class="btn btn--ghost" type="reset">清空</button></div>
+      </form>
+    </div>
+    <div class="card"><table class="tbl">
+      <thead><tr><th>名称</th><th>来源</th><th>Node ID</th><th>物理地址</th><th>Email</th><th>手机</th><th>GPS</th><th></th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="8" class="muted center">暂无对等节点</td></tr>'}</tbody></table></div>`;
+    const form = host.querySelector(".peerform"), err = host.querySelector(".err");
+    const setf = (k, v) => { const el = form.querySelector(`[name="${k}"]`); if (el) el.value = v || ""; };
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault(); err.hidden = true;
+      const fd = new FormData(form); const g = (k) => (fd.get(k) || "").toString().trim();
+      const body = { id: g("id"), name: g("name"), address: g("address"), email: g("email"), mobile: g("mobile"), gps: g("gps") };
+      if (!/^[0-9a-fA-F]{64}$/.test(body.id)) { err.textContent = "请填写 64 位十六进制 Node ID"; err.hidden = false; return; }
+      try { await api("/api/add-peer", { method: "POST", body }); form.reset(); host.querySelector("#pf-title").textContent = "添加对等节点（手工/种子 · 运行时生效 · 无需重启 · 连接按 Node ID 发现）"; refresh(); }
+      catch (ex) { err.textContent = ex.message; err.hidden = false; }
+    });
+    host.querySelectorAll("[data-edit]").forEach((b) => (b.onclick = () => {
+      const p = peers[+b.dataset.edit];
+      setf("name", p.name); setf("id", p.id); setf("address", p.address);
+      setf("email", p.email); setf("mobile", p.mobile); setf("gps", p.gps);
+      host.querySelector("#pf-title").textContent = "编辑对等节点（Node ID 相同即覆盖保存）";
+      form.scrollIntoView({ behavior: "smooth", block: "start" });
+    }));
+    host.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => {
+      if (!confirm("删除该对等节点？")) return;
+      b.disabled = true;
+      try { await api("/api/remove-peer", { method: "POST", body: { id: b.dataset.del } }); refresh(); }
+      catch (ex) { alert(ex.message); b.disabled = false; }
+    }));
+    host.querySelectorAll("[data-ban]").forEach((b) => (b.onclick = async () => {
+      if (!confirm("封禁该节点？将断开其连接，并不再被自动发现学回（永久排除）。")) return;
+      b.disabled = true;
+      try {
+        await api("/api/ban", { method: "POST", body: { id: b.dataset.ban } });
+        await api("/api/remove-peer", { method: "POST", body: { id: b.dataset.ban } });
+        refresh();
+      } catch (ex) { alert(ex.message); b.disabled = false; }
+    }));
   }
+}
+
+function renderPassword(host) {
+  host.innerHTML = `
+  <div class="card auth-inline">
+    <div class="card__title">修改管理员密码</div>
+    <form class="pwform">
+      <label class="field"><span>原密码</span><input name="o" type="password" autocomplete="current-password"></label>
+      <label class="field"><span>新密码（至少 6 位）</span><input name="n" type="password" autocomplete="new-password"></label>
+      <label class="field"><span>确认新密码</span><input name="c" type="password" autocomplete="new-password"></label>
+      <div class="err" hidden></div>
+      <div class="okmsg" hidden>✓ 密码已修改</div>
+      <button class="btn btn--primary" type="submit">保存</button>
+    </form>
+  </div>`;
+  const form = host.querySelector(".pwform"), err = host.querySelector(".err"), ok = host.querySelector(".okmsg");
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault(); err.hidden = true; ok.hidden = true;
+    if (form.n.value !== form.c.value) { err.textContent = "两次新密码不一致"; err.hidden = false; return; }
+    try {
+      await api("/api/change-password", { method: "POST", body: { oldPassword: form.o.value, newPassword: form.n.value } });
+      form.reset(); ok.hidden = false;
+    } catch (ex) { err.textContent = ex.message; err.hidden = false; }
+  });
 }
 
 function drawChart(cv) {

@@ -6,7 +6,7 @@ mod auth;
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -93,9 +93,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/storage", get(|s: State<AppState>, h: HeaderMap| proxy_get(s, h, "/storage")))
         .route("/api/traffic", get(|s: State<AppState>, h: HeaderMap| proxy_get(s, h, "/traffic")))
         .route("/api/system", get(|s: State<AppState>, h: HeaderMap| proxy_get(s, h, "/system")))
+        .route("/api/identity", get(|s: State<AppState>, h: HeaderMap| proxy_get(s, h, "/identity")))
+        .route("/api/peers", get(|s: State<AppState>, h: HeaderMap| proxy_get(s, h, "/peers")))
+        .route("/api/qr", get(qr))
         .route("/api/ban", post(|s: State<AppState>, h: HeaderMap, b: Json<serde_json::Value>| proxy_post(s, h, "/ban", b)))
         .route("/api/unban", post(|s: State<AppState>, h: HeaderMap, b: Json<serde_json::Value>| proxy_post(s, h, "/unban", b)))
         .route("/api/kick", post(|s: State<AppState>, h: HeaderMap, b: Json<serde_json::Value>| proxy_post(s, h, "/kick", b)))
+        .route("/api/add-peer", post(|s: State<AppState>, h: HeaderMap, b: Json<serde_json::Value>| proxy_post(s, h, "/add-peer", b)))
+        .route("/api/remove-peer", post(|s: State<AppState>, h: HeaderMap, b: Json<serde_json::Value>| proxy_post(s, h, "/remove-peer", b)))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;
@@ -256,5 +261,49 @@ async fn proxy_post(
             Json(json!({ "error": format!("imd 不可达: {e}") })),
         )
             .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct QrQuery {
+    kind: String,
+}
+
+/// 生成节点标识二维码(SVG)。kind=node|addr；载荷带类型前缀以区分类型，并按类型着色。
+async fn qr(State(s): State<AppState>, headers: HeaderMap, Query(q): Query<QrQuery>) -> Response {
+    if !session_ok(&s, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if s.auth.must_change() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let ident: serde_json::Value = match s
+        .http
+        .get(format!("{}/identity", s.imd_api))
+        .header("x-admin-token", &s.imd_token)
+        .send()
+        .await
+    {
+        Ok(r) => r.json().await.unwrap_or_default(),
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("imd 不可达: {e}")).into_response(),
+    };
+    // 类型前缀 → 扫码可区分类型；并按类型着色（node=靛蓝, addr=天蓝）。
+    let (payload, dark) = if q.kind == "addr" {
+        (format!("imspace:addr:{}", ident["addr"].as_str().unwrap_or("")), "#0ea5e9")
+    } else {
+        (format!("imspace:node:{}", ident["node_id"].as_str().unwrap_or("")), "#5b5bf0")
+    };
+    match qrcode::QrCode::new(payload.as_bytes()) {
+        Ok(code) => {
+            let svg = code
+                .render::<qrcode::render::svg::Color>()
+                .min_dimensions(200, 200)
+                .quiet_zone(true)
+                .dark_color(qrcode::render::svg::Color(dark))
+                .light_color(qrcode::render::svg::Color("#ffffff"))
+                .build();
+            ([(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8")], svg).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("qr: {e}")).into_response(),
     }
 }

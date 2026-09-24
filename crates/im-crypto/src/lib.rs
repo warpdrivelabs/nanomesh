@@ -104,6 +104,20 @@ pub fn authorize(
     }
 }
 
+/// 通用 Ed25519 签名：用节点私钥对任意消息签名，返回 64 字节签名。
+/// 供联邦成员广播等「自证作者身份」场景使用（gossip 的 `delivered_from` 非原作者，
+/// 无逐条作者签名，故须应用层签名 + 按声明的 node id 验签）。
+pub fn sign_bytes(sk: &SecretKey, msg: &[u8]) -> [u8; 64] {
+    sk.sign(msg).to_bytes()
+}
+
+/// 通用 Ed25519 验签：对 32 字节公钥(=node id)校验消息签名。
+pub fn verify_bytes(pubkey: &[u8; 32], msg: &[u8], sig: &[u8; 64]) -> Result<()> {
+    let pk = PublicKey::from_bytes(pubkey).map_err(|_| CryptoError::BadBytes)?;
+    pk.verify(msg, &Signature::from_bytes(sig))
+        .map_err(|_| CryptoError::BadSignature)
+}
+
 fn pubkey_from(b: &[u8]) -> Result<PublicKey> {
     let arr: [u8; 32] = b.try_into().map_err(|_| CryptoError::BadBytes)?;
     PublicKey::from_bytes(&arr).map_err(|_| CryptoError::BadBytes)
@@ -146,5 +160,29 @@ mod tests {
         let mut tampered = g.clone();
         tampered.action = "evil".into();
         assert!(matches!(verify_grant(&tampered, 10), Err(CryptoError::BadSignature)));
+    }
+
+    #[test]
+    fn sign_verify_roundtrip_and_tamper() {
+        let sk = SecretKey::from_bytes(&[7u8; 32]);
+        let node_id = *sk.public().as_bytes();
+        let msg = b"membership-card:node||ts||name||...";
+        let sig = sign_bytes(&sk, msg);
+
+        // 正确公钥 + 原消息 → 通过
+        assert!(verify_bytes(&node_id, msg, &sig).is_ok());
+        // 篡改消息（改一个字节）→ 验签失败
+        let mut bad_msg = msg.to_vec();
+        bad_msg[0] ^= 0xff;
+        assert!(matches!(
+            verify_bytes(&node_id, &bad_msg, &sig),
+            Err(CryptoError::BadSignature)
+        ));
+        // 冒充他人 node id（换公钥）→ 验签失败：作者身份无法伪造
+        let other = *SecretKey::from_bytes(&[8u8; 32]).public().as_bytes();
+        assert!(matches!(
+            verify_bytes(&other, msg, &sig),
+            Err(CryptoError::BadSignature)
+        ));
     }
 }
