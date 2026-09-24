@@ -1,0 +1,22 @@
+[package]
+name = "im-admind"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "im-admind"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+argon2 = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+reqwest = { version = "0.13", default-features = false, features = ["json"] }

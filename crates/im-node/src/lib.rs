@@ -30,6 +30,28 @@ pub enum NodeError {
 type Sessions = DashMap<Vec<u8>, IrohConnection>;
 type Peers = DashMap<Vec<u8>, im_transport::Addr>;
 
+/// 会话旁挂元数据（不改动 `Sessions` 值类型；用于管理台展示接入时长）。
+#[derive(Clone, Copy)]
+struct SessionMeta {
+    since: std::time::SystemTime,
+}
+type SessionsMeta = DashMap<Vec<u8>, SessionMeta>;
+
+/// 一条活动会话的管理快照（后端管理台「连接监控」用）。
+pub struct SessionRow {
+    pub id: [u8; 32],
+    pub since_unix_ms: u64,
+    pub bytes_tx: u64,
+    pub bytes_rx: u64,
+    pub alpn: String,
+}
+
+/// 存储统计（后端管理台「存储管理」用）。
+pub struct StoreStat {
+    pub entities: usize,
+    pub groups: usize,
+}
+
 /// 处理器共享上下文（含联邦所需的本节点端点/身份/对等表）。
 #[derive(Clone)]
 struct Ctx {
@@ -41,6 +63,7 @@ struct Ctx {
     peers: Arc<Peers>,
     node_id: [u8; 32],
     blacklist: Arc<DashSet<[u8; 32]>>,
+    sessions_meta: Arc<SessionsMeta>,
 }
 
 /// 内存实体目录：`entity_id → Entity`，支持 kind 前缀 / 能力 / 属性过滤。
@@ -108,6 +131,7 @@ pub struct Node {
     peers: Arc<DashMap<Vec<u8>, im_transport::Addr>>, // 联邦对等节点：node_id -> addr
     gossip: Gossip,                                    // 频道 pub/sub（与单播共用同一 endpoint）
     blacklist: Arc<DashSet<[u8; 32]>>,                 // 黑名单：被禁公钥（无白名单，默认放行）
+    sessions_meta: Arc<SessionsMeta>,                  // 会话旁挂元数据（接入时间）
 }
 
 impl Node {
@@ -231,6 +255,7 @@ impl Node {
             peers: Arc::new(DashMap::new()),
             gossip,
             blacklist,
+            sessions_meta: Arc::new(SessionsMeta::new()),
         })
     }
 
@@ -270,6 +295,7 @@ impl Node {
         }
         // 立即切断在线会话（若有），并主动关闭连接。
         if let Some((_, conn)) = self.sessions.remove(&pubkey[..]) {
+            self.sessions_meta.remove(&pubkey[..]);
             conn.close(0u32.into(), b"banned");
             tracing::info!(online = self.sessions.len(), "banned peer session cut");
         }
@@ -345,6 +371,63 @@ impl Node {
         self.sessions.len()
     }
 
+    // ---- 后端管理台访问器 ----
+
+    /// 活动会话快照（连接监控）。顺带清理陈旧的会话元数据。
+    pub fn sessions_snapshot(&self) -> Vec<SessionRow> {
+        self.sessions_meta.retain(|k, _| self.sessions.contains_key(k));
+        self.sessions
+            .iter()
+            .map(|e| {
+                let key = e.key();
+                let conn = e.value();
+                let mut id = [0u8; 32];
+                if key.len() == 32 {
+                    id.copy_from_slice(key);
+                }
+                let since_unix_ms = self
+                    .sessions_meta
+                    .get(key)
+                    .and_then(|m| m.since.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let stats = conn.stats();
+                SessionRow {
+                    id,
+                    since_unix_ms,
+                    bytes_tx: stats.udp_tx.bytes,
+                    bytes_rx: stats.udp_rx.bytes,
+                    alpn: String::from_utf8_lossy(conn.alpn()).into_owned(),
+                }
+            })
+            .collect()
+    }
+
+    /// 群组数量。
+    pub fn groups_count(&self) -> usize {
+        self.groups.len()
+    }
+
+    /// 存储统计（实体/群组数，内存计数，与持久层一致）。
+    pub fn store_stats(&self) -> StoreStat {
+        StoreStat {
+            entities: self.dir.len(),
+            groups: self.groups.len(),
+        }
+    }
+
+    /// 踢下线：断开某公钥的会话，但**不**拉黑（区别于 `ban`）。返回是否有会话被断。
+    pub fn kick(&self, pubkey: [u8; 32]) -> bool {
+        self.sessions_meta.remove(&pubkey[..]);
+        if let Some((_, conn)) = self.sessions.remove(&pubkey[..]) {
+            conn.close(0u32.into(), b"kicked");
+            tracing::info!(online = self.sessions.len(), "peer kicked");
+            true
+        } else {
+            false
+        }
+    }
+
     /// 服务：用 iroh `Router` 统一分流 accept —— `imspace/0` 走单播/命令/联邦处理，
     /// `/iroh-gossip/1` 走 gossip 频道；二者共用同一 endpoint。阻塞至进程结束。
     pub async fn serve(&self) -> Result<(), NodeError> {
@@ -359,6 +442,7 @@ impl Node {
                 peers: self.peers.clone(),
                 node_id: self.ep.id_bytes(),
                 blacklist: self.blacklist.clone(),
+                sessions_meta: self.sessions_meta.clone(),
             },
         };
         let gossip_gate = GossipGate {
@@ -412,6 +496,9 @@ impl ProtocolHandler for ImspaceProto {
         }
         let rid = rid_arr.to_vec();
         self.ctx.sessions.insert(rid.clone(), conn.clone());
+        self.ctx
+            .sessions_meta
+            .insert(rid.clone(), SessionMeta { since: std::time::SystemTime::now() });
         tracing::info!(online = self.ctx.sessions.len(), "session up");
 
         // 连接关闭事件驱动地清理会话表（仅当表中仍是「这条」连接时移除，避免误删重连后的新会话）。

@@ -259,23 +259,56 @@ impl NodeEndpoint {
     }
 }
 
+/// 全局应用层流量计数（gram 收发条数与字节数，含 4 字节长度前缀）。供后端管理台流量监控。
+static GRAMS_IN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static GRAMS_OUT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BYTES_IN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BYTES_OUT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 累计应用层流量快照。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TrafficStat {
+    pub grams_in: u64,
+    pub grams_out: u64,
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+}
+
+/// 读取当前累计流量（进程级全局，自启动累加）。
+pub fn traffic_snapshot() -> TrafficStat {
+    use std::sync::atomic::Ordering::Relaxed;
+    TrafficStat {
+        grams_in: GRAMS_IN.load(Relaxed),
+        grams_out: GRAMS_OUT.load(Relaxed),
+        bytes_in: BYTES_IN.load(Relaxed),
+        bytes_out: BYTES_OUT.load(Relaxed),
+    }
+}
+
 /// 在双向流的发送端写入一个 `Gram`（4 字节大端长度前缀 + prost 编码）。
 pub async fn write_gram(send: &mut SendStream, gram: &Gram) -> Result<()> {
+    use std::sync::atomic::Ordering::Relaxed;
     let buf = gram.encode_to_vec();
     let len = (buf.len() as u32).to_be_bytes();
     send.write_all(&len).await.map_err(err)?;
     send.write_all(&buf).await.map_err(err)?;
+    GRAMS_OUT.fetch_add(1, Relaxed);
+    BYTES_OUT.fetch_add((buf.len() + 4) as u64, Relaxed);
     Ok(())
 }
 
 /// 从双向流的接收端读取一个 `Gram`。
 pub async fn read_gram(recv: &mut RecvStream) -> Result<Gram> {
+    use std::sync::atomic::Ordering::Relaxed;
     let mut len = [0u8; 4];
     recv.read_exact(&mut len).await.map_err(err)?;
     let n = u32::from_be_bytes(len) as usize;
     let mut buf = vec![0u8; n];
     recv.read_exact(&mut buf).await.map_err(err)?;
-    Gram::decode(buf.as_slice()).map_err(err)
+    let gram = Gram::decode(buf.as_slice()).map_err(err)?;
+    GRAMS_IN.fetch_add(1, Relaxed);
+    BYTES_IN.fetch_add((n + 4) as u64, Relaxed);
+    Ok(gram)
 }
 
 /// 把 `EndpointAddr` 编码为可分享字符串（JSON），供 CLI/配置传递节点地址。

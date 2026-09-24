@@ -16,6 +16,7 @@ members = [
     "bin/im-gatewayd",
     "bin/im-agent",
     "bin/im-echo",
+    "bin/im-admind",
     "xtask",
 ]
 exclude = ["old_space", "clients"]

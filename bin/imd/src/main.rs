@@ -36,6 +36,8 @@ use std::time::Duration;
 use clap::Parser;
 use serde::Deserialize;
 
+mod admin;
+
 #[derive(Parser)]
 #[command(name = "imd", version, about = "imspace decentralized IM node")]
 struct Args {
@@ -65,6 +67,20 @@ struct Config {
     /// 配置的封禁会持久化（重启仍生效）；运行时亦可经 API 增删。
     #[serde(default)]
     blacklist: Vec<String>,
+    /// 后端管理控制 API（供 im-admind 取数/下发控制）。缺省不启用。
+    #[serde(default)]
+    admin: AdminCfg,
+}
+
+/// 后端管理控制 API 配置。绑定本机地址 + 共享 token（同机 im-admind 调用）。
+#[derive(Deserialize, Default)]
+struct AdminCfg {
+    /// 监听地址，如 `127.0.0.1:9611`；为空则不启用。
+    #[serde(default)]
+    api_addr: Option<String>,
+    /// 访问令牌（`X-Admin-Token` 头）。为空则不启用。
+    #[serde(default)]
+    api_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -273,6 +289,22 @@ async fn main() -> anyhow::Result<()> {
     if node.peer_count() > 0 {
         node.clone().spawn_federation_sync(Duration::from_secs(15));
         tracing::info!(peers = node.peer_count(), "federation sync started");
+    }
+
+    // 后端管理控制 API（若配置了 [admin] api_addr + api_token）：供 im-admind 取数/下发控制。
+    if let (Some(api_addr), Some(api_token)) =
+        (cfg.admin.api_addr.clone(), cfg.admin.api_token.clone())
+    {
+        if !api_addr.trim().is_empty() && !api_token.trim().is_empty() {
+            let node_admin = node.clone();
+            let db_path = cfg.db.clone();
+            tokio::spawn(async move {
+                if let Err(e) = admin::serve(node_admin, api_addr, api_token, db_path).await {
+                    tracing::warn!("admin api exited: {e}");
+                }
+            });
+            tracing::info!("admin control API enabled");
+        }
     }
 
     // 供他方配置：nat/selfhost 对端用 IM_NODE_ID(公钥)；lan 对端用 IM_NODE_ADDR。
