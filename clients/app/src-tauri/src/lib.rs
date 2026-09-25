@@ -221,16 +221,32 @@ async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// 供前端 `platform.js` 探测系统（Win/Linux 自绘窗口三键 + 缩放热区；macOS 用系统交通灯）。
+#[tauri::command]
+fn platform() -> &'static str {
+    std::env::consts::OS // "macos" | "windows" | "linux"
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
+        .setup(|_app| {
+            // Windows/Linux：关系统窗口装饰，改用前端自绘标题栏 + 缩放热区（js/platform.js）；
+            // macOS 保留系统交通灯（tauri.conf.json 的 titleBarStyle:Overlay）。
+            #[cfg(not(target_os = "macos"))]
+            if let Some(w) = _app.get_webview_window("main") {
+                let _ = w.set_decorations(false);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             connect,
             send_to,
             directory_query,
             my_id,
-            disconnect
+            disconnect,
+            platform
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

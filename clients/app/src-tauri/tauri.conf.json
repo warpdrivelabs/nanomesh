@@ -4,14 +4,27 @@
   "version": "0.1.0",
   "identifier": "io.nmspace.app",
   "build": {
-    "frontendDist": "../dist",
-    "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "frontendDist": "../ui"
   },
   "app": {
-    "windows": [{ "title": "nmspace", "width": 960, "height": 720 }],
-    "security": { "csp": null }
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "NANO MESH",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 1024,
+        "minHeight": 640,
+        "resizable": true,
+        "center": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:"
+    }
   },
   "bundle": {
     "active": true,

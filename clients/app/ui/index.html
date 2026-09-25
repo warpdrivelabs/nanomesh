@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<!-- NANO MESH 桌面前端 · 采用 cmx-agent 窗口外壳（自绘标题栏 + 活动栏 + 侧栏 + splitter），
+     仅保留「即时通讯」；连接页复用其太空品牌页。数据层走 nmspace 的 Tauri 命令
+     （connect/send_to/directory_query/my_id/disconnect）+ 事件 core://event。 -->
+<html lang="zh" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NANO MESH</title>
+  <link rel="icon" type="image/png" href="nanomesh-logo.png" />
+  <link rel="stylesheet" href="css/tokens.css" />
+  <link rel="stylesheet" href="css/layout.css" />
+  <link rel="stylesheet" href="css/login.css" />
+  <link rel="stylesheet" href="css/im.css" />
+</head>
+<body>
+
+<!-- ═════════════════ 主视图（已连接）═════════════════ -->
+<div id="main-view" class="spa-view" style="display:none">
+  <!-- 原生标题条：mac 用系统交通灯（Overlay），Win/Linux 自绘三键（platform.js 按平台显隐） -->
+  <div class="titlebar" data-tauri-drag-region>
+    <span class="tb-title" data-tauri-drag-region>NANO MESH</span>
+    <div class="sp" data-tauri-drag-region></div>
+    <span class="tb-me" id="tb-me" title="本节点 id"></span>
+    <div class="tb-ctrls">
+      <button class="tb-btn" data-act="toggleSidebar" title="隐藏/显示左侧栏"><span class="ico" id="tb-side-ico">⇤</span></button>
+      <button class="tb-btn" data-act="toggleTheme" title="浅色/深色主题"><span class="ico" id="tb-theme-ico">☀</span></button>
+      <button class="tb-btn" data-act="disconnect" title="断开 / 切换服务器"><span class="ico">⎋</span><span>断开</span></button>
+    </div>
+    <div class="win-ctrls" id="win-ctrls" style="display:none">
+      <button class="win-btn" data-act="winMinimize" title="最小化"><span class="ico">─</span></button>
+      <button class="win-btn" id="win-max-btn" data-act="winToggleMaximize" title="最大化"><span class="ico">□</span></button>
+      <button class="win-btn win-close" data-act="winClose" title="关闭"><span class="ico">✕</span></button>
+    </div>
+  </div>
+  <!-- Win/Linux 无边框缩放热区（mac 用系统边框，platform.js 隐藏这些） -->
+  <div class="resize-handle rh-t" data-resize="North"></div>
+  <div class="resize-handle rh-b" data-resize="South"></div>
+  <div class="resize-handle rh-l" data-resize="West"></div>
+  <div class="resize-handle rh-r" data-resize="East"></div>
+  <div class="resize-handle rh-tl" data-resize="NorthWest"></div>
+  <div class="resize-handle rh-tr" data-resize="NorthEast"></div>
+  <div class="resize-handle rh-bl" data-resize="SouthWest"></div>
+  <div class="resize-handle rh-br" data-resize="SouthEast"></div>
+
+  <div class="workspace">
+    <!-- 活动栏：即时通讯（消息）+ 实体目录 + 节点服务 -->
+    <div class="activitybar">
+      <div class="act active" id="act-im" data-act="showPanel" data-panel="im" title="即时通讯"><span>💬</span></div>
+      <div class="act" id="act-entities" data-act="showPanel" data-panel="entities" title="实体目录"><span>📇</span></div>
+      <div class="act" id="act-nodesvc" data-act="showPanel" data-panel="nodesvc" title="节点服务"><span>🖧</span></div>
+    </div>
+    <!-- 左侧栏：消息会话 / 实体目录 / 节点服务（同时只显示一个 .panel.on）-->
+    <aside>
+      <div class="panel im-panel on" id="panel-im">
+        <div class="brand"><span class="uname">消息</span><button class="brand-refresh" data-act="imRefresh" title="刷新目录">⟳</button></div>
+        <div class="im-search"><input id="im-search-input" type="text" placeholder="🔍 搜索会话" /></div>
+        <div class="im-list" id="im-list"></div>
+      </div>
+      <div class="panel entities-panel" id="panel-entities">
+        <div class="brand"><span class="uname">实体目录</span><button class="brand-refresh" data-act="imRefresh" title="刷新目录">⟳</button></div>
+        <div class="im-search"><input id="entity-search-input" type="text" placeholder="🔍 搜索实体" /></div>
+        <div class="entity-list" id="entity-list"></div>
+      </div>
+      <div class="panel nodesvc-panel" id="panel-nodesvc">
+        <div class="brand"><span class="uname">节点服务</span></div>
+        <div class="nodesvc-actions">
+          <button class="ns-btn ns-primary" id="ns-new">＋ 新增</button>
+          <button class="ns-btn" id="ns-import">导入</button>
+        </div>
+        <div class="nodesvc-form" id="nodesvc-form" style="display:none"></div>
+        <div class="nodesvc-list" id="nodesvc-list"></div>
+      </div>
+    </aside>
+    <div class="splitter" id="splitter" title="拖动调整左侧栏宽度"></div>
+    <!-- 主区：当前会话 -->
+    <main>
+      <div class="conv" id="conv"></div>
+    </main>
+  </div>
+</div>
+
+<!-- ═════════════════ 连接视图（未连接，复用太空品牌页）═════════════════ -->
+<div id="login-view" class="spa-view" style="display:none">
+  <div class="login-drag-strip" data-tauri-drag-region style="display:none"></div>
+  <div class="login-win-ctrls" id="login-win-ctrls" style="display:none">
+    <button class="win-btn" data-act="winMinimize" title="最小化"><span class="ico">─</span></button>
+    <button class="win-btn" data-act="winToggleMaximize" title="最大化"><span class="ico">□</span></button>
+    <button class="win-btn win-close" data-act="winClose" title="关闭"><span class="ico">✕</span></button>
+  </div>
+  <div class="login-page">
+    <div class="brand-panel">
+      <div class="brand-bg">
+        <div class="space-nebula space-nebula--a"></div>
+        <div class="space-nebula space-nebula--b"></div>
+        <div class="space-nebula space-nebula--c"></div>
+        <div class="space-galaxy"></div>
+      </div>
+      <div class="space-stars" id="space-stars-far" aria-hidden="true"></div>
+      <div class="space-stars" id="space-stars-mid" aria-hidden="true"></div>
+      <div class="space-rush" id="space-rush" aria-hidden="true"></div>
+      <div class="space-shooters" id="space-shooters" aria-hidden="true"></div>
+      <header class="brand-header">
+        <img src="nanomesh-logo.png" class="brand-logo" alt="NANO MESH" />
+        <span class="brand-wordmark">NANO<span class="brand-wordmark__accent">MESH</span></span>
+      </header>
+      <div class="brand-content">
+        <div class="brand-eyebrow"><span class="brand-eyebrow__dot"></span> 去中心化网格 · P2P</div>
+        <h1 class="brand-title"><span class="brand-title__text">NANO<span class="brand-title__accent">MESH</span></span></h1>
+        <p class="brand-desc">基于 iroh 的去中心化网格<br>按节点公钥直连 · 同网优先 · 穿透兜底</p>
+        <ul class="brand-features">
+          <li><span class="feature-index">01</span><div class="feature-text"><strong>去中心 P2P</strong><em>节点即身份 · 无中心服务器</em></div></li>
+          <li><span class="feature-index">02</span><div class="feature-text"><strong>同网优先 · 穿透兜底</strong><em>同一网络直连 · 跨网 NAT 打洞</em></div></li>
+          <li><span class="feature-index">03</span><div class="feature-text"><strong>本地身份</strong><em>私钥本地落盘 · 重启复用</em></div></li>
+        </ul>
+      </div>
+      <footer class="brand-footer">
+        <span>© <span id="year"></span> Warp Drive Labs · NANO MESH</span>
+      </footer>
+    </div>
+    <div class="form-panel">
+      <div class="form-wrapper">
+        <div class="form-card">
+          <div class="form-card__head">
+            <h2 class="form-title">连接节点</h2>
+            <p class="form-subtitle">连接一个 nmd 节点，开始去中心化通讯</p>
+          </div>
+          <form id="connect-form" class="login-form" autocomplete="off">
+            <div class="login-form__item">
+              <label for="c-service">节点服务</label>
+              <div class="pubkey-row">
+                <select id="c-service" class="pubkey-select"></select>
+                <button type="button" class="pubkey-gen" id="c-import" title="粘贴公钥/地址，快速新增一个节点服务">＋ 导入</button>
+              </div>
+              <div class="import-box" id="import-box" style="display:none">
+                <input id="import-input" type="text" placeholder="粘贴 64 位公钥 hex，或 NM_NODE_ADDR(JSON)" />
+                <button type="button" class="import-ok" id="import-ok">确定</button>
+                <button type="button" class="import-cancel" id="import-cancel">取消</button>
+              </div>
+              <div class="svc-hint">在主界面「🖧 节点服务」面板可新增/管理（含 selfhost 中继配置）。</div>
+            </div>
+            <div class="login-form__item">
+              <label for="c-name">显示名</label>
+              <input id="c-name" type="text" placeholder="你的昵称（对方目录里显示）" />
+            </div>
+            <button class="login-submit" id="c-submit" type="submit">连 接</button>
+            <div class="error" id="c-error" role="alert"></div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="js/bridge.js" defer></script>
+<script src="js/platform.js" defer></script>
+<script src="js/services.js" defer></script>
+<script src="js/connect.js" defer></script>
+<script src="js/nodesvc.js" defer></script>
+<script src="js/im.js" defer></script>
+<script src="js/main.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,129 @@
+/* ── NANO MESH 即时通讯专属样式（补 cmx-agent 外壳未覆盖的会话/连接件）。全部引 tokens。 ── */
+
+/* 标题栏本节点 id 徽标 */
+.tb-me { font-size: 11.5px; color: var(--muted); margin-right: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; -webkit-app-region: no-drag; }
+
+/* 连接页：节点公钥下拉 + 生成按钮 */
+.pubkey-row { display: flex; gap: 8px; align-items: stretch; }
+.pubkey-select { flex: 1; min-width: 0; height: 44px; padding: 0 12px; border-radius: 11px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--ink); font-size: 13px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; outline: none; cursor: pointer; }
+.pubkey-select:hover { border-color: var(--accent); }
+.pubkey-select:focus { border-color: var(--aqua); }
+.pubkey-gen { flex: 0 0 auto; height: 44px; padding: 0 14px; border-radius: 11px; border: 1px solid var(--aqua);
+  background: var(--accent-soft); color: var(--aqua); font-size: 13px; font-weight: 600; white-space: nowrap; }
+.pubkey-gen:hover { background: var(--aqua); color: #05221a; }
+.pubkey-gen:disabled { opacity: .6; cursor: default; }
+
+/* 导入公钥输入行（点「导入公钥」展开）*/
+.import-box { display: flex; gap: 8px; align-items: stretch; margin-top: 8px; }
+.import-box input { flex: 1; min-width: 0; height: 40px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--ink); font-size: 12.5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; outline: none; }
+.import-box input:focus { border-color: var(--aqua); }
+.import-ok, .import-cancel { flex: 0 0 auto; height: 40px; padding: 0 14px; border-radius: 10px; font-size: 13px; font-weight: 600; }
+.import-ok { border: 1px solid var(--aqua); background: var(--aqua); color: #05221a; }
+.import-ok:hover { filter: brightness(1.08); }
+.import-cancel { border: 1px solid var(--border2); background: var(--surface); color: var(--ink2); }
+.import-cancel:hover { background: var(--hover); color: var(--ink); }
+
+/* 侧栏「即时通讯」头部刷新钮 */
+.brand-refresh { margin-left: auto; width: 26px; height: 26px; border-radius: 7px; color: var(--ink2); font-size: 15px; }
+.brand-refresh:hover { background: var(--hover); color: var(--aqua); }
+
+/* 联系人列表：选中态 + 空态 */
+.im-item.on { background: var(--accent-soft); }
+.im-item.on .nm { color: var(--aqua); }
+.im-empty { color: var(--muted); font-size: 12.5px; padding: 14px 10px; line-height: 1.8; }
+.im-empty--center { margin: auto; text-align: center; }
+/* 联系人列表：纵向堆叠（覆盖 layout.css 里 `.im-list,.im-item{display:flex}` 误带的横向 row）*/
+.im-list { flex: 1; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 2px; margin: 0 -2px; padding: 4px 0 0; }
+
+/* 📇 实体目录：按类型分组，纵向 */
+.entity-list { flex: 1; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 2px; margin: 0 -2px; padding: 4px 0 12px; }
+.ent-group { display: flex; flex-direction: column; }
+.ent-head { display: flex; align-items: center; gap: 7px; padding: 10px 10px 4px; color: var(--muted); font-size: 12px; font-weight: 600; }
+.ent-ico { font-size: 13px; }
+.ent-label { flex: 1; }
+.ent-count { font-size: 11px; color: var(--muted); background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 0 7px; min-width: 20px; text-align: center; }
+.ent-empty { color: var(--muted); font-size: 12px; padding: 4px 12px 8px; opacity: .7; }
+
+/* 🖧 节点服务面板 */
+.svc-hint { font-size: 11px; color: var(--muted); margin-top: 7px; line-height: 1.5; }
+.nodesvc-actions { display: flex; gap: 8px; padding: 10px 2px 6px; }
+.ns-btn { flex: 1; height: 34px; border-radius: 9px; border: 1px solid var(--border2); background: var(--surface); color: var(--ink2); font-size: 13px; font-weight: 600; }
+.ns-btn:hover { background: var(--hover); color: var(--ink); }
+.ns-btn.ns-primary { border-color: var(--aqua); background: var(--accent-soft); color: var(--aqua); }
+.ns-btn.ns-primary:hover { background: var(--aqua); color: #05221a; }
+.nodesvc-form { background: var(--panel2); border: 1px solid var(--border); border-radius: 11px; padding: 12px; margin: 4px 2px 10px; }
+.ns-ftitle { font-size: 13px; font-weight: 700; margin-bottom: 10px; }
+.ns-frow { display: flex; flex-direction: column; gap: 4px; margin-bottom: 9px; }
+.ns-frow label { font-size: 11.5px; color: var(--muted); font-weight: 600; }
+.ns-frow input, .ns-frow select { height: 36px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--ink); font-size: 12.5px; font-family: inherit; outline: none; }
+.ns-frow input:focus, .ns-frow select:focus { border-color: var(--aqua); }
+.ns-fhint { font-size: 11px; color: var(--muted); margin: 2px 0 8px; }
+.ns-factions { display: flex; gap: 8px; justify-content: flex-end; }
+.ns-factions .ns-btn { flex: 0 0 auto; padding: 0 16px; height: 32px; }
+.nodesvc-list { flex: 1; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 4px; padding: 2px 0 12px; }
+.ns-item { display: flex; align-items: center; gap: 9px; padding: 9px 10px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); }
+.ns-item:hover { border-color: var(--border2); }
+.ns-mode { font-size: 10.5px; font-weight: 700; color: var(--aqua); background: var(--accent-soft); padding: 3px 7px; border-radius: 6px; flex: 0 0 auto; text-transform: uppercase; }
+.ns-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.ns-meta b { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ns-meta small { font-size: 11px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ns-edit, .ns-del { flex: 0 0 auto; color: var(--muted); font-size: 13px; padding: 4px 6px; border-radius: 6px; }
+.ns-edit:hover { color: var(--aqua); background: var(--hover); }
+.ns-del:hover { color: var(--red); background: var(--hover); }
+.ns-empty { color: var(--muted); font-size: 12.5px; padding: 14px 6px; line-height: 1.8; }
+
+/* ── 主区会话 ── */
+main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.conv { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.conv-head { display: flex; align-items: center; gap: 9px; height: var(--header-h); flex: 0 0 var(--header-h);
+  padding: 0 16px; border-bottom: 1px solid var(--border); }
+.conv-head b { font-size: 14px; }
+.conv-kind { font-size: 11px; color: var(--aqua); background: var(--accent-soft); padding: 2px 8px; border-radius: 20px; }
+.conv-head .sp { flex: 1; }
+.conv-id { font-size: 11px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.conv .av { width: 40px; height: 40px; border-radius: 50%; flex: 0 0 40px; display: flex; align-items: center; justify-content: center; font-size: 18px; color: #fff; }
+.conv .av-sm { width: 26px; height: 26px; flex: 0 0 26px; font-size: 13px; }
+
+/* 消息流 */
+.log { flex: 1; overflow: auto; padding: 18px 20px; display: flex; flex-direction: column; gap: 10px; }
+.im-msg { display: flex; flex-direction: column; align-items: flex-start; max-width: 74%; }
+.im-msg.me { align-self: flex-end; align-items: flex-end; }
+.im-bubble { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; border-top-left-radius: 4px;
+  padding: 8px 13px; font-size: 13.5px; line-height: 1.6; color: var(--ink); white-space: pre-wrap; word-break: break-word; }
+.im-msg.me .im-bubble { background: var(--aqua); border-color: var(--aqua); color: #05221a; border-radius: 14px; border-top-right-radius: 4px; }
+.im-from { font-size: 10.5px; color: var(--muted); margin-top: 3px; padding: 0 4px; }
+
+/* 空会话居中态 */
+.im-center { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--muted); }
+.im-center .ico { width: 64px; height: 64px; border-radius: 18px; display: flex; align-items: center; justify-content: center; font-size: 30px; background: var(--panel2); border: 1px solid var(--border); }
+.im-center .txt { font-size: 16px; font-weight: 600; color: var(--ink); }
+.im-center .sub { font-size: 12.5px; }
+
+/* 输入条 */
+.im-composer { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-top: 1px solid var(--border); background: var(--panel); }
+.im-composer input { flex: 1; height: 40px; padding: 0 14px; border-radius: 11px; border: 1px solid var(--border); background: var(--surface); color: var(--ink); font-size: 13.5px; font-family: inherit; outline: none; }
+.im-composer input:focus { border-color: var(--aqua); }
+.im-composer .send { width: 40px; height: 40px; border-radius: 50%; background: var(--surface); border: 1px solid var(--border2); color: var(--ink2); font-size: 18px; flex: 0 0 40px; }
+.im-composer .send:hover { background: var(--aqua); color: #fff; border-color: var(--aqua); }
+
+/* ── 连接页：已保存节点列表 ── */
+.saved-wrap { margin-top: 26px; }
+.saved-head { font-size: 12px; color: var(--muted); font-weight: 600; margin-bottom: 10px; }
+.saved-list { display: flex; flex-direction: column; gap: 7px; }
+.saved-item { display: flex; align-items: center; gap: 10px; padding: 9px 11px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); cursor: pointer; }
+.saved-item:hover { border-color: var(--accent); background: var(--hover); }
+.saved-mode { font-size: 10.5px; font-weight: 700; color: var(--aqua); background: var(--accent-soft); padding: 3px 8px; border-radius: 6px; flex: 0 0 auto; text-transform: uppercase; }
+.saved-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.saved-meta b { font-size: 13px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.saved-meta small { font-size: 11px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.saved-del { color: var(--muted); font-size: 13px; padding: 4px 6px; border-radius: 6px; flex: 0 0 auto; }
+.saved-del:hover { color: var(--red); background: var(--hover); }
+.saved-empty { color: var(--muted); font-size: 12px; padding: 8px 2px; }
+
+/* ── Toast ── */
+.nm-toast { position: fixed; left: 50%; bottom: 40px; transform: translateX(-50%) translateY(12px); z-index: 3000;
+  background: var(--panel2); border: 1px solid var(--border2); color: var(--ink); font-size: 13px; padding: 10px 18px;
+  border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,.35); opacity: 0; pointer-events: none; transition: opacity .18s, transform .18s; }
+.nm-toast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
