@@ -40,6 +40,51 @@
   </div>
   <!-- 用户切换下拉（标题栏 tb-user 触发；position:fixed，DOM 位置无关） -->
   <div class="user-menu" id="user-menu"></div>
+  <!-- 安全设置弹窗（P2）：自动锁定 / 改主口令 / 加密备份 -->
+  <div class="sec-overlay" id="sec-modal">
+    <div class="sec-box">
+      <div class="sec-head">🔐 安全设置 <button class="sec-x" id="sec-close" title="关闭">✕</button></div>
+      <div class="sec-body">
+        <div class="sec-sec">
+          <div class="sec-t">自动锁定</div>
+          <div class="sec-row"><label>空闲多少分钟后自动锁定</label><input id="sec-al-min" type="number" min="1" value="10" /></div>
+          <label class="sec-check"><input id="sec-al-blur" type="checkbox" /> 切到后台 / 最小化即锁</label>
+          <div class="sec-actions"><button class="ns-btn ns-primary" id="sec-al-save">保存</button></div>
+        </div>
+        <div class="sec-sec">
+          <div class="sec-t">修改主口令</div>
+          <input id="sec-old" type="password" class="sec-input" placeholder="旧主口令" autocomplete="current-password" />
+          <input id="sec-new" type="password" class="sec-input" placeholder="新主口令（≥8 + 大小写 + 数字 + 特殊字符）" autocomplete="new-password" />
+          <input id="sec-new2" type="password" class="sec-input" placeholder="确认新主口令" autocomplete="new-password" />
+          <div class="sec-actions"><button class="ns-btn ns-primary" id="sec-cm-save">修改</button></div>
+        </div>
+        <div class="sec-sec">
+          <div class="sec-t">加密备份（换机 / 找回）</div>
+          <div class="sec-hint">用一个<b>独立备份口令</b>把全部身份导出为加密串；换机粘回即可恢复。主口令 + 备份全丢将<b>无法找回</b>。</div>
+          <input id="sec-exp-pw" type="password" class="sec-input" placeholder="备份口令（导出用，请另行牢记）" autocomplete="new-password" />
+          <div class="sec-actions"><button class="ns-btn" id="sec-exp-go">导出</button><button class="ns-btn" id="sec-exp-copy">复制</button></div>
+          <textarea id="sec-exp-out" class="sec-ta" readonly placeholder="导出的备份串会出现在这里"></textarea>
+          <div class="sec-div"></div>
+          <textarea id="sec-imp-in" class="sec-ta" placeholder="粘贴备份串以导入"></textarea>
+          <input id="sec-imp-pw" type="password" class="sec-input" placeholder="该备份的口令" autocomplete="off" />
+          <div class="sec-actions"><button class="ns-btn ns-primary" id="sec-imp-go">导入</button></div>
+        </div>
+        <div class="sec-sec">
+          <div class="sec-t">恢复码（找回主口令）</div>
+          <div class="sec-hint">生成一段 24 词恢复码，<b>离线抄写保存</b>；忘记主口令时在解锁页用它重置。生成新码会覆盖旧码。</div>
+          <div class="sec-actions"><button class="ns-btn ns-primary" id="sec-rec-go">生成恢复码</button></div>
+          <textarea id="sec-rec-out" class="sec-ta" readonly placeholder="生成的 24 词恢复码会出现在这里（仅此一次显示，请立即抄写）"></textarea>
+          <div id="sec-rec-status" class="sec-hint"></div>
+        </div>
+        <div class="sec-sec">
+          <div class="sec-t">安全日志</div>
+          <div class="sec-actions"><button class="ns-btn" id="sec-audit-go">查看最近记录</button></div>
+          <div id="sec-audit-out" class="sec-audit"></div>
+        </div>
+        <div class="sec-msg" id="sec-msg"></div>
+      </div>
+    </div>
+  </div>
   <!-- Win/Linux 无边框缩放热区（mac 用系统边框，platform.js 隐藏这些） -->
   <div class="resize-handle rh-t" data-resize="North"></div>
   <div class="resize-handle rh-b" data-resize="South"></div>
@@ -88,14 +133,14 @@
 
 <!-- ═════════════════ 连接视图（未连接，复用太空品牌页）═════════════════ -->
 <div id="login-view" class="spa-view" style="display:none">
-  <div class="login-drag-strip" data-tauri-drag-region style="display:none"></div>
+  <div class="login-drag-strip" data-tauri-drag-region></div>
   <div class="login-win-ctrls" id="login-win-ctrls" style="display:none">
     <button class="win-btn" data-act="winMinimize" title="最小化"><span class="ico">─</span></button>
     <button class="win-btn" data-act="winToggleMaximize" title="最大化"><span class="ico">□</span></button>
     <button class="win-btn win-close" data-act="winClose" title="关闭"><span class="ico">✕</span></button>
   </div>
   <div class="login-page">
-    <div class="brand-panel">
+    <div class="brand-panel" data-tauri-drag-region>
       <div class="brand-bg">
         <div class="space-nebula space-nebula--a"></div>
         <div class="space-nebula space-nebula--b"></div>
@@ -136,7 +181,7 @@
               <label for="c-user">用户身份</label>
               <div class="pubkey-row">
                 <select id="c-user" class="pubkey-select"></select>
-                <button type="button" class="pubkey-gen" id="c-newuser" title="新建一个身份（公钥）——像多开一个 QQ/微信号">＋ 新建</button>
+                <button type="button" class="pubkey-gen" id="c-newuser" title="新建一个身份（公钥）——像多开一个 QQ/微信号">＋ 新建身份</button>
               </div>
               <div class="import-box" id="newuser-box" style="display:none">
                 <input id="newuser-name" type="text" placeholder="给这个身份起个昵称（如 工作号 / 生活号）" />

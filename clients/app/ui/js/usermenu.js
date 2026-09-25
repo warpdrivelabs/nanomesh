@@ -30,6 +30,7 @@ async function toggleUserMenu() {
       ${pk === cur ? '<span class="um-cur">当前</span>' : ""}
     </div>`).join("") +
     `<div class="um-sep"></div>
+     <div class="um-item um-sec" id="um-sec"><span class="um-av um-plus">🔐</span><span class="um-meta"><b>安全设置</b><small>自动锁定 · 改口令 · 备份</small></span></div>
      <div class="um-item um-new" id="um-new"><span class="um-av um-plus">＋</span><span class="um-meta"><b>新建 / 切换账号</b><small>回到启动页</small></span></div>`;
   m.classList.add("on");
   m.querySelectorAll(".um-item[data-pk]").forEach((el) => el.addEventListener("click", () => {
@@ -37,6 +38,8 @@ async function toggleUserMenu() {
     const pk = el.dataset.pk;
     if (pk !== cur) switchUser(pk);
   }));
+  const sec = document.getElementById("um-sec");
+  if (sec) sec.addEventListener("click", () => { m.classList.remove("on"); if (typeof openSecModal === "function") openSecModal(); });
   const nw = document.getElementById("um-new");
   if (nw) nw.addEventListener("click", () => { m.classList.remove("on"); if (typeof imDisconnect === "function") imDisconnect(); });
 }

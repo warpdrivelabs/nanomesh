@@ -1,7 +1,8 @@
 //! Tauri 桥接：把界面 IPC 调用转发到进程内的 `nm-client`(iroh)。
 //! 原生端(desktop / iOS / android)运行本模块；Web 端改走 nm-gateway。
-//! 前端资源在 ../ui（静态壳，generate_context! 编译期内嵌）。
-//! 本地访问认证见 auth.rs / docs/CLIENT_AUTH_SECURITY.md（P1：主口令门 + 身份私钥信封加密）。
+//! 前端资源在 ../ui（静态壳，generate_context! 编译期内嵌；build.rs 声明 rerun-if-changed）。
+//! App 图标源 ../../nanomesh-app.png（tauri icon 生成 icons/*，generate_context! 内嵌为窗口图标）。
+//! 本地访问认证见 auth.rs / docs/CLIENT_AUTH_SECURITY.md（P1：主口令门 + 身份私钥信封加密；P2：自动锁定 + 加密备份；P3：恢复码 + 失败冷却 + 审计日志）。
 //!
 //! 连接策略 **同网优先、穿透兜底**：
 //! - `nat`（默认，N0）/ `selfhost`（自建 relay+dns）：`node` 给完整地址(JSON)时**先试同网直连**
@@ -78,31 +79,44 @@ fn vk_of(state: &State<AppState>) -> Result<[u8; 32], String> {
 
 #[tauri::command]
 fn auth_status(app: AppHandle, state: State<'_, AppState>) -> Result<Value, String> {
+    let dir = data_dir(&app)?;
     Ok(json!({
-        "masterSet": auth::vault_exists(&data_dir(&app)?),
+        "masterSet": auth::vault_exists(&dir),
         "unlocked": state.vault.lock().unwrap().is_some(),
+        "hasRecovery": auth::has_recovery(&dir),
     }))
 }
 
 /// 首次设置主口令：建库 + 把已有明文身份迁移为加密态。
 #[tauri::command]
 fn setup_master(app: AppHandle, state: State<'_, AppState>, password: String) -> Result<(), String> {
-    let vk = auth::setup(&data_dir(&app)?, &password)?;
+    let dir = data_dir(&app)?;
+    let vk = auth::setup(&dir, &password)?;
     *state.vault.lock().unwrap() = Some(vk);
+    auth::audit(&dir, "setup");
     Ok(())
 }
 
 /// 解锁（输入主口令）。
 #[tauri::command]
 fn unlock(app: AppHandle, state: State<'_, AppState>, password: String) -> Result<(), String> {
-    let vk = auth::unlock(&data_dir(&app)?, &password)?;
-    *state.vault.lock().unwrap() = Some(vk);
-    Ok(())
+    let dir = data_dir(&app)?;
+    match auth::unlock(&dir, &password) {
+        Ok(vk) => {
+            *state.vault.lock().unwrap() = Some(vk);
+            auth::audit(&dir, "unlock:ok");
+            Ok(())
+        }
+        Err(e) => {
+            auth::audit(&dir, "unlock:fail");
+            Err(e)
+        }
+    }
 }
 
 /// 上锁：清零内存 VK + 断开当前连接。
 #[tauri::command]
-async fn lock(state: State<'_, AppState>) -> Result<(), String> {
+async fn lock(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     {
         let mut g = state.vault.lock().unwrap();
         if let Some(mut vk) = g.take() {
@@ -111,13 +125,64 @@ async fn lock(state: State<'_, AppState>) -> Result<(), String> {
         }
     }
     *state.conn.lock().await = None;
+    if let Ok(dir) = data_dir(&app) {
+        auth::audit(&dir, "lock");
+    }
     Ok(())
 }
 
 /// 修改主口令（用旧口令验证并重封保险库密钥；身份种子不动）。
 #[tauri::command]
 fn change_master(app: AppHandle, old: String, new: String) -> Result<(), String> {
-    auth::change(&data_dir(&app)?, &old, &new)
+    let dir = data_dir(&app)?;
+    auth::change(&dir, &old, &new)?;
+    auth::audit(&dir, "change_master");
+    Ok(())
+}
+
+/// 加密导出全部身份（独立备份口令，与主口令解耦）。返回 base64 备份串。
+#[tauri::command]
+fn export_backup(app: AppHandle, state: State<'_, AppState>, password: String) -> Result<String, String> {
+    let vk = vk_of(&state)?;
+    let dir = data_dir(&app)?;
+    let blob = auth::export(&dir, &vk, &password)?;
+    auth::audit(&dir, "backup:export");
+    Ok(blob)
+}
+
+/// 从备份串导入身份（用备份口令解密，再用当前 VK 重新加密写入）。返回导入条数。
+#[tauri::command]
+fn import_backup(app: AppHandle, state: State<'_, AppState>, blob: String, password: String) -> Result<usize, String> {
+    let vk = vk_of(&state)?;
+    let dir = data_dir(&app)?;
+    let n = auth::import(&dir, &vk, &blob, &password)?;
+    auth::audit(&dir, &format!("backup:import:{n}"));
+    Ok(n)
+}
+
+/// 生成恢复码（24 词助记词，仅此一次可见）。
+#[tauri::command]
+fn generate_recovery(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+    let vk = vk_of(&state)?;
+    let dir = data_dir(&app)?;
+    let m = auth::generate_recovery(&dir, &vk)?;
+    auth::audit(&dir, "recovery:generate");
+    Ok(m)
+}
+
+/// 用恢复码重置主口令（忘记主口令时）。
+#[tauri::command]
+fn recover(app: AppHandle, mnemonic: String, new_password: String) -> Result<(), String> {
+    let dir = data_dir(&app)?;
+    auth::recover(&dir, &mnemonic, &new_password)?;
+    auth::audit(&dir, "recovery:reset");
+    Ok(())
+}
+
+/// 读取最近的安全审计日志（新→旧）。
+#[tauri::command]
+fn read_audit(app: AppHandle) -> Result<Vec<String>, String> {
+    Ok(auth::read_audit(&data_dir(&app)?, 60))
 }
 
 /// 列出全部用户身份（公钥 hex）。仅解锁后可用；种子加密存 `identities/<pubkey>.enc`。
@@ -366,7 +431,12 @@ pub fn run() {
             setup_master,
             unlock,
             lock,
-            change_master
+            change_master,
+            export_backup,
+            import_backup,
+            generate_recovery,
+            recover,
+            read_audit
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

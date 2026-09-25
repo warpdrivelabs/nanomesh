@@ -25,8 +25,11 @@
 .um-sep { height: 1px; background: var(--border); margin: 5px 4px; }
 
 /* ── 锁屏 / 首启设主口令 ── */
-.lock-page { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
-  background: radial-gradient(1200px 600px at 50% -10%, #12233a 0%, #0b0f18 60%); color: var(--ink); }
+/* 连接页顶部透明拖拽条（原仅非 macOS 显示，导致 mac 上连接页无法拖窗）：常驻，全平台可拖 */
+.login-drag-strip { position: fixed; top: 0; left: 0; right: 0; height: 32px; z-index: 100; display: block; }
+#lock-view { height: 100vh; overflow: hidden; }
+.lock-page { flex: 1; width: 100%; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+  background: radial-gradient(1200px 600px at 50% -10%, #12233a 0%, #0b0f18 60%); color: #eef2f8; }
 .lock-logo { width: 72px; height: 72px; border-radius: 18px; -webkit-app-region: no-drag; }
 .lock-brand { font-size: 15px; font-weight: 700; letter-spacing: 3px; color: #cdd7e3; -webkit-app-region: no-drag; }
 .lock-box { width: min(360px, 86vw); background: rgba(20,26,38,.72); border: 1px solid #26324a; border-radius: 16px;
@@ -42,6 +45,43 @@
   font-size: 14.5px; font-weight: 700; cursor: pointer; }
 .lk-btn:hover { filter: brightness(1.06); }
 .lk-btn:disabled { opacity: .65; cursor: default; }
+.lk-link { display: inline-block; margin-top: 12px; font-size: 12px; color: #7fa8d8; cursor: pointer; }
+.lk-link:hover { color: var(--aqua); text-decoration: underline; }
+.lk-ta { min-height: 60px; resize: vertical; font-family: inherit; line-height: 1.6; padding-top: 10px; }
+
+/* 安全日志列表 */
+.sec-audit { max-height: 160px; overflow: auto; margin-top: 6px; }
+.au-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 8px; border-radius: 6px; font-size: 11.5px; }
+.au-row:nth-child(odd) { background: var(--surface); }
+.au-ev { color: var(--ink2); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.au-ts { color: var(--muted); flex: 0 0 auto; }
+.au-empty { color: var(--muted); font-size: 12px; padding: 8px; }
+
+/* ── 安全设置弹窗（P2）── */
+.sec-overlay { position: fixed; inset: 0; z-index: 3200; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,.5); }
+.sec-overlay.on { display: flex; }
+.sec-box { width: min(440px, 92vw); max-height: 86vh; overflow: auto; background: var(--panel2); border: 1px solid var(--border2); border-radius: 16px; box-shadow: 0 24px 70px rgba(0,0,0,.5); }
+.sec-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--border); font-size: 15px; font-weight: 700; }
+.sec-x { color: var(--muted); font-size: 15px; padding: 4px 8px; border-radius: 7px; }
+.sec-x:hover { background: var(--hover); color: var(--ink); }
+.sec-body { padding: 8px 16px 16px; }
+.sec-sec { padding: 14px 0; border-bottom: 1px solid var(--border); }
+.sec-sec:last-of-type { border-bottom: none; }
+.sec-t { font-size: 13px; font-weight: 700; color: var(--ink); margin-bottom: 10px; }
+.sec-hint { font-size: 11.5px; color: var(--muted); line-height: 1.6; margin-bottom: 10px; }
+.sec-hint b { color: var(--ink2); }
+.sec-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; font-size: 13px; color: var(--ink2); }
+.sec-row input[type=number] { width: 90px; height: 34px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--ink); font-size: 13px; outline: none; }
+.sec-check { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--ink2); margin-bottom: 10px; cursor: pointer; }
+.sec-input { width: 100%; height: 38px; padding: 0 12px; margin-bottom: 8px; border-radius: 9px; border: 1px solid var(--border); background: var(--surface); color: var(--ink); font-size: 13px; outline: none; }
+.sec-input:focus { border-color: var(--aqua); }
+.sec-ta { width: 100%; min-height: 70px; padding: 8px 10px; margin-bottom: 8px; border-radius: 9px; border: 1px solid var(--border); background: var(--surface); color: var(--ink); font-size: 11.5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; outline: none; resize: vertical; }
+.sec-ta:focus { border-color: var(--aqua); }
+.sec-div { height: 1px; background: var(--border); margin: 10px 0; }
+.sec-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
+.sec-actions .ns-btn { flex: 0 0 auto; height: 32px; padding: 0 16px; }
+.sec-msg { min-height: 18px; font-size: 12px; color: #ff6b6b; padding-top: 8px; }
+.sec-msg.ok { color: var(--aqua); }
 
 /* 连接页：节点公钥下拉 + 生成按钮 */
 .pubkey-row { display: flex; gap: 8px; align-items: stretch; }
