@@ -23,6 +23,9 @@
       relayUrls: Array.isArray(svc.relayUrls) ? svc.relayUrls : [],
       pkarrUrl: svc.pkarrUrl || null,
       dnsOrigin: svc.dnsOrigin || null,
+      contact: (svc.contact || "").trim(),   // 联系方式（电话/邮箱/微信…）
+      location: (svc.location || "").trim(), // 地理位置（城市/地址/经纬度）
+      note: (svc.note || "").trim(),         // 备注（其他属性）
     };
   }
 

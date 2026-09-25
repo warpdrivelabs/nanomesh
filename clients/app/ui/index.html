@@ -21,10 +21,15 @@
   <div class="titlebar" data-tauri-drag-region>
     <span class="tb-title" data-tauri-drag-region>NANO MESH</span>
     <div class="sp" data-tauri-drag-region></div>
-    <span class="tb-me" id="tb-me" title="本节点 id"></span>
+    <button class="tb-user" id="tb-user" title="切换用户身份">
+      <span class="tb-user-av" id="tb-user-av">?</span>
+      <span id="tb-user-name">未登录</span>
+      <span class="tb-user-chev">▾</span>
+    </button>
     <div class="tb-ctrls">
       <button class="tb-btn" data-act="toggleSidebar" title="隐藏/显示左侧栏"><span class="ico" id="tb-side-ico">⇤</span></button>
       <button class="tb-btn" data-act="toggleTheme" title="浅色/深色主题"><span class="ico" id="tb-theme-ico">☀</span></button>
+      <button class="tb-btn" data-act="lock" title="锁定（清零内存密钥）"><span class="ico">🔒</span></button>
       <button class="tb-btn" data-act="disconnect" title="断开 / 切换服务器"><span class="ico">⎋</span><span>断开</span></button>
     </div>
     <div class="win-ctrls" id="win-ctrls" style="display:none">
@@ -33,6 +38,8 @@
       <button class="win-btn win-close" data-act="winClose" title="关闭"><span class="ico">✕</span></button>
     </div>
   </div>
+  <!-- 用户切换下拉（标题栏 tb-user 触发；position:fixed，DOM 位置无关） -->
+  <div class="user-menu" id="user-menu"></div>
   <!-- Win/Linux 无边框缩放热区（mac 用系统边框，platform.js 隐藏这些） -->
   <div class="resize-handle rh-t" data-resize="North"></div>
   <div class="resize-handle rh-b" data-resize="South"></div>
@@ -65,8 +72,7 @@
       <div class="panel nodesvc-panel" id="panel-nodesvc">
         <div class="brand"><span class="uname">节点服务</span></div>
         <div class="nodesvc-actions">
-          <button class="ns-btn ns-primary" id="ns-new">＋ 新增</button>
-          <button class="ns-btn" id="ns-import">导入</button>
+          <button class="ns-btn ns-primary" id="ns-new">＋ 新增节点服务</button>
         </div>
         <div class="nodesvc-form" id="nodesvc-form" style="display:none"></div>
         <div class="nodesvc-list" id="nodesvc-list"></div>
@@ -127,21 +133,25 @@
           </div>
           <form id="connect-form" class="login-form" autocomplete="off">
             <div class="login-form__item">
+              <label for="c-user">用户身份</label>
+              <div class="pubkey-row">
+                <select id="c-user" class="pubkey-select"></select>
+                <button type="button" class="pubkey-gen" id="c-newuser" title="新建一个身份（公钥）——像多开一个 QQ/微信号">＋ 新建</button>
+              </div>
+              <div class="import-box" id="newuser-box" style="display:none">
+                <input id="newuser-name" type="text" placeholder="给这个身份起个昵称（如 工作号 / 生活号）" />
+                <button type="button" class="import-ok" id="newuser-ok">创建</button>
+                <button type="button" class="import-cancel" id="newuser-cancel">取消</button>
+              </div>
+            </div>
+            <div class="login-form__item">
               <label for="c-service">节点服务</label>
               <div class="pubkey-row">
                 <select id="c-service" class="pubkey-select"></select>
-                <button type="button" class="pubkey-gen" id="c-import" title="粘贴公钥/地址，快速新增一个节点服务">＋ 导入</button>
+                <button type="button" class="pubkey-gen" id="c-newsvc" title="新建节点服务（可填公钥/地址、名称、联系方式、地理位置等）">＋ 新建服务</button>
               </div>
-              <div class="import-box" id="import-box" style="display:none">
-                <input id="import-input" type="text" placeholder="粘贴 64 位公钥 hex，或 NM_NODE_ADDR(JSON)" />
-                <button type="button" class="import-ok" id="import-ok">确定</button>
-                <button type="button" class="import-cancel" id="import-cancel">取消</button>
-              </div>
-              <div class="svc-hint">在主界面「🖧 节点服务」面板可新增/管理（含 selfhost 中继配置）。</div>
-            </div>
-            <div class="login-form__item">
-              <label for="c-name">显示名</label>
-              <input id="c-name" type="text" placeholder="你的昵称（对方目录里显示）" />
+              <div class="nodesvc-form svc-form-box" id="svc-form-box" style="display:none"></div>
+              <div class="svc-hint">节点服务是公用的（所有身份共享）；在主界面「🖧 节点服务」面板也可新增/管理。</div>
             </div>
             <button class="login-submit" id="c-submit" type="submit">连 接</button>
             <div class="error" id="c-error" role="alert"></div>
@@ -152,12 +162,24 @@
   </div>
 </div>
 
+<!-- ═════════════════ 锁屏视图（首启设置主口令 / 解锁）═════════════════ -->
+<div id="lock-view" class="spa-view" style="display:none">
+  <div class="lock-page" data-tauri-drag-region>
+    <img src="nanomesh-logo.png" class="lock-logo" alt="NANO MESH" />
+    <div class="lock-brand">NANO MESH</div>
+    <div class="lock-box" id="lock-box"></div>
+  </div>
+</div>
+
 <script src="js/bridge.js" defer></script>
 <script src="js/platform.js" defer></script>
+<script src="js/identity.js" defer></script>
 <script src="js/services.js" defer></script>
 <script src="js/connect.js" defer></script>
 <script src="js/nodesvc.js" defer></script>
+<script src="js/usermenu.js" defer></script>
 <script src="js/im.js" defer></script>
 <script src="js/main.js" defer></script>
+<script src="js/auth.js" defer></script>
 </body>
 </html>

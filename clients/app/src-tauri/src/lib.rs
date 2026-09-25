@@ -1,5 +1,7 @@
 //! Tauri 桥接：把界面 IPC 调用转发到进程内的 `nm-client`(iroh)。
 //! 原生端(desktop / iOS / android)运行本模块；Web 端改走 nm-gateway。
+//! 前端资源在 ../ui（静态壳，generate_context! 编译期内嵌）。
+//! 本地访问认证见 auth.rs / docs/CLIENT_AUTH_SECURITY.md（P1：主口令门 + 身份私钥信封加密）。
 //!
 //! 连接策略 **同网优先、穿透兜底**：
 //! - `nat`（默认，N0）/ `selfhost`（自建 relay+dns）：`node` 给完整地址(JSON)时**先试同网直连**
@@ -16,6 +18,8 @@ use serde_json::{json, Value};
 use tauri::{async_runtime, AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 
+mod auth;
+
 /// 已建立的连接（客户端 + 会话共享句柄）。
 struct Conn {
     _client: Client, // 保活 endpoint
@@ -26,6 +30,8 @@ struct Conn {
 #[derive(Default)]
 struct AppState {
     conn: Mutex<Option<Conn>>,
+    /// 解锁后驻留的保险库密钥 VK；None = 已上锁（见 auth.rs / docs/CLIENT_AUTH_SECURITY.md）。
+    vault: std::sync::Mutex<Option<[u8; 32]>>,
 }
 
 fn hex(b: &[u8]) -> String {
@@ -44,21 +50,122 @@ fn parse_id(s: &str) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
-/// 载入/生成并持久化客户端身份种子（应用数据目录下 `nmspace.identity`，32 字节）。
-fn load_or_create_seed(app: &AppHandle) -> Result<[u8; 32], String> {
+/// 应用数据目录（不存在则创建）。
+fn data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join("nmspace.identity");
-    if let Ok(bytes) = std::fs::read(&path) {
-        if bytes.len() == 32 {
-            let mut seed = [0u8; 32];
-            seed.copy_from_slice(&bytes);
-            return Ok(seed);
+    Ok(dir)
+}
+
+/// 身份目录（不存在则创建）。
+fn identities_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = data_dir(app)?.join("identities");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+/// 由种子推导公钥（= 用户公钥 / 节点 id）。
+fn pubkey_of_seed(seed: &[u8; 32]) -> [u8; 32] {
+    *nm_transport::SecretKey::from_bytes(seed).public().as_bytes()
+}
+
+/// 取当前保险库密钥 VK（未解锁则报错，作为命令门禁）。
+fn vk_of(state: &State<AppState>) -> Result<[u8; 32], String> {
+    (*state.vault.lock().unwrap()).ok_or_else(|| "未解锁，请先输入主口令".to_string())
+}
+
+// ── 本地访问认证（P1）：主口令门 + 身份私钥信封加密。见 auth.rs / docs/CLIENT_AUTH_SECURITY.md。 ──
+
+#[tauri::command]
+fn auth_status(app: AppHandle, state: State<'_, AppState>) -> Result<Value, String> {
+    Ok(json!({
+        "masterSet": auth::vault_exists(&data_dir(&app)?),
+        "unlocked": state.vault.lock().unwrap().is_some(),
+    }))
+}
+
+/// 首次设置主口令：建库 + 把已有明文身份迁移为加密态。
+#[tauri::command]
+fn setup_master(app: AppHandle, state: State<'_, AppState>, password: String) -> Result<(), String> {
+    let vk = auth::setup(&data_dir(&app)?, &password)?;
+    *state.vault.lock().unwrap() = Some(vk);
+    Ok(())
+}
+
+/// 解锁（输入主口令）。
+#[tauri::command]
+fn unlock(app: AppHandle, state: State<'_, AppState>, password: String) -> Result<(), String> {
+    let vk = auth::unlock(&data_dir(&app)?, &password)?;
+    *state.vault.lock().unwrap() = Some(vk);
+    Ok(())
+}
+
+/// 上锁：清零内存 VK + 断开当前连接。
+#[tauri::command]
+async fn lock(state: State<'_, AppState>) -> Result<(), String> {
+    {
+        let mut g = state.vault.lock().unwrap();
+        if let Some(mut vk) = g.take() {
+            use zeroize::Zeroize;
+            vk.zeroize();
         }
     }
-    let seed = nm_transport::SecretKey::generate().to_bytes();
-    std::fs::write(&path, seed).map_err(|e| e.to_string())?;
-    Ok(seed)
+    *state.conn.lock().await = None;
+    Ok(())
+}
+
+/// 修改主口令（用旧口令验证并重封保险库密钥；身份种子不动）。
+#[tauri::command]
+fn change_master(app: AppHandle, old: String, new: String) -> Result<(), String> {
+    auth::change(&data_dir(&app)?, &old, &new)
+}
+
+/// 列出全部用户身份（公钥 hex）。仅解锁后可用；种子加密存 `identities/<pubkey>.enc`。
+#[tauri::command]
+fn list_identities(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    vk_of(&state)?; // 门禁：未解锁拒绝
+    let dir = identities_dir(&app)?;
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if let Some(stem) = name.strip_suffix(".enc") {
+                if stem.len() == 64 {
+                    out.push(stem.to_string());
+                }
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// 新建一个用户身份（生成密钥对，用 VK 加密种子后落盘），返回其公钥 hex。
+#[tauri::command]
+fn create_identity(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+    let vk = vk_of(&state)?;
+    let mut seed = nm_transport::SecretKey::generate().to_bytes();
+    let pk = pubkey_of_seed(&seed);
+    let enc = auth::encrypt_seed(&vk, &seed)?;
+    {
+        use zeroize::Zeroize;
+        seed.zeroize();
+    }
+    let path = identities_dir(&app)?.join(format!("{}.enc", hex(&pk)));
+    std::fs::write(&path, enc).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(hex(&pk))
+}
+
+/// 载入指定身份的种子（用 VK 解密）。
+fn load_identity_seed(app: &AppHandle, vk: &[u8; 32], pubkey: &str) -> Result<[u8; 32], String> {
+    let data = std::fs::read(identities_dir(app)?.join(format!("{}.enc", pubkey)))
+        .map_err(|_| "用户身份不存在（可能已删除）".to_string())?;
+    auth::decrypt_seed(vk, &data)
 }
 
 /// 完成会话建立：注册为 person、起消息推送循环、存入状态，返回自己的 id(hex)。
@@ -119,6 +226,7 @@ async fn finish_session(
 async fn connect(
     app: AppHandle,
     state: State<'_, AppState>,
+    user: String,               // 选定用户身份公钥 hex（空=用/建默认身份，向后兼容）
     mode: String,               // "nat" | "selfhost" | "lan"
     node: String,               // 节点公钥hex(64) 或 NM_NODE_ADDR(JSON)
     display_name: String,
@@ -126,7 +234,12 @@ async fn connect(
     pkarr_url: Option<String>,  // selfhost 必填
     dns_origin: Option<String>, // selfhost 可选
 ) -> Result<String, String> {
-    let seed = load_or_create_seed(&app)?;
+    let vk = vk_of(&state)?;
+    let user = user.trim();
+    if user.is_empty() {
+        return Err("请先选择用户身份".into());
+    }
+    let seed = load_identity_seed(&app, &vk, user)?;
     let m = mode.trim().to_ascii_lowercase();
     let node = node.trim().to_string();
 
@@ -246,7 +359,14 @@ pub fn run() {
             directory_query,
             my_id,
             disconnect,
-            platform
+            platform,
+            list_identities,
+            create_identity,
+            auth_status,
+            setup_master,
+            unlock,
+            lock,
+            change_master
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -23,3 +23,8 @@ nm-client = { path = "../../../crates/nm-client" }
 nm-transport = { path = "../../../crates/nm-transport" }
 nm-entity = { path = "../../../crates/nm-entity" }
 nm-proto = { path = "../../../crates/nm-proto" }
+# 本地访问认证（P1）：主口令 Argon2id 派生 → XChaCha20-Poly1305 信封加密身份私钥
+argon2 = "0.6"
+chacha20poly1305 = "0.10"
+rand = "0.8"
+zeroize = "1"

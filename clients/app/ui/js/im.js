@@ -2,11 +2,14 @@
 //    directory_query → 全体实体；send_to → 发送；core://event → 收消息。
 
 let MY_ID = "";
-let CONTACTS = [];              // 全体实体 [{id,kind,name}]
-let CONVOS = {};                // id -> [{id,from,body,ts}]
+let CONTACTS = [];              // 当前身份会话所见的全体实体 [{id,kind,name}]
+let CONVOS = {};                // 当前身份的会话：id -> [{id,from,body,ts}]
 let ACTIVE = null;              // 当前会话对端 id
-let UNREAD = {};                // id -> 未读数
+let UNREAD = {};                // 当前身份的未读：id -> 数
 let _coreUnlisten = null;
+// 按用户公钥隔离：消息 / 未读各自一份（切号后互不串）。实体目录随当前会话即时拉取，天然隔离。
+let CONVOS_BY_USER = {};
+let UNREAD_BY_USER = {};
 
 // 实体类型分组（用户指定；kind 前缀匹配 nm-entity 的 KIND：person / device.* / agent.* / compute.*；
 // vehicle 后端暂未定义，先占位，定义后自动归入）。
@@ -26,9 +29,12 @@ function entityById(id) { return CONTACTS.find((c) => c.id === id); }
 
 async function imStart(myId) {
   MY_ID = myId || "";
-  CONVOS = {}; UNREAD = {}; ACTIVE = null;
-  const me = document.getElementById("tb-me");
-  if (me) me.textContent = "我 · " + (MY_ID.slice(0, 10) || "?") + "…";
+  // 切到当前身份自己的会话/未读（隔离：不同公钥各一份，内存内保留，切回可见历史）。
+  CONVOS = CONVOS_BY_USER[MY_ID] = CONVOS_BY_USER[MY_ID] || {};
+  UNREAD = UNREAD_BY_USER[MY_ID] = UNREAD_BY_USER[MY_ID] || {};
+  ACTIVE = null;
+  CONTACTS = [];
+  if (typeof updateUserChip === "function") updateUserChip();
   if (!_coreUnlisten) _coreUnlisten = await NM.onCoreEvent(onCoreEvent);
   bindSearches();
   await imRefresh();

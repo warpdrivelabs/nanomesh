@@ -1,7 +1,7 @@
-// ── 连接页控制器（复用太空品牌页）：选择一个「节点服务」+ 显示名 → 连接。
-//    节点服务由 services.js(NodeSvc) 统一管理，与主界面「🖧 节点服务」面板共用同一份数据。
+// ── 连接页控制器（复用太空品牌页）：选「用户身份(公钥)」+「节点服务」→ 连接。
+//    多账号：一人可有多个身份(公钥)，可新建。身份 = Identity(identity.js)，节点服务 = NodeSvc(services.js)。
+//    connectAs() 为登录提交与标题栏切号共用。
 
-// ── 视图切换 ──
 function showLoginView() {
   document.getElementById("main-view").style.display = "none";
   document.getElementById("login-view").style.display = "block";
@@ -9,6 +9,7 @@ function showLoginView() {
   if (starsFar && !starsFar.childElementCount) seedLoginSpace();
   NodeSvc.migrate();
   renderServiceOptions();
+  renderUserOptions();
 }
 function showMainView() {
   document.getElementById("login-view").style.display = "none";
@@ -17,7 +18,7 @@ function showMainView() {
 window.showLoginView = showLoginView;
 window.showMainView = showMainView;
 
-// ── 太空装饰（seed 星点/流星；抄自 cmx-agent login.js，纯前端动画）──
+// ── 太空装饰（seed 星点/流星）──
 function seedSpaceStars(host, count, sizeMin, sizeMax) {
   if (!host) return;
   for (let i = 0; i < count; i++) {
@@ -59,6 +60,39 @@ function seedLoginSpace() {
   }
 }
 
+// ── 用户身份下拉 ──
+async function renderUserOptions(selPk) {
+  const sel = document.getElementById("c-user");
+  if (!sel) return;
+  const cur = selPk || sel.value || Identity.current();
+  const ids = await Identity.list();
+  if (!ids.length) {
+    sel.innerHTML = '<option value="" disabled selected>（还没有身份，点右侧「新建」）</option>';
+    return;
+  }
+  sel.innerHTML = ids.map((pk) => `<option value="${pk}">${escapeHtml(Identity.label(pk))} · ${shortNode(pk)}</option>`).join("");
+  if (cur && ids.includes(cur)) sel.value = cur; else sel.selectedIndex = 0;
+}
+window.renderUserOptions = renderUserOptions;
+
+// 新建身份（内联起昵称）
+function openNewUser() {
+  const b = document.getElementById("newuser-box");
+  const show = b.style.display === "none";
+  b.style.display = show ? "flex" : "none";
+  if (show) { const i = document.getElementById("newuser-name"); i.value = ""; i.focus(); }
+}
+async function confirmNewUser() {
+  const name = document.getElementById("newuser-name").value.trim();
+  try {
+    const pk = await Identity.create(name);
+    Identity.setCurrent(pk);
+    document.getElementById("newuser-box").style.display = "none";
+    await renderUserOptions(pk);
+    if (window.toast) toast("已新建身份：" + (name || shortNode(pk)));
+  } catch (e) { if (window.toast) toast("新建失败：" + (e && e.message ? e.message : e)); }
+}
+
 // ── 节点服务下拉（数据源 = NodeSvc，与「节点服务」面板同一份）──
 function svcLabel(s) {
   const pk = NodeSvc.pubkeyOf(s.node);
@@ -78,46 +112,41 @@ function renderServiceOptions(selId) {
 }
 window.renderServiceOptions = renderServiceOptions;
 
-// ── 导入：粘贴公钥/地址 → 快速新增一个 nat 节点服务 ──
-function openImport() {
-  const box = document.getElementById("import-box");
-  const show = box.style.display === "none";
-  box.style.display = show ? "flex" : "none";
-  if (show) { const i = document.getElementById("import-input"); i.value = ""; i.focus(); }
-}
-function confirmImport() {
-  const raw = document.getElementById("import-input").value.trim();
-  const pk = NodeSvc.pubkeyOf(raw);
-  if (!pk) { if (window.toast) toast("请输入 64 位公钥 hex，或有效的 NM_NODE_ADDR"); return; }
-  // 粘的是完整地址(JSON)则原样存（保留 LAN 直连信息）；裸公钥直接存。默认 nat 模式。
-  const svc = NodeSvc.put({ name: "", mode: "nat", node: raw.startsWith("{") ? raw : pk });
-  renderServiceOptions(svc.id);
-  document.getElementById("import-box").style.display = "none";
-  if (window.toast) toast("已导入节点服务：" + shortNode(pk));
+// 新建节点服务（复用富表单 buildSvcForm；可填公钥/地址、名称、联系方式、地理位置等）
+function openNewSvc() {
+  const box = document.getElementById("svc-form-box");
+  if (box.style.display !== "none" && box.innerHTML) { box.style.display = "none"; box.innerHTML = ""; return; }
+  buildSvcForm(box, null, (saved) => renderServiceOptions(saved.id));
 }
 
-// ── 连接提交 ──
+// ── 连接（登录提交 & 标题栏切号共用）──
+async function connectAs(user, svc, name) {
+  const myId = await NM.inv("connect", {
+    user, mode: svc.mode, node: svc.node, displayName: name || "nmspace 用户",
+    relayUrls: svc.relayUrls, pkarrUrl: svc.pkarrUrl, dnsOrigin: svc.dnsOrigin,
+  });
+  Identity.setCurrent(user);
+  window.CURRENT_SVC = svc;
+  showMainView();
+  if (typeof updateUserChip === "function") updateUserChip();
+  if (typeof imStart === "function") await imStart(myId);
+  return myId;
+}
+window.connectAs = connectAs;
+
 async function submitConnect(e) {
   if (e) e.preventDefault();
+  const user = document.getElementById("c-user").value;
   const svc = NodeSvc.get(document.getElementById("c-service").value);
-  const displayName = document.getElementById("c-name").value.trim() || "nmspace 用户";
   const errBox = document.getElementById("c-error");
   const btn = document.getElementById("c-submit");
   errBox.textContent = "";
+  if (!user) { errBox.textContent = "请先选择或「新建」一个用户身份"; return; }
   if (!svc) { errBox.textContent = "请先「导入」或在「🖧 节点服务」面板新增一个节点服务"; return; }
   btn.disabled = true; btn.textContent = "连接中…";
-  try {
-    const myId = await NM.inv("connect", {
-      mode: svc.mode, node: svc.node, displayName,
-      relayUrls: svc.relayUrls, pkarrUrl: svc.pkarrUrl, dnsOrigin: svc.dnsOrigin,
-    });
-    showMainView();
-    if (typeof imStart === "function") await imStart(myId);
-  } catch (err) {
-    errBox.textContent = "连接失败：" + (err && err.message ? err.message : String(err));
-  } finally {
-    btn.disabled = false; btn.textContent = "连 接";
-  }
+  try { await connectAs(user, svc, Identity.nameOf(user)); }
+  catch (err) { errBox.textContent = "连接失败：" + (err && err.message ? err.message : String(err)); }
+  finally { btn.disabled = false; btn.textContent = "连 接"; }
 }
 
 function shortNode(n) { if (!n) return ""; return n.length <= 24 ? n : n.slice(0, 12) + "…" + n.slice(-8); }
@@ -128,10 +157,12 @@ function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&a
   const y = document.getElementById("year"); if (y) y.textContent = String(new Date().getFullYear());
   NodeSvc.migrate();
   renderServiceOptions();
-  document.getElementById("c-import").addEventListener("click", openImport);
-  document.getElementById("import-ok").addEventListener("click", confirmImport);
-  document.getElementById("import-cancel").addEventListener("click", () => { document.getElementById("import-box").style.display = "none"; });
-  document.getElementById("import-input").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); confirmImport(); } });
+  renderUserOptions();
+  document.getElementById("c-newuser").addEventListener("click", openNewUser);
+  document.getElementById("newuser-ok").addEventListener("click", confirmNewUser);
+  document.getElementById("newuser-cancel").addEventListener("click", () => { document.getElementById("newuser-box").style.display = "none"; });
+  document.getElementById("newuser-name").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); confirmNewUser(); } });
+  document.getElementById("c-newsvc").addEventListener("click", openNewSvc);
   document.getElementById("connect-form").addEventListener("submit", submitConnect);
-  showLoginView();
+  // 启动视图由 auth.js 的 routeStart 决定（先过锁屏），此处不直接 showLoginView。
 })();

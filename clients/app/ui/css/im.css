@@ -3,6 +3,46 @@
 /* 标题栏本节点 id 徽标 */
 .tb-me { font-size: 11.5px; color: var(--muted); margin-right: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; -webkit-app-region: no-drag; }
 
+/* 标题栏用户切换按钮 + 下拉 */
+.tb-user { -webkit-app-region: no-drag; display: flex; align-items: center; gap: 7px; height: 26px; padding: 0 8px 0 4px; margin-right: 8px;
+  border-radius: 13px; border: 1px solid var(--border); background: var(--surface); color: var(--ink); font-size: 12.5px; }
+.tb-user:hover { background: var(--hover); border-color: var(--border2); }
+.tb-user-av { width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 11px; font-weight: 700; flex: 0 0 auto; }
+.tb-user-chev { color: var(--muted); font-size: 10px; }
+.user-menu { position: fixed; top: 36px; right: 8px; z-index: 2500; width: 268px; max-height: 60vh; overflow: auto;
+  background: var(--panel2); border: 1px solid var(--border2); border-radius: 12px; box-shadow: 0 10px 34px rgba(0,0,0,.4);
+  padding: 6px; display: none; }
+.user-menu.on { display: block; }
+.um-item { display: flex; align-items: center; gap: 10px; padding: 8px 9px; border-radius: 9px; cursor: pointer; }
+.um-item:hover { background: var(--hover); }
+.um-item.on { background: var(--accent-soft); }
+.um-av { width: 32px; height: 32px; border-radius: 50%; flex: 0 0 32px; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 15px; font-weight: 700; }
+.um-av.um-plus { background: var(--surface); border: 1px dashed var(--border2); color: var(--aqua); }
+.um-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.um-meta b { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.um-meta small { font-size: 11px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.um-cur { font-size: 10.5px; color: var(--aqua); background: var(--accent-soft); padding: 2px 7px; border-radius: 10px; flex: 0 0 auto; }
+.um-sep { height: 1px; background: var(--border); margin: 5px 4px; }
+
+/* ── 锁屏 / 首启设主口令 ── */
+.lock-page { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+  background: radial-gradient(1200px 600px at 50% -10%, #12233a 0%, #0b0f18 60%); color: var(--ink); }
+.lock-logo { width: 72px; height: 72px; border-radius: 18px; -webkit-app-region: no-drag; }
+.lock-brand { font-size: 15px; font-weight: 700; letter-spacing: 3px; color: #cdd7e3; -webkit-app-region: no-drag; }
+.lock-box { width: min(360px, 86vw); background: rgba(20,26,38,.72); border: 1px solid #26324a; border-radius: 16px;
+  padding: 22px 20px; box-shadow: 0 20px 60px rgba(0,0,0,.45); -webkit-app-region: no-drag; backdrop-filter: blur(6px); }
+.lk-title { font-size: 18px; font-weight: 700; color: #eef2f8; margin-bottom: 6px; }
+.lk-sub { font-size: 12.5px; color: #9fb0c6; line-height: 1.7; margin-bottom: 16px; }
+.lk-sub b { color: #d8e2f0; }
+.lk-input { width: 100%; height: 44px; padding: 0 14px; margin-bottom: 10px; border-radius: 11px;
+  border: 1px solid #2c3852; background: #0e1626; color: #eef2f8; font-size: 14px; outline: none; }
+.lk-input:focus { border-color: var(--aqua); }
+.lk-err { min-height: 18px; font-size: 12px; color: #ff6b6b; margin: 2px 2px 8px; }
+.lk-btn { width: 100%; height: 44px; border-radius: 11px; border: none; background: var(--aqua); color: #05221a;
+  font-size: 14.5px; font-weight: 700; cursor: pointer; }
+.lk-btn:hover { filter: brightness(1.06); }
+.lk-btn:disabled { opacity: .65; cursor: default; }
+
 /* 连接页：节点公钥下拉 + 生成按钮 */
 .pubkey-row { display: flex; gap: 8px; align-items: stretch; }
 .pubkey-select { flex: 1; min-width: 0; height: 44px; padding: 0 12px; border-radius: 11px; border: 1px solid var(--border);
@@ -69,6 +109,8 @@
 .ns-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .ns-meta b { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ns-meta small { font-size: 11px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ns-meta .ns-extra { font-family: inherit; opacity: .9; }
+.svc-form-box { margin-top: 8px; }
 .ns-edit, .ns-del { flex: 0 0 auto; color: var(--muted); font-size: 13px; padding: 4px 6px; border-radius: 6px; }
 .ns-edit:hover { color: var(--aqua); background: var(--hover); }
 .ns-del:hover { color: var(--red); background: var(--hover); }

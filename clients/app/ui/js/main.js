@@ -36,6 +36,7 @@ const ACTIONS = {
   toggleSidebar, toggleTheme, showPanel,
   imRefresh: () => window.imRefresh && window.imRefresh(),
   disconnect: () => window.imDisconnect && window.imDisconnect(),
+  lock: () => window.lockApp && window.lockApp(),
   winMinimize: () => window.winMinimize && window.winMinimize(),
   winToggleMaximize: () => window.winToggleMaximize && window.winToggleMaximize(),
   winClose: () => window.winClose && window.winClose(),
