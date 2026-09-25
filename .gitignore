@@ -31,3 +31,6 @@ admind.state.json
 nmd.toml
 # 独立仓库的文档查看工具（gitee.com/warpdrivelabs/cmx-md-view）
 docs/cmx-md-view/
+
+# 打包发布产物（cargo xtask dist）
+/dist/

@@ -1,0 +1,3 @@
+# 仅注册 xtask 别名（cargo xtask dist）；不覆盖全局 target 目录等其他配置
+[alias]
+xtask = "run -p xtask --"

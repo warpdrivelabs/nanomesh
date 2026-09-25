@@ -60,6 +60,25 @@ npm run dev            # 浏览器（连 nm-gatewayd）
 npm run tauri dev      # 桌面原生（内嵌 iroh）
 ```
 
+本机常驻运行：`./start-all.sh` / `./stop-all.sh` / `./restart-all.sh`（release 预编译 + nohup + PID + 日志；
+配置在仓库根 `nmd.toml`，模板见 `bin/nmd/src/main.rs` 顶部文档）。
+
+## 打包发布（mac / linux / windows，解压即可执行）
+
+```bash
+cargo xtask dist                                    # 当前主机平台
+cargo xtask dist --all                              # 官方矩阵：macos-arm64/x64 + linux-x64(musl 静态) + windows-x64
+cargo xtask dist --target x86_64-unknown-linux-musl # 指定 triple
+cargo xtask dist --bins nmd,nm-admind --no-build    # 自定二进制集 / 只打包不编译
+```
+
+产物在 `dist/nanomesh-<版本>-<平台>.zip`：`bin/`（nmd + nm-admind + nm-echo）+ 启停脚本
+（unix 为 `*.sh`，windows 为 `*.bat`/`*.ps1`）+ `nmd.toml.example` + README——解压后
+`./start-all.sh`（或双击 `start-all.bat`）即运行，首启自动生成含随机管理令牌的 `nmd.toml`。
+
+- mac 目标原生编译；linux(musl 静态)/windows(gnu) 交叉编译需 `brew install zig cargo-zigbuild`
+- 模板与脚本资产在 `xtask/assets/`，打包逻辑在 `xtask/src/main.rs`（`cargo xtask dist` 即 `cargo run -p xtask -- dist`）
+
 ## 架构要点
 
 - **原生端**(desktop/iOS/android)：Tauri 外壳 + 进程内 Rust `nm-client`(iroh)，App 即真实节点。

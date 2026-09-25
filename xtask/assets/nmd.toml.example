@@ -1,0 +1,23 @@
+# NANO MESH 节点配置（模板）
+# start-all 首次运行会把本文件复制为 nmd.toml，并把 __ADMIN_TOKEN__ 替换为随机令牌。
+# 全部字段说明见源码 bin/nmd/src/main.rs 顶部文档。
+
+mode      = "nat"                # nat(公共中继+打洞,默认) | selfhost(自建relay+dns) | lan(仅同网直连)
+identity  = "data/nmd.identity"  # 节点私钥（首启自动生成；每台一份，勿共用/入库）
+db        = "data/nmd.redb"      # 消息/目录存储
+bind_port = 9600                 # 固定 UDP 端口（同网直连+防火墙放行）；0=临时端口
+
+# 对等节点（种子）：nat/selfhost 按公钥，lan 按地址
+# [[peers]]
+# id = "<对方 node id（公钥 hex，64 位）>"
+
+[admin]                          # 节点控制 API（nm-admind 管理台反代它；仅本机回环）
+api_addr  = "127.0.0.1:9611"
+api_token = "__ADMIN_TOKEN__"
+
+[membership]                     # 联邦成员自动发现（gossip）
+# name    = "我的节点"            # 对外展示的成员名片
+federation = "nmspace"           # 同名者组成同一联邦
+
+# 黑名单（可选）：名单内公钥一律拒绝
+# blacklist = ["<被禁公钥 hex，64 位>"]
