@@ -110,8 +110,12 @@
         <div class="im-list" id="im-list"></div>
       </div>
       <div class="panel entities-panel" id="panel-entities">
-        <div class="brand"><span class="uname">实体目录</span><button class="brand-refresh" data-act="imRefresh" title="刷新目录">⟳</button></div>
+        <div class="brand"><span class="uname">实体目录</span>
+          <button class="brand-refresh" id="ent-add-btn" title="添加实体">＋</button>
+          <button class="brand-refresh" data-act="imRefresh" title="刷新目录">⟳</button>
+        </div>
         <div class="im-search"><input id="entity-search-input" type="text" placeholder="🔍 搜索实体" /></div>
+        <div class="nodesvc-form entity-form" id="entity-form" style="display:none"></div>
         <div class="entity-list" id="entity-list"></div>
       </div>
       <div class="panel nodesvc-panel" id="panel-nodesvc">
@@ -217,6 +221,7 @@
 </div>
 
 <script src="js/bridge.js" defer></script>
+<script src="js/store.js" defer></script>
 <script src="js/platform.js" defer></script>
 <script src="js/identity.js" defer></script>
 <script src="js/services.js" defer></script>

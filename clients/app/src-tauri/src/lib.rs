@@ -2,6 +2,8 @@
 //! 原生端(desktop / iOS / android)运行本模块；Web 端改走 nm-gateway。
 //! 前端资源在 ../ui（静态壳，generate_context! 编译期内嵌；build.rs 声明 rerun-if-changed）。
 //! App 图标源 ../../nanomesh-app.png（tauri icon 生成 icons/*，generate_context! 内嵌为窗口图标）。
+//! 实体目录：点实体看详情(可复制公钥) + 手动添加实体（前端本地，按身份隔离）。
+//! UI 状态(节点服务/身份名/偏好)经 ui_kv_* 持久化到 app_data_dir/ui-state.json，跨 webview 源不丢。
 //! 本地访问认证见 auth.rs / docs/CLIENT_AUTH_SECURITY.md（P1：主口令门 + 身份私钥信封加密；P2：自动锁定 + 加密备份；P3：恢复码 + 失败冷却 + 审计日志）。
 //!
 //! 连接策略 **同网优先、穿透兜底**：
@@ -185,6 +187,27 @@ fn read_audit(app: AppHandle) -> Result<Vec<String>, String> {
     Ok(auth::read_audit(&data_dir(&app)?, 60))
 }
 
+// ── UI 状态持久化 KV：前端 localStorage 的耐久镜像，跨 webview 源/重建不丢（存 app_data_dir/ui-state.json）。 ──
+#[tauri::command]
+fn ui_kv_get_all(app: AppHandle) -> Result<String, String> {
+    Ok(std::fs::read_to_string(data_dir(&app)?.join("ui-state.json")).unwrap_or_else(|_| "{}".to_string()))
+}
+
+#[tauri::command]
+fn ui_kv_set(app: AppHandle, key: String, value: Option<String>) -> Result<(), String> {
+    let path = data_dir(&app)?.join("ui-state.json");
+    let mut obj: serde_json::Map<String, Value> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    match value {
+        Some(v) => { obj.insert(key, Value::String(v)); }
+        None => { obj.remove(&key); }
+    }
+    std::fs::write(&path, serde_json::to_string(&obj).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// 列出全部用户身份（公钥 hex）。仅解锁后可用；种子加密存 `identities/<pubkey>.enc`。
 #[tauri::command]
 fn list_identities(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<String>, String> {
@@ -305,59 +328,83 @@ async fn connect(
         return Err("请先选择用户身份".into());
     }
     let seed = load_identity_seed(&app, &vk, user)?;
+    let (client, session) = dial(seed, &mode, &node, relay_urls, pkarr_url, dns_origin).await?;
+    finish_session(&app, &state, client, session, &display_name).await
+}
+
+/// 拨号到一个节点（同网优先、穿透兜底），返回 (客户端, 会话)。connect 与 node_users 共用。
+async fn dial(
+    seed: [u8; 32],
+    mode: &str,
+    node: &str,
+    relay_urls: Vec<String>,
+    pkarr_url: Option<String>,
+    dns_origin: Option<String>,
+) -> Result<(Client, Session), String> {
     let m = mode.trim().to_ascii_lowercase();
-    let node = node.trim().to_string();
+    let node = node.trim();
 
     // 纯同网模式：Minimal + 按地址直连（无 NAT 兜底）。
     if matches!(m.as_str(), "lan" | "local") {
-        let addr = nm_transport::addr_from_string(&node).map_err(|e| e.to_string())?;
+        let addr = nm_transport::addr_from_string(node).map_err(|e| e.to_string())?;
         let client = Client::bind_local(seed).await.map_err(|e| e.to_string())?;
         let session = client.online(addr).await.map_err(|e| e.to_string())?;
-        return finish_session(&app, &state, client, session, &display_name).await;
+        return Ok((client, session));
     }
 
-    // nat/selfhost：输入可为「节点公钥(hex)」或「完整地址 NM_NODE_ADDR(JSON)」。
-    // 地址 → 取其 id，并可先试同网直连；公钥 → 仅穿透（在线时发现服务仍会优先 LAN 路径）。
-    let (id, lan_addr) = match nm_transport::addr_from_string(&node) {
+    // nat/selfhost：输入可为公钥(hex) 或完整地址(JSON)。地址先试同网直连，失败转穿透。
+    let (id, lan_addr) = match nm_transport::addr_from_string(node) {
         Ok(a) => (*a.id.as_bytes(), Some(a)),
-        Err(_) => (parse_id(&node)?, None),
+        Err(_) => (parse_id(node)?, None),
     };
-
-    // 阶段 1：同网直连（Minimal，零基础设施、可离线）。Minimal 无中继，故只走直连候选地址：
-    // 同一网络即刻连上，否则短超时失败 → 转阶段 2。仅当拿到地址时尝试。
     if let Some(addr) = &lan_addr {
         if let Ok(c1) = Client::bind_local(seed).await {
             if let Ok(Ok(session)) =
                 tokio::time::timeout(std::time::Duration::from_secs(3), c1.online(addr.clone())).await
             {
-                return finish_session(&app, &state, c1, session, &display_name).await;
+                return Ok((c1, session));
             }
-            // 同网失败：释放该 Minimal 端点，转穿透。
         }
     }
-
-    // 阶段 2：穿透 NAT（按模式绑定发现/中继，按公钥拨号）。
     let client = match m.as_str() {
         "selfhost" | "self" | "custom" => {
             let pkarr = pkarr_url
                 .filter(|s| !s.trim().is_empty())
                 .ok_or("selfhost 模式需要填写 pkarr 端点(如 https://dns.example.com/pkarr)")?;
-            let relays: Vec<String> =
-                relay_urls.into_iter().filter(|s| !s.trim().is_empty()).collect();
-            Client::bind_selfhosted(
-                seed,
-                relays,
-                pkarr,
-                dns_origin.filter(|s| !s.trim().is_empty()),
-                0,
-            )
-            .await
-            .map_err(|e| e.to_string())?
+            let relays: Vec<String> = relay_urls.into_iter().filter(|s| !s.trim().is_empty()).collect();
+            Client::bind_selfhosted(seed, relays, pkarr, dns_origin.filter(|s| !s.trim().is_empty()), 0)
+                .await
+                .map_err(|e| e.to_string())?
         }
         _ => Client::bind(seed).await.map_err(|e| e.to_string())?, // nat(N0) 默认
     };
     let session = client.online_by_id(id).await.map_err(|e| e.to_string())?;
-    finish_session(&app, &state, client, session, &display_name).await
+    Ok((client, session))
+}
+
+/// 查询指定节点服务上的用户/实体（临时匿名拨号 + 目录查询，不影响当前主会话）。
+/// 用随机临时身份，避免与主会话相同公钥的端点冲突；目录查询为只读发现，无需成员身份。
+#[tauri::command]
+async fn node_users(
+    mode: String,
+    node: String,
+    relay_urls: Vec<String>,
+    pkarr_url: Option<String>,
+    dns_origin: Option<String>,
+) -> Result<Vec<Value>, String> {
+    let seed = nm_transport::SecretKey::generate().to_bytes();
+    let (client, session) = dial(seed, &mode, &node, relay_urls, pkarr_url, dns_origin).await?;
+    let entities = session
+        .directory_query(DirectoryQuery { kind_prefix: String::new(), ..Default::default() })
+        .await
+        .map_err(|e| e.to_string())?;
+    let out: Vec<Value> = entities
+        .iter()
+        .map(|e| json!({ "id": hex(&e.entity_id), "kind": e.kind, "name": e.display_name }))
+        .collect();
+    drop(session);
+    drop(client);
+    Ok(out)
 }
 
 async fn session_of(state: &State<'_, AppState>) -> Result<Arc<Session>, String> {
@@ -422,6 +469,7 @@ pub fn run() {
             connect,
             send_to,
             directory_query,
+            node_users,
             my_id,
             disconnect,
             platform,
@@ -436,7 +484,9 @@ pub fn run() {
             import_backup,
             generate_recovery,
             recover,
-            read_audit
+            read_audit,
+            ui_kv_get_all,
+            ui_kv_set
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

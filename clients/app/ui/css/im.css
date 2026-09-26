@@ -125,6 +125,36 @@
 .ent-label { flex: 1; }
 .ent-count { font-size: 11px; color: var(--muted); background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 0 7px; min-width: 20px; text-align: center; }
 .ent-empty { color: var(--muted); font-size: 12px; padding: 4px 12px 8px; opacity: .7; }
+.entity-form { margin: 0 2px 8px; }
+
+/* 实体详情卡（主区）*/
+.ent-detail { flex: 1; overflow: auto; display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 30px 24px; }
+.ed-avatar { width: 84px; height: 84px; border-radius: 24px; display: flex; align-items: center; justify-content: center; font-size: 38px; color: #fff; font-weight: 700; }
+.ed-name { font-size: 20px; font-weight: 700; color: var(--ink); }
+.ed-type { font-size: 13px; color: var(--ink2); }
+.ed-type code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--aqua); }
+.ed-field { width: 100%; max-width: 560px; margin-top: 8px; }
+.ed-field label { display: block; font-size: 11.5px; color: var(--muted); font-weight: 600; margin-bottom: 6px; }
+.ed-key { display: flex; gap: 8px; align-items: stretch; }
+.ed-key code { flex: 1; min-width: 0; word-break: break-all; line-height: 1.6; background: var(--surface); border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px; font-size: 12.5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+.ed-key .ns-btn { flex: 0 0 auto; height: auto; padding: 0 16px; }
+.ed-src { font-size: 11.5px; color: var(--muted); }
+.ed-plain { font-size: 13px; color: var(--ink); word-break: break-word; padding: 2px 0; }
+
+/* 节点服务详情：此节点上的用户列表 */
+.ed-users { width: 100%; max-width: 560px; margin-top: 18px; border-top: 1px solid var(--border); padding-top: 14px; }
+.ed-users-head { display: flex; align-items: center; justify-content: space-between; font-size: 13px; font-weight: 600; color: var(--ink2); margin-bottom: 10px; }
+.ed-users-head .ns-btn { flex: 0 0 auto; height: 28px; padding: 0 14px; }
+.nsu-list { display: flex; flex-direction: column; gap: 6px; }
+.nsu-item { display: flex; align-items: center; gap: 9px; padding: 7px 9px; border-radius: 9px; border: 1px solid var(--border); background: var(--surface); }
+.nsu-item .av { width: 32px; height: 32px; border-radius: 50%; flex: 0 0 32px; display: flex; align-items: center; justify-content: center; font-size: 15px; color: #fff; }
+.nsu-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.nsu-meta b { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nsu-meta small { font-size: 11px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.nsu-add { flex: 0 0 auto; height: 28px; padding: 0 12px; }
+.nsu-add:disabled { opacity: .6; }
+.ed-actions { display: flex; gap: 8px; margin-top: 8px; }
+.ed-actions .ns-btn { flex: 0 0 auto; padding: 0 18px; height: 36px; }
 
 /* 🖧 节点服务面板 */
 .svc-hint { font-size: 11px; color: var(--muted); margin-top: 7px; line-height: 1.5; }
@@ -143,8 +173,9 @@
 .ns-factions { display: flex; gap: 8px; justify-content: flex-end; }
 .ns-factions .ns-btn { flex: 0 0 auto; padding: 0 16px; height: 32px; }
 .nodesvc-list { flex: 1; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 4px; padding: 2px 0 12px; }
-.ns-item { display: flex; align-items: center; gap: 9px; padding: 9px 10px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); }
+.ns-item { display: flex; align-items: center; gap: 9px; padding: 9px 10px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); cursor: pointer; }
 .ns-item:hover { border-color: var(--border2); }
+.ns-item.on { border-color: var(--aqua); background: var(--accent-soft); }
 .ns-mode { font-size: 10.5px; font-weight: 700; color: var(--aqua); background: var(--accent-soft); padding: 3px 7px; border-radius: 6px; flex: 0 0 auto; text-transform: uppercase; }
 .ns-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .ns-meta b { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

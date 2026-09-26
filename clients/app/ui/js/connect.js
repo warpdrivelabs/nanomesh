@@ -116,7 +116,7 @@ window.renderServiceOptions = renderServiceOptions;
 function openNewSvc() {
   const box = document.getElementById("svc-form-box");
   if (box.style.display !== "none" && box.innerHTML) { box.style.display = "none"; box.innerHTML = ""; return; }
-  buildSvcForm(box, null, (saved) => renderServiceOptions(saved.id));
+  buildSvcForm(box, null, (saved) => { renderServiceOptions(saved.id); if (window.renderNodeSvcList) window.renderNodeSvcList(); });
 }
 
 // ── 连接（登录提交 & 标题栏切号共用）──

@@ -252,6 +252,8 @@ function initSec() {
 }
 initSec();
 async function routeStart() {
+  if (window.UIStore) await window.UIStore.hydrate(); // 先从后端回灌 UI 状态（节点服务/身份名等）
+  if (typeof window.renderNodeSvcList === "function") window.renderNodeSvcList(); // hydrate 后刷新节点服务面板
   let st;
   try { st = await NM.inv("auth_status"); } catch (_) { st = { masterSet: false, unlocked: false }; }
   if (!st.masterSet) { renderLock("setup"); showLockView(); }
