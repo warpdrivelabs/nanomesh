@@ -2,7 +2,7 @@
 //! 原生端(desktop / iOS / android)运行本模块；Web 端改走 nm-gateway。
 //! 前端资源在 ../ui（静态壳，generate_context! 编译期内嵌；build.rs 声明 rerun-if-changed）。
 //! App 图标源 ../../nanomesh-app.png（tauri icon 生成 icons/*，generate_context! 内嵌为窗口图标）。
-//! 实体目录：点实体看详情(可复制公钥) + 手动添加实体（前端本地，按身份隔离）。
+//! 实体目录：点实体看详情(可复制公钥) + 手动添加实体（前端本地，按身份隔离；用户菜单可复制当前用户 id）。
 //! UI 状态(节点服务/身份名/偏好)经 ui_kv_* 持久化到 app_data_dir/ui-state.json，跨 webview 源不丢。
 //! 本地访问认证见 auth.rs / docs/CLIENT_AUTH_SECURITY.md（P1：主口令门 + 身份私钥信封加密；P2：自动锁定 + 加密备份；P3：恢复码 + 失败冷却 + 审计日志）。
 //!

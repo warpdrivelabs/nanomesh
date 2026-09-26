@@ -34,3 +34,5 @@ docs/cmx-md-view/
 
 # 打包发布产物（cargo xtask dist）
 /dist/
+# 桌面安装包产物（tauri build：dmg/app.zip 等）
+/dist-app/
