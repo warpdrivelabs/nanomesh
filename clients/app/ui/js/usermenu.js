@@ -13,7 +13,16 @@ function updateUserChip() {
   const nameEl = document.getElementById("tb-user-name");
   const avEl = document.getElementById("tb-user-av");
   if (nameEl) nameEl.textContent = cur ? Identity.label(cur) : "未登录";
-  if (avEl) { avEl.textContent = cur ? Identity.label(cur).slice(0, 1) : "?"; avEl.style.background = cur ? uColor(cur) : "var(--muted)"; }
+  if (avEl) {
+    const av = (window.Profile && cur) ? Profile.ownAvatar(cur) : "";
+    if (window.Profile && Profile.isImg(av)) {
+      avEl.textContent = ""; avEl.style.background = "transparent"; avEl.style.padding = "0"; avEl.style.overflow = "hidden";
+      avEl.innerHTML = `<img src="${av}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit">`;
+    } else {
+      avEl.innerHTML = ""; avEl.textContent = cur ? Identity.label(cur).slice(0, 1) : "?";
+      avEl.style.background = cur ? uColor(cur) : "var(--muted)"; avEl.style.padding = ""; avEl.style.overflow = "";
+    }
+  }
 }
 window.updateUserChip = updateUserChip;
 
@@ -23,14 +32,21 @@ async function toggleUserMenu() {
   if (m.classList.contains("on")) { m.classList.remove("on"); return; }
   const cur = Identity.current();
   const ids = await Identity.list();
-  m.innerHTML = ids.map((pk) => `
+  m.innerHTML = ids.map((pk) => {
+    const av = (window.Profile) ? Profile.ownAvatar(pk) : "";
+    const avHtml = (window.Profile && Profile.isImg(av))
+      ? `<span class="um-av" style="padding:0;overflow:hidden"><img src="${av}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit"></span>`
+      : `<span class="um-av" style="background:${uColor(pk)}">${escapeHtml(Identity.label(pk).slice(0, 1))}</span>`;
+    return `
     <div class="um-item ${pk === cur ? "on" : ""}" data-pk="${pk}">
-      <span class="um-av" style="background:${uColor(pk)}">${escapeHtml(Identity.label(pk).slice(0, 1))}</span>
+      ${avHtml}
       <span class="um-meta"><b>${escapeHtml(Identity.label(pk))}</b><small>${shortNode(pk)}</small></span>
       ${pk === cur ? '<span class="um-cur">当前</span>' : ""}
-    </div>`).join("") +
+    </div>`;
+  }).join("") +
     `<div class="um-sep"></div>
      ${cur ? `<div class="um-item um-copy" id="um-copy"><span class="um-av um-plus">📋</span><span class="um-meta"><b>复制当前用户 id</b><small>${shortNode(cur)}</small></span></div>` : ""}
+     ${cur ? `<div class="um-item um-profile" id="um-profile"><span class="um-av um-plus">🪪</span><span class="um-meta"><b>编辑资料</b><small>昵称 · 状态 · 简介</small></span></div>` : ""}
      <div class="um-item um-sec" id="um-sec"><span class="um-av um-plus">🔐</span><span class="um-meta"><b>安全设置</b><small>自动锁定 · 改口令 · 备份</small></span></div>
      <div class="um-item um-new" id="um-new"><span class="um-av um-plus">＋</span><span class="um-meta"><b>新建 / 切换账号</b><small>回到启动页</small></span></div>`;
   m.classList.add("on");
@@ -45,9 +61,10 @@ async function toggleUserMenu() {
     try { await navigator.clipboard.writeText(cur); if (window.toast) toast("已复制当前用户 id"); }
     catch (_) { if (window.toast) toast("复制失败，请手动选中"); }
   });
+  const pf = document.getElementById("um-profile");
+  if (pf) pf.addEventListener("click", () => { m.classList.remove("on"); if (typeof openProfileModal === "function") openProfileModal(); });
   const sec = document.getElementById("um-sec");
-  if (sec) sec.addEventListener("click", () => { m.classList.remove("on"); if (typeof openSecModal === "function") openSecModal(); });
-  const nw = document.getElementById("um-new");
+  if (sec) sec.addEventListener("click", () => { m.classList.remove("on"); if (typeof openSecModal === "function") openSecModal(); });  const nw = document.getElementById("um-new");
   if (nw) nw.addEventListener("click", () => { m.classList.remove("on"); if (typeof imDisconnect === "function") imDisconnect(); });
 }
 

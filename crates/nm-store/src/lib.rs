@@ -6,7 +6,7 @@
 //!   前缀 range 扫描即可取某实体的全部离线消息，`gram_id` 单调保证 FIFO。
 //! - `ENTITIES`：key = `entity_id(32)`，value = prost 编码的 `Entity`（目录持久化）。
 
-use nm_proto::{Entity, Gram, Group};
+use nm_proto::{BlobData, Entity, Gram, Group};
 use prost::Message;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
@@ -17,6 +17,8 @@ const GROUPS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("groups");
 const BLACKLIST: TableDefinition<&[u8], &[u8]> = TableDefinition::new("blacklist");
 /// 联邦对等：key = 对端公钥(32)，value = 元数据 JSON（name/addr/email/mobile/gps，可扩展）。
 const PEERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("peers");
+/// 内容寻址 blob（P1 头像等）：key = blake3 hash(32)，value = prost 编码的 `BlobData`。内容寻址=天然去重/无冲突。
+const BLOBS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("blobs");
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -49,6 +51,7 @@ impl RedbStore {
             wtx.open_table(GROUPS).map_err(db_err)?;
             wtx.open_table(BLACKLIST).map_err(db_err)?;
             wtx.open_table(PEERS).map_err(db_err)?;
+            wtx.open_table(BLOBS).map_err(db_err)?;
         }
         wtx.commit().map_err(db_err)?;
         Ok(Self { db })
@@ -143,6 +146,32 @@ impl RedbStore {
             out.push(e);
         }
         Ok(out)
+    }
+
+    // ---- 内容寻址 blob（P1：头像等媒体）----
+
+    /// 存一个 blob（key = blob.hash，应等于 blake3(blob.data)，由调用方保证/校验）。内容寻址=幂等去重。
+    pub fn put_blob(&self, blob: &BlobData) -> Result<()> {
+        let val = blob.encode_to_vec();
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        {
+            let mut t = wtx.open_table(BLOBS).map_err(db_err)?;
+            t.insert(blob.hash.as_slice(), val.as_slice()).map_err(db_err)?;
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 按 hash 取一个 blob。
+    pub fn get_blob(&self, hash: &[u8]) -> Result<Option<BlobData>> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(BLOBS).map_err(db_err)?;
+        match t.get(hash).map_err(db_err)? {
+            Some(v) => Ok(Some(
+                BlobData::decode(v.value()).map_err(|e| StoreError::Decode(e.to_string()))?,
+            )),
+            None => Ok(None),
+        }
     }
 
     // ---- 群组持久化 ----
@@ -367,5 +396,27 @@ mod tests {
         // 重开 → 封禁仍在（持久化）。
         let s = RedbStore::open(&path).unwrap();
         assert_eq!(s.all_banned().unwrap(), vec![k]);
+    }
+}
+
+#[cfg(test)]
+mod blob_tests {
+    use super::*;
+    use nm_proto::BlobData;
+
+    // P1：内容寻址 blob 存取往返 + 未命中返回 None。
+    #[test]
+    fn blob_roundtrip() {
+        let path = std::env::temp_dir().join(format!("nmstore-blob-{}.redb", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = RedbStore::open(&path).unwrap();
+        let hash = vec![7u8; 32];
+        let blob = BlobData { hash: hash.clone(), data: b"hello-avatar".to_vec(), mime: "image/jpeg".into() };
+        store.put_blob(&blob).unwrap();
+        let got = store.get_blob(&hash).unwrap().expect("blob present");
+        assert_eq!(got.data, b"hello-avatar");
+        assert_eq!(got.mime, "image/jpeg");
+        assert!(store.get_blob(&vec![9u8; 32]).unwrap().is_none(), "未知 hash 应 None");
+        let _ = std::fs::remove_file(&path);
     }
 }

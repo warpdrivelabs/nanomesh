@@ -41,6 +41,27 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// 把一个目录 Entity 渲染为前端 JSON —— 含 P0 富属性：bio / 状态文本 / 头像引用 / 链接 / locale，
+/// 以及可发现标签 attributes["status"]。非 person 类型解不出 PersonProfile 时相应字段为空。
+fn person_entity_json(e: &nm_proto::pb::Entity) -> Value {
+    let pp = e
+        .profile
+        .as_ref()
+        .and_then(|a| nm_entity::unpack_profile::<nm_entity::kinds::Person>(a).ok());
+    json!({
+        "id": hex(&e.entity_id),
+        "homeNode": hex(&e.home_node),
+        "kind": e.kind,
+        "name": e.display_name,
+        "status": e.attributes.get("status").cloned().unwrap_or_default(),
+        "bio": pp.as_ref().map(|p| p.bio.clone()).unwrap_or_default(),
+        "statusText": pp.as_ref().map(|p| p.status_text.clone()).unwrap_or_default(),
+        "avatar": pp.as_ref().map(|p| p.avatar_url.clone()).unwrap_or_default(),
+        "links": pp.as_ref().map(|p| p.links.clone()).unwrap_or_default(),
+        "locale": pp.as_ref().map(|p| p.locale.clone()).unwrap_or_default(),
+    })
+}
+
 fn parse_id(s: &str) -> Result<[u8; 32], String> {
     let s = s.trim();
     if s.len() != 64 {
@@ -400,7 +421,7 @@ async fn node_users(
         .map_err(|e| e.to_string())?;
     let out: Vec<Value> = entities
         .iter()
-        .map(|e| json!({ "id": hex(&e.entity_id), "kind": e.kind, "name": e.display_name }))
+        .map(person_entity_json)
         .collect();
     drop(session);
     drop(client);
@@ -429,8 +450,92 @@ async fn directory_query(state: State<'_, AppState>, kind_prefix: String) -> Res
         .map_err(|e| e.to_string())?;
     Ok(entities
         .iter()
-        .map(|e| json!({ "id": hex(&e.entity_id), "kind": e.kind, "name": e.display_name }))
+        .map(person_entity_json)
         .collect())
+}
+
+/// 更新本人资料（P0 富属性）：重新以 person 身份注册一份带完整 PersonProfile + 标签的 Entity。
+/// 节点侧按 updated_at 做 LWW 收敛并经联邦扩散；前端需传全量当前值（本地持久，连接后回推）。
+#[tauri::command]
+async fn update_profile(
+    state: State<'_, AppState>,
+    display_name: String,
+    bio: String,
+    status_text: String,
+    links: Vec<String>,
+    locale: String,
+    status: String, // 可发现标签：online / away / busy / dnd …（P2 presence 前的静态占位）
+    avatar: String, // 头像：前端已缩放压缩的小图 data:URI（P0 内联随档案分发；P1 迁移为内容寻址 blob）
+) -> Result<(), String> {
+    // 内联头像体量上限（防止撑爆目录/gossip 负载）：约 128KB data:URI。更大者应走 P1 内容寻址。
+    if avatar.len() > 128 * 1024 {
+        return Err("头像过大（请用更小的图；上限约 96KB 图片）".into());
+    }
+    let session = session_of(&state).await?;
+    let profile = nm_proto::pb::PersonProfile {
+        avatar_url: avatar, // data:image/...;base64,... （P1 起可存 "b3:<hash>"）
+        bio,
+        status_text,
+        links: links.into_iter().filter(|s| !s.trim().is_empty()).collect(),
+        locale,
+    };
+    let mut attrs = std::collections::HashMap::new();
+    let status = status.trim();
+    if !status.is_empty() {
+        attrs.insert("status".to_string(), status.to_string());
+    }
+    session
+        .register_as::<nm_entity::kinds::Person>(&profile, display_name.trim(), attrs)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 上传头像等内容寻址 blob。`data_b64` = 纯 base64（无 data: 前缀）。返回 "b3:<hash-hex>"。
+#[tauri::command]
+async fn blob_put(state: State<'_, AppState>, data_b64: String, mime: String) -> Result<String, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_b64.trim())
+        .map_err(|e| format!("非法 base64: {e}"))?;
+    let session = session_of(&state).await?;
+    let (hash, _home) = session.blob_put(bytes, &mime).await.map_err(|e| e.to_string())?;
+    Ok(format!("b3:{}", hex(&hash)))
+}
+
+/// 取 blob 并返回 data:URI（带 app_data_dir/blobs 本地缓存，避免重复拉取）。
+/// `reference` = "b3:<hash-hex>"；`home_node` = 实体归属节点 hex（可空，用于跨节点回源）。
+#[tauri::command]
+async fn blob_get(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    reference: String,
+    home_node: String,
+) -> Result<String, String> {
+    use base64::Engine;
+    let hexh = reference.strip_prefix("b3:").unwrap_or(&reference).trim();
+    let hash = parse_id(hexh)?; // 64-hex → [u8;32]
+    let dir = data_dir(&app)?.join("blobs");
+    let _ = std::fs::create_dir_all(&dir);
+    let cache = dir.join(format!("{hexh}.uri"));
+    if let Ok(s) = std::fs::read_to_string(&cache) {
+        return Ok(s); // 缓存命中
+    }
+    let home = if home_node.trim().is_empty() {
+        Vec::new()
+    } else {
+        parse_id(home_node.trim()).map(|h| h.to_vec()).unwrap_or_default()
+    };
+    let session = session_of(&state).await?;
+    let (data, mime) = session.blob_get(hash.to_vec(), home).await.map_err(|e| e.to_string())?;
+    let mime = if mime.trim().is_empty() { "image/jpeg".to_string() } else { mime };
+    let uri = format!(
+        "data:{};base64,{}",
+        mime,
+        base64::engine::general_purpose::STANDARD.encode(&data)
+    );
+    let _ = std::fs::write(&cache, &uri);
+    Ok(uri)
 }
 
 #[tauri::command]
@@ -469,6 +574,9 @@ pub fn run() {
             connect,
             send_to,
             directory_query,
+            update_profile,
+            blob_put,
+            blob_get,
             node_users,
             my_id,
             disconnect,

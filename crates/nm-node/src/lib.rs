@@ -10,8 +10,8 @@ use std::sync::Arc;
 use dashmap::{DashMap, DashSet};
 use nm_core::Directory;
 use nm_proto::{
-    now_ms, Any, Command, CommandResult, DirectoryQuery, Entity, EntityList, FedSyncResp, Gram,
-    GramKind, Group, GroupList, GroupOp, PROTOCOL_VERSION,
+    now_ms, Any, BlobData, BlobPut, BlobRef, Command, CommandResult, DirectoryQuery, Entity,
+    EntityList, FedSyncResp, Gram, GramKind, Group, GroupList, GroupOp, PROTOCOL_VERSION,
 };
 use nm_store::RedbStore;
 use nm_transport::{read_gram, write_gram, IrohConnection, NodeEndpoint};
@@ -29,6 +29,9 @@ pub enum NodeError {
 
 type Sessions = DashMap<Vec<u8>, IrohConnection>;
 type Peers = DashMap<Vec<u8>, nm_transport::Addr>;
+
+/// 内容寻址 blob 体量上限（头像等小媒体）；超限拒绝，避免撑爆节点存储/带宽。大媒体应分块（后续）。
+const MAX_BLOB: usize = 1024 * 1024; // 1 MiB
 
 /// 会话旁挂元数据（不改动 `Sessions` 值类型；用于管理台展示接入时长）。
 #[derive(Clone, Copy)]
@@ -173,11 +176,31 @@ impl MemDirectory {
     pub fn is_empty(&self) -> bool {
         self.entities.is_empty()
     }
+    /// LWW（Last-Writer-Wins）合并：仅当传入 `updated_at ≥ 现有`才落库，返回是否被接受。
+    /// 统一收敛入口——目录注册 / profile.update / 联邦同步都经此，保证跨节点最终一致、
+    /// 且更旧的更新（如联邦回灌的过期副本）不会覆盖较新的本地记录。
+    pub fn merge_lww(&self, entity: Entity) -> bool {
+        use dashmap::mapref::entry::Entry;
+        match self.entities.entry(entity.entity_id.clone()) {
+            Entry::Occupied(mut o) => {
+                if entity.updated_at >= o.get().updated_at {
+                    o.insert(entity);
+                    true
+                } else {
+                    false
+                }
+            }
+            Entry::Vacant(v) => {
+                v.insert(entity);
+                true
+            }
+        }
+    }
 }
 
 impl Directory for MemDirectory {
     async fn upsert(&self, entity: Entity) -> nm_core::Result<()> {
-        self.entities.insert(entity.entity_id.clone(), entity);
+        self.merge_lww(entity); // LWW 收敛（见 merge_lww）
         Ok(())
     }
     async fn get(&self, entity_id: &[u8]) -> nm_core::Result<Option<Entity>> {
@@ -460,7 +483,7 @@ impl Node {
                         if e.entity_id == my.as_slice() {
                             continue;
                         }
-                        self.dir.entities.insert(e.entity_id.clone(), e);
+                        self.dir.merge_lww(e); // LWW：不让联邦回灌的旧副本覆盖较新的本地记录
                     }
                 }
                 Err(e) => tracing::warn!("fed sync failed: {e}"),
@@ -1093,26 +1116,30 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
     let store = &ctx.store;
     let cmd = Command::decode(gram.payload.as_ref()?.value.as_slice()).ok()?;
     let (ok, result, error) = match cmd.method.as_str() {
-        "directory.register" => match cmd
+        "directory.register" | "profile.update" => match cmd
             .params
             .as_ref()
             .and_then(|p| Entity::decode(p.value.as_slice()).ok())
         {
-            // 认证：只能注册与连接身份一致的实体（防冒名注册）。
+            // 认证：只能注册/更新与连接身份一致的实体（防冒名）。
             Some(entity) if entity.entity_id != caller => {
                 (false, None, "entity_id != connection identity".to_string())
             }
             Some(mut entity) => {
                 let kind = entity.kind.clone();
                 entity.home_node = ctx.node_id.to_vec(); // 归属本节点（联邦寻址）
-                if let Some(s) = store {
-                    if let Err(e) = s.put_entity(&entity) {
-                        tracing::warn!("persist entity failed: {e}");
+                // LWW 收敛：拒绝比现有更旧的更新；仅接受时才持久化，避免旧副本回写存储。
+                if dir.merge_lww(entity.clone()) {
+                    if let Some(s) = store {
+                        if let Err(e) = s.put_entity(&entity) {
+                            tracing::warn!("persist entity failed: {e}");
+                        }
                     }
+                    tracing::info!(%kind, total = dir.len(), "entity upserted (register/profile.update)");
+                    (true, None, String::new())
+                } else {
+                    (false, None, "stale update: older than current updated_at".to_string())
                 }
-                let _ = dir.upsert(entity).await;
-                tracing::info!(%kind, total = dir.len(), "entity registered");
-                (true, None, String::new())
             }
             None => (false, None, "invalid entity".to_string()),
         },
@@ -1133,6 +1160,60 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
                 String::new(),
             )
         }
+        // P1：内容寻址 blob —— 存头像等小媒体，档案只带 b3:hash，避免内联撑爆目录/gossip。
+        "blob.put" => match cmd.params.as_ref().and_then(|p| BlobPut::decode(p.value.as_slice()).ok()) {
+            Some(bp) if bp.data.len() > MAX_BLOB => (false, None, "blob too large".to_string()),
+            Some(bp) => {
+                let hash = nm_crypto::content_hash(&bp.data).to_vec();
+                let blob = BlobData { hash: hash.clone(), data: bp.data, mime: bp.mime };
+                match store {
+                    Some(s) => match s.put_blob(&blob) {
+                        Ok(()) => {
+                            tracing::info!(bytes = blob.data.len(), "blob stored (content-addressed)");
+                            (
+                                true,
+                                Some(Any {
+                                    type_url: "nmspace.v1.BlobRef".to_string(),
+                                    value: BlobRef { hash, home_node: ctx.node_id.to_vec() }.encode_to_vec(),
+                                }),
+                                String::new(),
+                            )
+                        }
+                        Err(e) => (false, None, format!("store blob failed: {e}")),
+                    },
+                    None => (false, None, "node has no store".to_string()),
+                }
+            }
+            None => (false, None, "invalid blob".to_string()),
+        },
+        "blob.get" => match cmd.params.as_ref().and_then(|p| BlobRef::decode(p.value.as_slice()).ok()) {
+            Some(br) => {
+                // 本地命中直接返回；未命中且带 home_node（非本节点）则 s2s 回源拉取并顺带缓存。
+                let mut blob = store.as_ref().and_then(|s| s.get_blob(&br.hash).ok().flatten());
+                if blob.is_none() && !br.home_node.is_empty() && br.home_node != ctx.node_id.as_slice() {
+                    if let Some(addr) = ctx.peers.get(&br.home_node).map(|a| a.clone()) {
+                        match s2s_blob_get(&ctx.ep, addr, &br.hash).await {
+                            Ok(b) => {
+                                if let Some(s) = store {
+                                    let _ = s.put_blob(&b);
+                                }
+                                blob = Some(b);
+                            }
+                            Err(e) => tracing::warn!("blob relay to home node failed: {e}"),
+                        }
+                    }
+                }
+                match blob {
+                    Some(b) => (
+                        true,
+                        Some(Any { type_url: "nmspace.v1.BlobData".to_string(), value: b.encode_to_vec() }),
+                        String::new(),
+                    ),
+                    None => (false, None, "blob not found".to_string()),
+                }
+            }
+            None => (false, None, "invalid ref".to_string()),
+        },
         "group.create" => group_create(&cmd, groups, store, caller),
         "group.join" => group_mutate(&cmd, groups, store, caller, GroupMut::Join),
         "group.leave" => group_mutate(&cmd, groups, store, caller, GroupMut::Leave),
@@ -1291,6 +1372,39 @@ async fn fed_relay(ep: &NodeEndpoint, addr: nm_transport::Addr, inner: &Gram) ->
     s2s_request(ep, addr, &env).await.map(|_| ())
 }
 
+/// s2s 回源拉取一个 blob（本节点未命中时，向实体归属节点取头像等内容寻址数据）。
+/// 转发请求的 `home_node` 置空 → 对端不会再次回源，避免链式转发。
+async fn s2s_blob_get(
+    ep: &NodeEndpoint,
+    addr: nm_transport::Addr,
+    hash: &[u8],
+) -> Result<BlobData, NodeError> {
+    let cmd = Command {
+        method: "blob.get".to_string(),
+        params: Some(Any {
+            type_url: "nmspace.v1.BlobRef".to_string(),
+            value: BlobRef { hash: hash.to_vec(), home_node: Vec::new() }.encode_to_vec(),
+        }),
+        correlation_id: 1,
+        timeout_ms: 10_000,
+        grant: None,
+    };
+    let gram = s2s_gram(
+        ep.id_bytes(),
+        GramKind::Command,
+        Some(Any { type_url: "nmspace.v1.Command".to_string(), value: cmd.encode_to_vec() }),
+    );
+    let resp = s2s_request(ep, addr, &gram).await?;
+    let payload = resp.payload.ok_or_else(|| NodeError::Other("blob.get no payload".into()))?;
+    let cr = CommandResult::decode(payload.value.as_slice())
+        .map_err(|e| NodeError::Other(e.to_string()))?;
+    if !cr.ok {
+        return Err(NodeError::Other(if cr.error.is_empty() { "blob.get failed".into() } else { cr.error }));
+    }
+    let body = cr.result.ok_or_else(|| NodeError::Other("blob.get no result".into()))?;
+    BlobData::decode(body.value.as_slice()).map_err(|e| NodeError::Other(e.to_string()))
+}
+
 /// s2s 单次请求：拨号对等节点，开 bi 流，发一个 gram，读回单条响应。
 async fn s2s_request(ep: &NodeEndpoint, addr: nm_transport::Addr, gram: &Gram) -> Result<Gram, NodeError> {
     // 全程超时兜底：对端可能连上却始终不回（read_gram 无限等）。s2s 调用绝不能永久挂起——
@@ -1397,5 +1511,35 @@ fn reply_gram(req: &Gram, kind: GramKind, payload: Option<Any>) -> Gram {
         timestamp_ms: now_ms(),
         payload,
         crc: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod p0_tests {
+    use super::*;
+    use nm_proto::pb::Entity;
+
+    fn ent(id: u8, ts: i64, name: &str) -> Entity {
+        Entity {
+            entity_id: vec![id; 32],
+            updated_at: ts,
+            display_name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    // P0：目录 LWW 收敛——更旧的更新被拒绝，更新/相等的被接受；同一 id 只保留一条。
+    #[test]
+    fn merge_lww_keeps_newest() {
+        let d = MemDirectory::new();
+        let key = vec![1u8; 32];
+        assert!(d.merge_lww(ent(1, 100, "v1")), "首次插入应接受");
+        assert!(!d.merge_lww(ent(1, 50, "old")), "更旧 updated_at 应拒绝");
+        assert_eq!(d.entities.get(&key).unwrap().display_name, "v1");
+        assert!(d.merge_lww(ent(1, 200, "v2")), "更新 updated_at 应接受");
+        assert_eq!(d.entities.get(&key).unwrap().display_name, "v2");
+        assert!(d.merge_lww(ent(1, 200, "v2eq")), "相等 updated_at 按 >= 接受");
+        assert_eq!(d.entities.get(&key).unwrap().display_name, "v2eq");
+        assert_eq!(d.len(), 1, "同一 id 只保留一条");
     }
 }

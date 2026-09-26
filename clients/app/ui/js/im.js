@@ -53,6 +53,7 @@ async function imStart(myId) {
   ACTIVE = null; DETAIL_ID = null; CONTACTS = [];
   if (typeof updateUserChip === "function") updateUserChip();
   if (typeof window.renderNodeSvcList === "function") window.renderNodeSvcList(); // 连接后刷新节点服务面板（hydrate 后数据已就绪）
+  if (window.Profile) Profile.publish(); // 连接后把本地资料(昵称/状态/简介)发布到家节点（LWW 收敛）
   if (!_coreUnlisten) _coreUnlisten = await NM.onCoreEvent(onCoreEvent);
   bindPanelUI();
   await imRefresh();
@@ -67,6 +68,8 @@ async function imRefresh() {
     if (window.toast) toast("目录刷新失败：" + (e && e.message ? e.message : e));
   }
   renderPanels();
+  // P1：把 b3: 头像引用异步解析为可展示的 data:URI（拉取+缓存），完成后重渲染。
+  if (window.Profile) Profile.resolveList(CONTACTS, () => renderPanels());
 }
 
 function renderPanels() { renderConversations(); renderEntities(); }
@@ -127,7 +130,7 @@ function renderGroup(icon, label, items) {
 
 function itemHtml(c, sub, unread, sel) {
   return `<div class="im-item ${c.id === sel ? "on" : ""}" data-id="${c.id}" title="${escapeHtml(c.id)}">
-    <span class="av" style="background:${avatarColor(c.id)}">${escapeHtml((c.name || "?").slice(0, 1))}</span>
+    <span class="av" style="background:${avatarColor(c.id)}${(window.Profile && Profile.isImg(c.avatar)) ? ";padding:0;overflow:hidden" : ""}">${(window.Profile && Profile.isImg(c.avatar)) ? `<img src="${c.avatar}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit">` : escapeHtml((c.name || "?").slice(0, 1))}</span>
     <span class="mid">
       <span class="r1"><span class="nm">${escapeHtml(c.name || shortId(c.id))}</span></span>
       <span class="r2"><span class="msg">${sub || ""}</span>${unread ? `<span class="unread">${unread}</span>` : ""}</span>
@@ -151,9 +154,12 @@ function showEntityDetail(id) {
       <span class="conv-kind">${tm.icon} ${escapeHtml(tm.label)}</span>
     </div>
     <div class="ent-detail">
-      <div class="ed-avatar" style="background:${avatarColor(id)}">${escapeHtml((c.name || "?").slice(0, 1))}</div>
+      <div class="ed-avatar" style="background:${avatarColor(id)}${(window.Profile && Profile.isImg(c.avatar)) ? ";padding:0;overflow:hidden" : ""}">${(window.Profile && Profile.isImg(c.avatar)) ? `<img src="${c.avatar}" alt="" style="width:100%;height:100%;object-fit:cover">` : escapeHtml((c.name || "?").slice(0, 1))}</div>
       <div class="ed-name">${escapeHtml(c.name || "(未命名)")}</div>
       <div class="ed-type">${tm.icon} ${escapeHtml(tm.label)}${c.kind ? ` · <code>${escapeHtml(c.kind)}</code>` : ""}</div>
+      ${(c.status || c.statusText) ? `<div style="margin:2px 0 6px">${c.status ? `<span style="padding:1px 8px;border-radius:10px;background:var(--accent-soft);color:var(--aqua);font-size:12px">${escapeHtml(window.Profile ? Profile.statusLabel(c.status) : c.status)}</span>` : ""}${c.statusText ? ` <span style="color:var(--muted)">${escapeHtml(c.statusText)}</span>` : ""}</div>` : ""}
+      ${c.bio ? `<div style="margin:4px 0;color:var(--text)">${escapeHtml(c.bio)}</div>` : ""}
+      ${(c.links && c.links.length) ? `<div style="margin:4px 0;font-size:12px">${c.links.map((l) => `<code>${escapeHtml(l)}</code>`).join(" · ")}</div>` : ""}
       <div class="ed-field">
         <label>公钥 (EntityId)</label>
         <div class="ed-key"><code id="ed-pubkey">${escapeHtml(id)}</code><button class="ns-btn ns-primary" id="ed-copy">复制</button></div>
@@ -238,7 +244,7 @@ function renderConversation() {
   const msgs = CONVOS[ACTIVE] || [];
   conv.innerHTML = `
     <div class="conv-head">
-      <span class="av av-sm" style="background:${avatarColor(ACTIVE)}">${escapeHtml((c.name || "?").slice(0, 1))}</span>
+      <span class="av av-sm" style="background:${avatarColor(ACTIVE)}${(window.Profile && Profile.isImg(c.avatar)) ? ";padding:0;overflow:hidden" : ""}">${(window.Profile && Profile.isImg(c.avatar)) ? `<img src="${c.avatar}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit">` : escapeHtml((c.name || "?").slice(0, 1))}</span>
       <b>${escapeHtml(c.name || shortId(ACTIVE))}</b>
       ${c.kind ? `<span class="conv-kind">${escapeHtml(c.kind)}</span>` : ""}
       <span class="sp"></span>
