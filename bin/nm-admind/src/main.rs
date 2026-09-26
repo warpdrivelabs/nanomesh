@@ -4,6 +4,7 @@
 mod auth;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     extract::{Query, State},
@@ -72,9 +73,16 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("未设置 --nmd-token；若 nmd 控制 API 需要 token，取数会 401");
     }
 
+    // 反代 HTTP 客户端设超时：nmd 若卡死/无响应，代理应快速失败并返回可见错误
+    // （proxy_get 的 Err 分支 → 502 "nmd 不可达"），而不是无限等待、让前端菜单内容一直空白。
+    let http = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let state = AppState {
         auth: Arc::new(auth),
-        http: reqwest::Client::new(),
+        http,
         nmd_api: args.nmd_api.trim_end_matches('/').to_string(),
         nmd_token: args.nmd_token,
     };

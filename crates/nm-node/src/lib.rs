@@ -445,8 +445,15 @@ impl Node {
     pub async fn sync_peers_once(&self) {
         let ep = self.ep.clone();
         let my = self.ep.id_bytes();
-        for entry in self.peers.iter() {
-            let addr = entry.value().clone();
+        // 关键：先把对等地址收集成 Vec，再逐个拨号——DashMap 的迭代守卫**不能跨 .await 持有**。
+        // 否则某对端在读阶段卡住（fed_pull→s2s_request→read_gram 若无超时会无限等）会把该 shard
+        // 的读锁永久占住；此后任何对 peers 的写（learn_peer/sweep_discovered）排队，parking_lot
+        // 的公平性会连带阻塞**所有后续读**（peer_count()→管理台、peers.get()→消息投递），
+        // worker 线程逐步耗尽 → 整个 runtime 冻死且不恢复（已在 mac + 两台种子复现 3 次）。
+        // s2s_request 现另有整体超时兜底，双保险。
+        let targets: Vec<nm_transport::Addr> =
+            self.peers.iter().map(|e| e.value().clone()).collect();
+        for addr in targets {
             match fed_pull(&ep, addr).await {
                 Ok(entities) => {
                     for e in entities {
@@ -1286,11 +1293,19 @@ async fn fed_relay(ep: &NodeEndpoint, addr: nm_transport::Addr, inner: &Gram) ->
 
 /// s2s 单次请求：拨号对等节点，开 bi 流，发一个 gram，读回单条响应。
 async fn s2s_request(ep: &NodeEndpoint, addr: nm_transport::Addr, gram: &Gram) -> Result<Gram, NodeError> {
-    let conn = ep.connect(addr).await.map_err(|e| NodeError::Other(e.to_string()))?;
-    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| NodeError::Other(e.to_string()))?;
-    write_gram(&mut send, gram).await.map_err(|e| NodeError::Other(e.to_string()))?;
-    let _ = send.finish();
-    read_gram(&mut recv).await.map_err(|e| NodeError::Other(e.to_string()))
+    // 全程超时兜底：对端可能连上却始终不回（read_gram 无限等）。s2s 调用绝不能永久挂起——
+    // 上层若在锁/DashMap 守卫下调用会拖死整个节点（见 sync_peers_once）。10s 与 fed.sync 的 timeout_ms 对齐。
+    let fut = async {
+        let conn = ep.connect(addr).await.map_err(|e| NodeError::Other(e.to_string()))?;
+        let (mut send, mut recv) = conn.open_bi().await.map_err(|e| NodeError::Other(e.to_string()))?;
+        write_gram(&mut send, gram).await.map_err(|e| NodeError::Other(e.to_string()))?;
+        let _ = send.finish();
+        read_gram(&mut recv).await.map_err(|e| NodeError::Other(e.to_string()))
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(10), fut).await {
+        Ok(r) => r,
+        Err(_) => Err(NodeError::Other("s2s request timed out".into())),
+    }
 }
 
 fn s2s_gram(sender: [u8; 32], kind: GramKind, payload: Option<Any>) -> Gram {

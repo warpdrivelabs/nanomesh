@@ -164,7 +164,21 @@ class AdminShell extends HTMLElement {
     this.querySelector(".top__title").textContent = TABS.find((t) => t.k === k).label;
     clearInterval(this.timer);
     this.refresh();
-    if (!STATIC_TABS.has(k)) this.timer = setInterval(() => this.refresh(), 3000);
+    // 自动刷新（3s）会整块重渲染面板，若用户正在「对等节点」表单里输入/编辑会被刷掉。
+    // 因此定时刷新前先判断是否正在编辑：正在编辑则跳过这次自动刷新（显式刷新不受影响）。
+    if (!STATIC_TABS.has(k)) this.timer = setInterval(() => { if (!this._isEditing()) this.refresh(); }, 3000);
+  }
+  /// 用户是否正在当前面板里编辑（有则跳过自动刷新，避免刷掉输入内容）。
+  _isEditing() {
+    const host = this.querySelector(".host");
+    if (!host) return false;
+    // ① 焦点在本面板的输入框里（正在输入）——通用保护。
+    const ae = document.activeElement;
+    if (ae && host.contains(ae) && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA")) return true;
+    // ② 对等节点表单已填了内容但尚未提交（即便已失焦也别刷掉；点「编辑」也会填充字段）。
+    const form = host.querySelector(".peerform");
+    if (form && [...form.querySelectorAll("input")].some((el) => el.value.trim() !== "")) return true;
+    return false;
   }
   async refresh() {
     const host = this.querySelector(".host"), meta = this.querySelector(".top__meta");
