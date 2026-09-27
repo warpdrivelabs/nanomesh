@@ -34,6 +34,16 @@ function mergedEntities() {
   return Object.values(map);
 }
 function entityById(id) { return mergedEntities().find((c) => c.id === id); }
+// 供 groups.js 等解析显示名：本人→"我"；目录/本地有名→名；否则短 id。
+window.entityName = function (id) { if (id === MY_ID) return "我"; const c = entityById(id); return (c && c.name) ? c.name : shortId(id); };
+// 打开某群的群聊（作为一个 tab）。
+window.openGroupChat = function (gid) {
+  const g = window.Groups && Groups.byId(gid);
+  const title = g ? (g.name || "群") : shortId(gid);
+  const draw = () => { ACTIVE = gid; DETAIL_ID = null; UNREAD[gid] = 0; renderPanels(); renderConversation(); };
+  if (window.Tabs) Tabs.open({ key: "c:" + gid, kind: "chat", title, ico: "👥", render: draw });
+  else draw();
+};
 
 // ── 手动添加实体的本地存储（按当前身份隔离）──
 function loadAdded() { try { return (JSON.parse(localStorage.getItem("nmspace-entities") || "{}")[MY_ID]) || []; } catch (_) { return []; } }
@@ -51,8 +61,10 @@ async function imStart(myId) {
   UNREAD = UNREAD_BY_USER[MY_ID] = UNREAD_BY_USER[MY_ID] || {};
   ADDED = loadAdded();
   ACTIVE = null; DETAIL_ID = null; CONTACTS = [];
+  if (window.Tabs) Tabs.closeAll(); // 每次连接（含切换身份）重置多 tab 工作区
   if (typeof updateUserChip === "function") updateUserChip();
   if (typeof window.renderNodeSvcList === "function") window.renderNodeSvcList(); // 连接后刷新节点服务面板（hydrate 后数据已就绪）
+  if (typeof window.renderGroupsList === "function") window.renderGroupsList(); // P3：刷新群组列表
   if (window.Profile) { Profile.publish(); Profile.applyPresence(); } // 连接后发布资料 + 应用在线状态(P2)
   if (window._nmPresenceTimer) clearInterval(window._nmPresenceTimer);
   window._nmPresenceTimer = setInterval(() => { if (MY_ID) imRefresh(); }, 15000); // P2：定期刷新在线状态
@@ -91,7 +103,7 @@ function renderConversations() {
   if (!box) return;
   const q = (document.getElementById("im-search-input").value || "").trim().toLowerCase();
   const peers = Object.keys(CONVOS).map((id) => {
-    const c = entityById(id) || { id, name: "", kind: "" };
+    const c = entityById(id) || ((window.Groups && Groups.byId(id)) ? { id, name: Groups.byId(id).name || "群", kind: "group" } : { id, name: "", kind: "" });
     const last = (CONVOS[id] || []).slice(-1)[0];
     return { c, last, ts: last ? last.ts : 0 };
   }).filter(({ c }) => !q || (c.name || "").toLowerCase().includes(q) || c.id.includes(q))
@@ -144,6 +156,13 @@ function wireItems(box, handler) {
 
 // ── 实体详情（主区）：完整信息 + 复制公钥 + 发消息 ──
 function showEntityDetail(id) {
+  const c = entityById(id) || { id, name: "", kind: "" };
+  const title = c.name || shortId(id);
+  const ico = (typeof typeMeta === "function" ? (typeMeta(c.kind).icon || "📇") : "📇");
+  if (window.Tabs) Tabs.open({ key: "e:" + id, kind: "entity", title, ico, render: () => renderEntityDetail(id) });
+  else renderEntityDetail(id);
+}
+function renderEntityDetail(id) {
   DETAIL_ID = id; ACTIVE = null;
   renderPanels();
   const conv = document.getElementById("conv");
@@ -225,17 +244,17 @@ function removeEntity(id) {
 }
 
 function selectContact(id) {
-  ACTIVE = id; DETAIL_ID = null;
-  UNREAD[id] = 0;
-  renderPanels();
-  renderConversation();
+  const c = entityById(id) || { id, name: "" };
+  const title = c.name || shortId(id);
+  const draw = () => { ACTIVE = id; DETAIL_ID = null; UNREAD[id] = 0; renderPanels(); renderConversation(); };
+  if (window.Tabs) Tabs.open({ key: "c:" + id, kind: "chat", title, ico: "💬", render: draw });
+  else draw();
 }
 
 // ── 主区会话（头部 + 消息流 + 输入条）──
 function renderConversation() {
   const conv = document.getElementById("conv");
   if (!conv) return;
-  const c = entityById(ACTIVE) || (ACTIVE ? { id: ACTIVE, name: "", kind: "" } : null);
   if (!ACTIVE) {
     conv.innerHTML = `<div class="im-center">
       <div class="ico">💬</div>
@@ -245,32 +264,45 @@ function renderConversation() {
     return;
   }
   const msgs = CONVOS[ACTIVE] || [];
+  const grp = window.Groups ? Groups.byId(ACTIVE) : null;
+  const c = grp ? { id: ACTIVE, name: grp.name || "群", kind: "group" } : (entityById(ACTIVE) || { id: ACTIVE, name: "", kind: "" });
+  const headAv = grp
+    ? `<span class="av av-sm" style="background:${avatarColor(ACTIVE)}">👥</span>`
+    : `<span class="av av-sm" style="background:${avatarColor(ACTIVE)}${(window.Profile && Profile.isImg(c.avatar)) ? ";padding:0;overflow:hidden" : ""}">${(window.Profile && Profile.isImg(c.avatar)) ? `<img src="${c.avatar}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit">` : escapeHtml((c.name || "?").slice(0, 1))}</span>`;
+  const headMeta = grp
+    ? `<span class="conv-kind">群 · <b id="conv-grp-count">${(grp.members || []).length}</b> 人</span>`
+    : (c.kind ? `<span class="conv-kind">${escapeHtml(c.kind)}</span>` : "");
+  const logHtml = `<div class="log" id="conv-log">${msgs.map((m) => msgHtml(m, grp)).join("") || '<div class="im-empty im-empty--center">暂无消息</div>'}</div>`;
+  const composerHtml = `<div class="im-composer"><input id="conv-input" type="text" placeholder="${grp ? "群内发言，⏎ 发送…" : "输入消息，⏎ 发送…"}" autocomplete="off" /><button id="conv-send" class="send" title="发送 ⏎">↑</button></div>`;
+  // 群聊：会话在左、群成员面板在右（顶部群操作 + 逐成员操作）。私聊：单栏。
+  const body = grp
+    ? `<div class="grp-body"><div class="grp-chat">${logHtml}${composerHtml}</div><div class="grp-members" id="grp-members"></div></div>`
+    : `${logHtml}${composerHtml}`;
   conv.innerHTML = `
     <div class="conv-head">
-      <span class="av av-sm" style="background:${avatarColor(ACTIVE)}${(window.Profile && Profile.isImg(c.avatar)) ? ";padding:0;overflow:hidden" : ""}">${(window.Profile && Profile.isImg(c.avatar)) ? `<img src="${c.avatar}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit">` : escapeHtml((c.name || "?").slice(0, 1))}</span>
+      ${headAv}
       <b>${escapeHtml(c.name || shortId(ACTIVE))}</b>
-      ${c.kind ? `<span class="conv-kind">${escapeHtml(c.kind)}</span>` : ""}
+      ${headMeta}
       <span class="sp"></span>
       <code class="conv-id" title="${escapeHtml(ACTIVE)}">${escapeHtml(shortId(ACTIVE))}</code>
     </div>
-    <div class="log" id="conv-log">${msgs.map(msgHtml).join("") || '<div class="im-empty im-empty--center">暂无消息</div>'}</div>
-    <div class="im-composer">
-      <input id="conv-input" type="text" placeholder="输入消息，⏎ 发送…" autocomplete="off" />
-      <button id="conv-send" class="send" title="发送 ⏎">↑</button>
-    </div>`;
+    ${body}`;
   const input = document.getElementById("conv-input");
   const doSend = () => sendMsg(input.value);
   document.getElementById("conv-send").addEventListener("click", doSend);
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSend(); } });
+  if (grp && window.Groups && Groups.renderMembersPanel) Groups.renderMembersPanel(ACTIVE, document.getElementById("grp-members"));
   input.focus();
   scrollLog();
 }
 
-function msgHtml(m) {
+function msgHtml(m, grp) {
   const mine = m.from === MY_ID;
+  const who = mine ? "我" : (window.entityName ? entityName(m.from) : (m.from || "").slice(0, 6) + "…");
   return `<div class="im-msg ${mine ? "me" : ""}">
+    ${(grp && !mine) ? `<span class="im-sender">${escapeHtml(who)}</span>` : ""}
     <span class="im-bubble">${escapeHtml(m.body)}</span>
-    <span class="im-from">${mine ? "我" : escapeHtml((m.from || "").slice(0, 6)) + "…"}</span>
+    <span class="im-from">${escapeHtml(who)}</span>
   </div>`;
 }
 
@@ -278,9 +310,11 @@ async function sendMsg(text) {
   text = (text || "").trim();
   if (!text || !ACTIVE) return;
   const input = document.getElementById("conv-input");
+  const isGroup = !!(window.Groups && Groups.byId(ACTIVE));
   try {
-    await NM.inv("send_to", { target: ACTIVE, text });
-    pushMsg(ACTIVE, { id: "l" + Date.now(), from: MY_ID, body: text, ts: Date.now() });
+    if (isGroup) await NM.inv("send_group", { groupId: ACTIVE, text });
+    else await NM.inv("send_to", { target: ACTIVE, text });
+    pushMsg(ACTIVE, { id: "l" + Date.now(), from: MY_ID, body: text, ts: Date.now(), group: isGroup, to: ACTIVE });
     if (input) { input.value = ""; input.focus(); }
   } catch (e) {
     if (window.toast) toast("发送失败：" + (e && e.message ? e.message : e));
@@ -290,8 +324,9 @@ async function sendMsg(text) {
 function onCoreEvent(ev) {
   if (!ev || ev.type !== "message" || !ev.msg) return;
   const m = ev.msg;
-  pushMsg(m.from, m);
-  if (m.from !== ACTIVE) UNREAD[m.from] = (UNREAD[m.from] || 0) + 1;
+  const key = m.group ? m.to : m.from; // 群消息按群 id 归会话；私聊按发送方
+  pushMsg(key, m);
+  if (key !== ACTIVE) UNREAD[key] = (UNREAD[key] || 0) + 1;
   renderPanels();
 }
 
@@ -309,6 +344,7 @@ function scrollLog() { const log = document.getElementById("conv-log"); if (log)
 async function imDisconnect() {
   try { await NM.inv("disconnect"); } catch (_) {}
   MY_ID = ""; CONTACTS = []; ADDED = []; CONVOS = {}; UNREAD = {}; ACTIVE = null; DETAIL_ID = null;
+  if (window.Tabs) Tabs.closeAll();
   if (typeof showLoginView === "function") showLoginView();
 }
 window.imStart = imStart;

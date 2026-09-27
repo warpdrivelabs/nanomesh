@@ -87,7 +87,7 @@
 .sec-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; font-size: 13px; color: var(--ink2); }
 .sec-row input[type=number] { width: 90px; height: 34px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--ink); font-size: 13px; outline: none; }
 .sec-check { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--ink2); margin-bottom: 10px; cursor: pointer; }
-.sec-input { width: 100%; height: 38px; padding: 0 12px; margin-bottom: 8px; border-radius: 9px; border: 1px solid var(--border); background: var(--surface); color: var(--ink); font-size: 13px; outline: none; }
+.sec-input { width: 100%; height: 38px; padding: 0 12px; margin-bottom: 8px; border-radius: 9px; border: 1px solid var(--border); background-color: var(--surface); color: var(--ink); font-size: 13px; outline: none; }
 .sec-input:focus { border-color: var(--aqua); }
 .sec-ta { width: 100%; min-height: 70px; padding: 8px 10px; margin-bottom: 8px; border-radius: 9px; border: 1px solid var(--border); background: var(--surface); color: var(--ink); font-size: 11.5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; outline: none; resize: vertical; }
 .sec-ta:focus { border-color: var(--aqua); }
@@ -99,8 +99,12 @@
 
 /* 连接页：节点公钥下拉 + 生成按钮 */
 .pubkey-row { display: flex; gap: 8px; align-items: stretch; }
-.pubkey-select { flex: 1; min-width: 0; height: 44px; padding: 0 12px; border-radius: 11px; border: 1px solid var(--border);
-  background: var(--surface); color: var(--ink); font-size: 13px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; outline: none; cursor: pointer; }
+.pubkey-select { flex: 1; min-width: 0; height: 44px; padding: 0 34px 0 12px; border-radius: 11px; border: 1px solid var(--border);
+  -webkit-appearance: none; appearance: none;
+  background-color: var(--surface);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239aa0a8' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 12px center; background-size: 13px;
+  color: var(--ink); font-size: 13px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; outline: none; cursor: pointer; }
 .pubkey-select:hover { border-color: var(--accent); }
 .pubkey-select:focus { border-color: var(--aqua); }
 .pubkey-gen { flex: 0 0 auto; height: 44px; padding: 0 14px; border-radius: 11px; border: 1px solid var(--aqua);
@@ -181,7 +185,9 @@
 .ns-ftitle { font-size: 13px; font-weight: 700; margin-bottom: 10px; }
 .ns-frow { display: flex; flex-direction: column; gap: 4px; margin-bottom: 9px; }
 .ns-frow label { font-size: 11.5px; color: var(--muted); font-weight: 600; }
-.ns-frow input, .ns-frow select { height: 36px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--ink); font-size: 12.5px; font-family: inherit; outline: none; }
+.ns-frow input, .ns-frow select { height: 36px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--border); background-color: var(--surface); color: var(--ink); font-size: 12.5px; font-family: inherit; outline: none; }
+/* 下拉框留出右侧箭头位（背景 chevron 由全局 select 规则绘制，不平铺）*/
+.ns-frow select, select.sec-input { padding-right: 30px; }
 .ns-frow input:focus, .ns-frow select:focus { border-color: var(--aqua); }
 .ns-fhint { font-size: 11px; color: var(--muted); margin: 2px 0 8px; }
 .ns-factions { display: flex; gap: 8px; justify-content: flex-end; }
@@ -202,6 +208,18 @@
 .ns-empty { color: var(--muted); font-size: 12.5px; padding: 14px 6px; line-height: 1.8; }
 
 /* ── 主区会话 ── */
+/* 主区多 tab 工作区（cmx-agent 样式）*/
+.tabbar { display: flex; align-items: stretch; height: 36px; flex: 0 0 36px; box-sizing: border-box; border-bottom: 1px solid var(--border); background: var(--panel); }
+.tabstrip { flex: 1; display: flex; align-items: stretch; overflow-x: auto; overflow-y: hidden; }
+.tabstrip::-webkit-scrollbar { height: 0; }
+.tab { display: flex; align-items: center; gap: 7px; padding: 0 8px 0 12px; max-width: 200px; border-right: 1px solid var(--border); position: relative; cursor: pointer; font-size: 12.5px; color: var(--muted); background: transparent; }
+.tab:hover { background: var(--hover); }
+.tab.active { background: var(--bg); color: var(--ink); }
+.tab.active::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 2px; background: var(--aqua); }
+.tab .tab-ico { font-size: 13px; flex: 0 0 auto; }
+.tab .tab-t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tab .tab-x { width: 18px; height: 18px; border-radius: 5px; display: flex; align-items: center; justify-content: center; color: var(--muted); opacity: .6; font-size: 11px; }
+.tab .tab-x:hover { background: var(--border2); color: var(--ink); opacity: 1; }
 main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .conv { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .conv-head { display: flex; align-items: center; gap: 9px; height: var(--header-h); flex: 0 0 var(--header-h);
@@ -221,6 +239,24 @@ main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
   padding: 8px 13px; font-size: 13.5px; line-height: 1.6; color: var(--ink); white-space: pre-wrap; word-break: break-word; }
 .im-msg.me .im-bubble { background: var(--aqua); border-color: var(--aqua); color: #05221a; border-radius: 14px; border-top-right-radius: 4px; }
 .im-from { font-size: 10.5px; color: var(--muted); margin-top: 3px; padding: 0 4px; }
+.im-sender { font-size: 11px; color: var(--aqua); font-weight: 600; margin: 0 4px 2px; }
+/* 群聊：左会话 + 右成员面板 */
+.grp-body { flex: 1; min-height: 0; display: flex; }
+.grp-chat { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.grp-members { flex: 0 0 244px; border-left: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
+.grp-members-head { display: flex; flex-direction: column; gap: 6px; padding: 10px; border-bottom: 1px solid var(--border); font-size: 12.5px; color: var(--muted); }
+.grp-members-head b { color: var(--ink); }
+.grp-members-top { display: flex; flex-wrap: wrap; gap: 5px; }
+.grp-members-top .ns-btn { padding: 3px 9px; font-size: 12px; }
+.grp-members-list { flex: 1; overflow: auto; padding: 6px; }
+.grp-m { display: flex; align-items: center; gap: 8px; padding: 6px; border-radius: 8px; }
+.grp-m:hover { background: var(--hover); }
+.grp-m .av { width: 30px; height: 30px; border-radius: 50%; flex: 0 0 30px; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 13px; font-weight: 700; }
+.grp-m-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.grp-m-meta b { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.grp-m-meta small { font-size: 10.5px; color: var(--muted); }
+.grp-m-acts { display: flex; gap: 3px; flex: 0 0 auto; }
+.grp-m-acts .ns-btn { padding: 2px 6px; font-size: 11px; }
 
 /* 空会话居中态 */
 .im-center { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--muted); }

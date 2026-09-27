@@ -1,0 +1,204 @@
+// ── 群组（P3）：建群 · 角色(owner/admin/member) · 加/删成员 · 提升/取消管理员 · 改名/解散 · 进入群聊。
+//    群权威状态在群 home 节点；本模块经 Tauri group_* 命令读写，成员名从实体目录解析。
+(function () {
+  let GROUPS = [];
+  let MYID = "";
+
+  const roleOf = (g, id) => (g.owner === id ? "owner" : (g.admins || []).includes(id) ? "admin" : (g.members || []).includes(id) ? "member" : "");
+  const roleLabel = (r) => ({ owner: "群主", admin: "管理员", member: "成员" })[r] || "";
+  const myRole = (g) => roleOf(g, MYID);
+  const byId = (gid) => GROUPS.find((g) => g.id === gid) || null;
+  // 成员显示名：优先实体目录/本地名，其次自己，最后短 id。
+  const nameOf = (id) => (id === MYID ? "我" : (window.entityName ? window.entityName(id) : (id || "").slice(0, 8) + "…"));
+
+  async function refresh() {
+    if (!window.NM || !NM.hasTauri || !NM.hasTauri()) { GROUPS = []; return; }
+    try { MYID = MYID || (await NM.inv("my_id").catch(() => "")); } catch (_) {}
+    try { GROUPS = await NM.inv("group_list"); } catch (e) { GROUPS = []; }
+  }
+
+  async function renderGroupsList() {
+    await refresh();
+    const box = document.getElementById("groups-list");
+    if (!box) return;
+    if (!GROUPS.length) { box.innerHTML = '<div class="ns-empty">还没有群组。点上方「＋」新建。</div>'; return; }
+    box.innerHTML = GROUPS.map((g) => `
+      <div class="im-item" data-gid="${g.id}" title="${escapeHtml(g.id)}">
+        <span class="av" style="background:${avatarColor(g.id)}">👥</span>
+        <span class="mid">
+          <span class="r1"><span class="nm">${escapeHtml(g.name || "(未命名群)")}</span></span>
+          <span class="r2"><span class="msg">${(g.members || []).length} 人 · ${roleLabel(myRole(g)) || "非成员"}</span></span>
+        </span>
+      </div>`).join("");
+    box.querySelectorAll(".im-item").forEach((el) => el.addEventListener("click", () => openDetail(el.dataset.gid)));
+  }
+
+  // ── 主区：群详情 + 管理 ──
+  // 打开群详情为一个 tab（切走再回来会重绘）。
+  function openDetail(gid) {
+    const g = byId(gid);
+    const title = g ? (g.name || "群") : (gid || "").slice(0, 8) + "…";
+    if (window.Tabs) Tabs.open({ key: "g:" + gid, kind: "group", title, ico: "👥", render: () => renderGroupDetail(gid) });
+    else renderGroupDetail(gid);
+  }
+  function renderGroupDetail(gid) {
+    const g = byId(gid);
+    const conv = document.getElementById("conv");
+    if (!g || !conv) return;
+    const role = myRole(g);
+    const isOwner = role === "owner", isAdmin = role === "owner" || role === "admin";
+    const memberRows = (g.members || []).map((id) => {
+      const r = roleOf(g, id);
+      const acts = [];
+      // 踢人：owner/admin，不能踢 owner；admin 不能踢 admin。
+      if (isAdmin && id !== g.owner && id !== MYID && !((r === "admin") && !isOwner)) acts.push(`<button class="ns-btn grp-kick" data-id="${id}">移除</button>`);
+      if (isOwner && id !== g.owner) acts.push(r === "admin" ? `<button class="ns-btn grp-demote" data-id="${id}">取消管理</button>` : `<button class="ns-btn grp-promote" data-id="${id}">设为管理</button>`);
+      return `<div class="nsu-item">
+        <span class="av" style="background:${avatarColor(id)}">${escapeHtml(nameOf(id).slice(0, 1))}</span>
+        <span class="nsu-meta"><b>${escapeHtml(nameOf(id))}</b><small>${roleLabel(r)} · ${escapeHtml(shortNode(id))}</small></span>
+        ${acts.join("")}
+      </div>`;
+    }).join("");
+    conv.innerHTML = `
+      <div class="conv-head"><b>群详情</b><span class="sp"></span><span class="conv-kind">${roleLabel(role) || "非成员"}</span></div>
+      <div class="ent-detail">
+        <div class="ed-avatar" style="background:${avatarColor(gid)}">👥</div>
+        <div class="ed-name">${escapeHtml(g.name || "(未命名群)")}</div>
+        <div class="ed-type">👥 群组 · ${(g.members || []).length} 人</div>
+        <div class="ed-actions">
+          <button class="ns-btn ns-primary" id="grp-open-chat">进入群聊</button>
+          ${isAdmin ? `<button class="ns-btn" id="grp-add">添加成员</button>` : ""}
+          ${isAdmin ? `<button class="ns-btn" id="grp-rename">改群名</button>` : ""}
+          ${isOwner ? `<button class="ns-btn" id="grp-dissolve">解散群</button>` : `<button class="ns-btn" id="grp-leave">退出群</button>`}
+        </div>
+        <div class="ed-users">
+          <div class="ed-users-head"><span>成员（${(g.members || []).length}）</span></div>
+          <div class="nsu-list">${memberRows}</div>
+        </div>
+      </div>`;
+    const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener("click", fn); };
+    on("grp-open-chat", () => { if (window.openGroupChat) window.openGroupChat(gid); });
+    on("grp-add", () => openAddMember(gid));
+    on("grp-rename", async () => {
+      const name = await textPrompt("改群名", "新的群名", g.name || "");
+      if (name != null) { await act("group_rename", { groupId: gid, name }, "已改名"); openDetail(gid); }
+    });
+    on("grp-dissolve", async () => { if (confirm("确定解散该群？此操作不可恢复。")) { await act("group_dissolve", { groupId: gid }, "群已解散"); if (window.Tabs) Tabs.close("g:" + gid); else backToList(); renderGroupsList(); } });
+    on("grp-leave", async () => { if (confirm("退出该群？")) { await act("group_leave", { groupId: gid }, "已退出"); if (window.Tabs) Tabs.close("g:" + gid); else backToList(); renderGroupsList(); } });
+    conv.querySelectorAll(".grp-kick").forEach((b) => b.addEventListener("click", async () => { await act("group_kick", { groupId: gid, target: b.dataset.id }, "已移除"); openDetail(gid); }));
+    conv.querySelectorAll(".grp-promote").forEach((b) => b.addEventListener("click", async () => { await act("group_promote", { groupId: gid, target: b.dataset.id }, "已设为管理员"); openDetail(gid); }));
+    conv.querySelectorAll(".grp-demote").forEach((b) => b.addEventListener("click", async () => { await act("group_demote", { groupId: gid, target: b.dataset.id }, "已取消管理员"); openDetail(gid); }));
+  }
+
+  async function act(cmd, args, okMsg) {
+    try { await NM.inv(cmd, args); await refresh(); if (window.toast && okMsg) toast(okMsg); return true; }
+    catch (e) { if (window.toast) toast("操作失败：" + (e && e.message ? e.message : e)); return false; }
+  }
+  function backToList() { const conv = document.getElementById("conv"); if (conv) conv.innerHTML = '<div class="im-center"><div class="ico">👥</div><div class="txt">选择或新建一个群</div></div>'; renderGroupsList(); }
+
+  async function createGroup() {
+    const name = await textPrompt("新建群", "群名称", "");
+    if (name == null) return;
+    try {
+      const gid = await NM.inv("group_create", { name: name || "新群" });
+      await renderGroupsList();
+      openDetail(gid);
+      if (window.toast) toast("群已创建");
+    } catch (e) { if (window.toast) toast("建群失败：" + (e && e.message ? e.message : e)); }
+  }
+
+  // 添加成员：从实体目录挑人（person）或粘贴公钥。
+  async function openAddMember(gid) {
+    const g = byId(gid);
+    let contacts = [];
+    try { contacts = (await NM.inv("directory_query", { kindPrefix: "" })) || []; } catch (_) {}
+    const inGroup = new Set((g.members || []));
+    const pick = contacts.filter((c) => !inGroup.has(c.id));
+    const rows = pick.map((c) => `<div class="nsu-item"><span class="av" style="background:${avatarColor(c.id)}">${escapeHtml((c.name || "?").slice(0, 1))}</span><span class="nsu-meta"><b>${escapeHtml(c.name || shortNode(c.id))}</b><small>${escapeHtml(shortNode(c.id))}</small></span><button class="ns-btn grp-addone" data-id="${c.id}">添加</button></div>`).join("") || '<div class="ns-empty">目录里没有可添加的联系人</div>';
+    const m = modal(`添加成员到「${escapeHtml(g.name || "群")}」`, `
+      <div class="nsu-list" style="max-height:46vh;overflow:auto">${rows}</div>
+      <div class="sec-row" style="margin-top:8px"><label>或公钥</label><input id="grp-add-pk" class="sec-input" placeholder="粘贴 64 位公钥 hex"></div>
+      <div class="sec-actions"><button class="ns-btn" id="grp-add-bypk">按公钥添加</button></div>`);
+    m.querySelectorAll(".grp-addone").forEach((b) => b.addEventListener("click", async () => { if (await act("group_add", { groupId: gid, target: b.dataset.id }, "已添加")) { b.textContent = "已添加"; b.disabled = true; } }));
+    m.querySelector("#grp-add-bypk").addEventListener("click", async () => {
+      const raw = m.querySelector("#grp-add-pk").value.trim();
+      const pk = (window.NodeSvc && NodeSvc.pubkeyOf) ? NodeSvc.pubkeyOf(raw) : (/^[0-9a-fA-F]{64}$/.test(raw) ? raw.toLowerCase() : null);
+      if (!pk) { if (window.toast) toast("请输入 64 位公钥 hex"); return; }
+      if (await act("group_add", { groupId: gid, target: pk }, "已添加")) { closeModal(m); openDetail(gid); }
+    });
+  }
+
+  // ── 轻量模态 ──
+  function modal(title, bodyHtml) {
+    closeModal(document.getElementById("grp-modal"));
+    const m = document.createElement("div");
+    m.className = "sec-overlay on"; m.id = "grp-modal";
+    m.innerHTML = `<div class="sec-box"><div class="sec-head">${title}<button class="sec-x" id="grp-modal-x">✕</button></div><div class="sec-body"><div class="sec-sec">${bodyHtml}</div></div></div>`;
+    document.body.appendChild(m);
+    m.addEventListener("click", (e) => { if (e.target === m) closeModal(m); });
+    m.querySelector("#grp-modal-x").addEventListener("click", () => closeModal(m));
+    return m;
+  }
+  function closeModal(m) { if (m && m.parentNode) m.parentNode.removeChild(m); }
+  function textPrompt(title, ph, val) {
+    return new Promise((resolve) => {
+      const m = modal(title, `<input id="grp-inp" class="sec-input" placeholder="${escapeHtml(ph)}" value="${escapeHtml(val || "")}"><div class="sec-actions"><button class="ns-btn" id="grp-inp-cancel">取消</button><button class="ns-btn ns-primary" id="grp-inp-ok">确定</button></div>`);
+      const inp = m.querySelector("#grp-inp");
+      inp.focus();
+      const done = (v) => { closeModal(m); resolve(v); };
+      m.querySelector("#grp-inp-ok").addEventListener("click", () => done(inp.value.trim()));
+      m.querySelector("#grp-inp-cancel").addEventListener("click", () => done(null));
+      inp.addEventListener("keydown", (e) => { if (e.key === "Enter") done(inp.value.trim()); if (e.key === "Escape") done(null); });
+    });
+  }
+
+  (function init() {
+    const nw = document.getElementById("grp-new-btn");
+    if (nw) nw.addEventListener("click", createGroup);
+    const rf = document.getElementById("grp-refresh-btn");
+    if (rf) rf.addEventListener("click", renderGroupsList);
+  })();
+
+  // ── 群聊右侧「群成员」面板：顶部群操作 + 逐成员操作按钮（渲染进给定容器）──
+  function renderMembersPanel(gid, box) {
+    if (!box) return;
+    const g = byId(gid);
+    if (!g) { box.innerHTML = '<div class="ns-empty">群不存在或已解散</div>'; return; }
+    const role = myRole(g), isOwner = role === "owner", isAdmin = isOwner || role === "admin";
+    const top = [];
+    if (isAdmin) top.push(`<button class="ns-btn grp-p-add" title="添加成员">＋ 加人</button>`);
+    if (isAdmin) top.push(`<button class="ns-btn grp-p-rename" title="改群名">改名</button>`);
+    if (isOwner) top.push(`<button class="ns-btn grp-p-dissolve" title="解散群">解散</button>`);
+    else top.push(`<button class="ns-btn grp-p-leave" title="退出群">退群</button>`);
+    const rows = (g.members || []).map((id) => {
+      const r = roleOf(g, id), acts = [];
+      if (id !== MYID) acts.push(`<button class="ns-btn grp-p-msg" data-id="${id}" title="私聊">💬</button>`);
+      if (isOwner && id !== g.owner) acts.push(r === "admin"
+        ? `<button class="ns-btn grp-p-demote" data-id="${id}" title="取消管理员">取消管理</button>`
+        : `<button class="ns-btn grp-p-promote" data-id="${id}" title="设为管理员">设管理</button>`);
+      if (isAdmin && id !== g.owner && id !== MYID && !(r === "admin" && !isOwner)) acts.push(`<button class="ns-btn grp-p-kick" data-id="${id}" title="移出群">✕</button>`);
+      return `<div class="grp-m"><span class="av" style="background:${avatarColor(id)}">${escapeHtml(nameOf(id).slice(0, 1))}</span>
+        <span class="grp-m-meta"><b>${escapeHtml(nameOf(id))}</b><small>${roleLabel(r)}</small></span>
+        <span class="grp-m-acts">${acts.join("")}</span></div>`;
+    }).join("");
+    box.innerHTML = `
+      <div class="grp-members-head"><span>成员 <b>${(g.members || []).length}</b></span><div class="grp-members-top">${top.join("")}</div></div>
+      <div class="grp-members-list">${rows}</div>`;
+    const redraw = () => renderMembersPanel(gid, box);
+    const q = (sel, fn) => { const el = box.querySelector(sel); if (el) el.addEventListener("click", fn); };
+    const each = (sel, fn) => box.querySelectorAll(sel).forEach((el) => el.addEventListener("click", () => fn(el.dataset.id)));
+    q(".grp-p-add", () => openAddMember(gid));
+    q(".grp-p-rename", async () => { const name = await textPrompt("改群名", "新的群名", g.name || ""); if (name != null) { await act("group_rename", { groupId: gid, name }, "已改名"); if (window.Tabs) Tabs.retitle("c:" + gid, name, "👥"); redraw(); refreshHeaderCount(gid); } });
+    q(".grp-p-dissolve", async () => { if (confirm("解散该群？此操作不可恢复。")) { await act("group_dissolve", { groupId: gid }, "群已解散"); if (window.Tabs) Tabs.close("c:" + gid); renderGroupsList(); } });
+    q(".grp-p-leave", async () => { if (confirm("退出该群？")) { await act("group_leave", { groupId: gid }, "已退出"); if (window.Tabs) Tabs.close("c:" + gid); renderGroupsList(); } });
+    each(".grp-p-msg", (id) => { if (typeof selectContact === "function") selectContact(id); });
+    each(".grp-p-kick", async (id) => { await act("group_kick", { groupId: gid, target: id }, "已移除"); redraw(); refreshHeaderCount(gid); });
+    each(".grp-p-promote", async (id) => { await act("group_promote", { groupId: gid, target: id }, "已设为管理员"); redraw(); });
+    each(".grp-p-demote", async (id) => { await act("group_demote", { groupId: gid, target: id }, "已取消管理员"); redraw(); });
+  }
+  function refreshHeaderCount(gid) { const g = byId(gid); const el = document.getElementById("conv-grp-count"); if (el && g) el.textContent = (g.members || []).length; }
+
+  window.Groups = { refresh, byId, myRole, nameOf, roleLabel, list: () => GROUPS, renderMembersPanel };
+  window.renderGroupsList = renderGroupsList;
+  window.openGroupDetail = openDetail;
+})();

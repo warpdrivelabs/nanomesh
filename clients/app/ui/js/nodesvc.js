@@ -94,6 +94,12 @@ function renderNodeSvcList() {
 
 // ── 节点服务详情（主区）：完整属性 + 复制公钥/地址 + 编辑/删除 ──
 function showNodeSvcDetail(id) {
+  const s = NodeSvc.get(id);
+  const title = s ? (s.name || "(未命名)") : id;
+  if (window.Tabs) Tabs.open({ key: "n:" + id, kind: "nodesvc", title, ico: "🖧", render: () => renderNodeSvcDetail(id) });
+  else renderNodeSvcDetail(id);
+}
+function renderNodeSvcDetail(id) {
   NSVC_SEL = id;
   renderNodeSvcList();
   const s = NodeSvc.get(id);
