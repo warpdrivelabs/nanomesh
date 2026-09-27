@@ -12,7 +12,7 @@ use nm_core::Directory;
 use nm_proto::{
     now_ms, Any, BlobData, BlobPut, BlobRef, Channel, ChannelBackfillReq, ChannelGram, ChannelList,
     ChannelLog, ChannelMsg, ChannelOp, ChannelPub, Command, CommandResult, DirectoryQuery, Entity,
-    EntityList, FedSyncResp, Gram, GramKind, Group, GroupList, GroupOp, PROTOCOL_VERSION,
+    EntityList, FedSyncResp, Gram, GramKind, Group, GroupGossip, GroupList, GroupOp, PROTOCOL_VERSION,
 };
 use nm_store::RedbStore;
 use nm_transport::{read_gram, write_gram, IrohConnection, NodeEndpoint};
@@ -204,6 +204,7 @@ struct Ctx {
     status_intent: Arc<StatusIntent>, // 用户设定状态（away/busy/dnd…），广播时采用
     channels: Arc<Channels>,          // P4 频道运行态（gossip pub/sub）
     gossip: Gossip,                   // 频道动态 join 需要
+    group_pub: tokio::sync::mpsc::UnboundedSender<Vec<u8>>, // 群消息/群公告 → 联邦 gossip 广播队列
 }
 
 /// 内存实体目录：`entity_id → Entity`，支持 kind 前缀 / 能力 / 属性过滤。
@@ -296,6 +297,9 @@ pub struct Node {
     presence: Arc<PresenceMap>,                        // 在线状态缓存（gossip + 本地会话，TTL）
     status_intent: Arc<StatusIntent>,                  // 用户设定状态（away/busy/dnd…）
     channels: Arc<Channels>,                           // P4 频道运行态（gossip pub/sub）
+    // 群联邦 gossip：fanout 把待广播的 GroupGossip 字节丢进 group_pub，由 spawn_group_sync 统一发布。
+    group_pub: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    group_pub_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>>,
 }
 
 impl Node {
@@ -420,6 +424,7 @@ impl Node {
         }
         // 频道 pub/sub：与单播共用同一 iroh endpoint（accept 侧由 serve() 的 Router 分流）。
         let gossip = Gossip::builder().spawn(ep.iroh().clone());
+        let (group_pub, group_pub_rx) = tokio::sync::mpsc::unbounded_channel();
         Ok(Self {
             ep,
             dir,
@@ -434,6 +439,8 @@ impl Node {
             presence: Arc::new(PresenceMap::new()),
             status_intent: Arc::new(StatusIntent::new()),
             channels: Arc::new(Channels::new()),
+            group_pub,
+            group_pub_rx: std::sync::Mutex::new(Some(group_pub_rx)),
         })
     }
 
@@ -693,6 +700,7 @@ impl Node {
                 status_intent: self.status_intent.clone(),
                 channels: self.channels.clone(),
                 gossip: self.gossip.clone(),
+                group_pub: self.group_pub.clone(),
             },
         };
         let gossip_gate = GossipGate {
@@ -898,6 +906,123 @@ impl Node {
                 if last_sweep.elapsed() >= announce_iv {
                     self.sweep_discovered(ttl_secs);
                     last_sweep = tokio::time::Instant::now();
+                }
+            }
+        })
+    }
+
+    // ---- 群联邦 gossip（发现 + 消息扇出，取代跨节点 s2s 中继）----
+
+    /// 群联邦主题（所有节点加入，独立于成员/presence 频道）。
+    fn group_channel(federation: &str) -> [u8; 32] {
+        nm_crypto::content_hash(format!("nmspace-groups:{federation}").as_bytes())
+    }
+
+    /// LWW 合并群状态（联邦发现：各节点据此填充群目录 + 成员表）；较旧不覆盖较新。
+    fn merge_group_lww(&self, g: Group) {
+        use dashmap::mapref::entry::Entry;
+        match self.groups.entry(g.group_id.clone()) {
+            Entry::Occupied(mut o) => {
+                if g.updated_at > o.get().updated_at {
+                    o.insert(g.clone());
+                    if let Some(s) = &self.store {
+                        let _ = s.put_group(&g);
+                    }
+                }
+            }
+            Entry::Vacant(v) => {
+                v.insert(g.clone());
+                if let Some(s) = &self.store {
+                    let _ = s.put_group(&g);
+                }
+            }
+        }
+    }
+
+    /// 处理群 gossip：announce→合并群状态；msg→投递本地成员。
+    async fn on_group_gossip(&self, bytes: &[u8]) {
+        let Ok(gg) = GroupGossip::decode(bytes) else {
+            return;
+        };
+        if gg.origin.as_slice() == self.ep.id_bytes().as_slice() {
+            return; // 自回环忽略
+        }
+        match gg.body {
+            Some(nm_proto::pb::group_gossip::Body::Announce(g)) => self.merge_group_lww(g),
+            Some(nm_proto::pb::group_gossip::Body::Msg(gram)) => {
+                let Some(group) = self.groups.get(&gram.receiver).map(|g| g.clone()) else {
+                    return; // 尚未学到该群（announce 未到）→ 跳过；周期公告后续会补
+                };
+                for m in &group.members {
+                    if self.sessions.contains_key(m.as_slice()) {
+                        try_push(m, &gram, &self.sessions).await;
+                    } else if let Ok(Some(e)) = self.dir.get(m).await {
+                        if e.home_node == self.ep.id_bytes().as_slice() {
+                            if let Some(s) = &self.store {
+                                let _ = s.push_inbox(m, &gram);
+                            }
+                        }
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// 起群联邦同步：加入 `nmspace-groups:<fed>`；周期广播本节点归属群(发现)；收播 announce/msg；
+    /// 并把 fanout 丢来的待广播项(群消息/即时公告)发布出去。需先 `serve()`。
+    pub fn spawn_group_sync(self: Arc<Self>, federation: String) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let channel = Self::group_channel(&federation);
+            let mut topic = loop {
+                match self.join_channel(channel, self.peers_list()).await {
+                    Ok(t) => break t,
+                    Err(e) => {
+                        tracing::debug!("group sync join retry: {e}");
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
+                }
+            };
+            tracing::info!(%federation, "group gossip joined");
+            let mut pub_rx = match self.group_pub_rx.lock().unwrap().take() {
+                Some(rx) => rx,
+                None => {
+                    tracing::warn!("group sync already running");
+                    return;
+                }
+            };
+            let announce_iv = std::time::Duration::from_secs(20);
+            let mut last_announce = tokio::time::Instant::now() - announce_iv; // 立即先广播一次
+            loop {
+                // 发布 fanout 丢来的待广播项（群消息 / 变更即时公告）。
+                while let Ok(bytes) = pub_rx.try_recv() {
+                    let _ = topic.publish(bytes).await;
+                }
+                // 周期广播本节点归属群（发现 + 成员表收敛）。
+                if last_announce.elapsed() >= announce_iv {
+                    let me = self.ep.id_bytes();
+                    let mine: Vec<Group> = self
+                        .groups
+                        .iter()
+                        .filter(|g| g.home_node.as_slice() == me.as_slice())
+                        .map(|g| g.clone())
+                        .collect();
+                    for g in mine {
+                        let gg = GroupGossip {
+                            origin: me.to_vec(),
+                            body: Some(nm_proto::pb::group_gossip::Body::Announce(g)),
+                        };
+                        let _ = topic.publish(gg.encode_to_vec()).await;
+                    }
+                    last_announce = tokio::time::Instant::now();
+                }
+                match tokio::time::timeout(std::time::Duration::from_millis(300), topic.recv()).await {
+                    Ok(Some(msg)) => self.on_group_gossip(&msg.content).await,
+                    Ok(None) => match self.join_channel(channel, self.peers_list()).await {
+                        Ok(t) => topic = t,
+                        Err(_) => tokio::time::sleep(std::time::Duration::from_secs(2)).await,
+                    },
+                    Err(_) => {}
                 }
             }
         })
@@ -1424,12 +1549,44 @@ async fn fanout_group(gram: &Gram, ctx: &Ctx, caller: &[u8]) {
         tracing::warn!("non-member group message denied");
         return;
     }
-    for member in &group.members {
-        if member.as_slice() == caller {
-            continue; // 不回发给自己
+    // 本地投递：本节点在线成员直投；本节点为其 home 的离线成员入库补投。
+    deliver_group_here(gram, &group.members, caller, ctx).await;
+    // 跨节点：发布到群联邦 gossip，各成员节点收到后各自投递「本地成员」。
+    // 取代此前的 s2s 中继（NAT 下常超时不通）——与频道同走 gossip 叠加网。
+    let gg = GroupGossip {
+        origin: ctx.node_id.to_vec(),
+        body: Some(nm_proto::pb::group_gossip::Body::Msg(gram.clone())),
+    };
+    let _ = ctx.group_pub.send(gg.encode_to_vec());
+}
+
+/// 把群消息投递给「本节点负责的成员」：在线本地会话直投；否则若本节点是其 home 则入离线库。
+/// 每个成员仅由其所在/归属节点处理——无需依赖联邦目录同步（各节点权威掌握本地实体）。
+async fn deliver_group_here(gram: &Gram, members: &[Vec<u8>], skip: &[u8], ctx: &Ctx) {
+    for m in members {
+        if m.as_slice() == skip {
+            continue;
         }
-        // 保留 receiver=group_id（成员端据此把消息归入「群会话」而非私聊）；仅按 member 路由投递。
-        deliver_or_store(member, gram, ctx).await;
+        if ctx.sessions.contains_key(m.as_slice()) {
+            try_push(m, gram, &ctx.sessions).await;
+        } else if let Ok(Some(e)) = ctx.dir.get(m).await {
+            if e.home_node == ctx.node_id.as_slice() {
+                if let Some(s) = &ctx.store {
+                    let _ = s.push_inbox(m, gram);
+                }
+            }
+        }
+    }
+}
+
+/// 立即向联邦广播某群当前状态（发现 + 成员表）。群变更后调用，避免等周期公告。
+fn announce_group(ctx: &Ctx, gid: &[u8]) {
+    if let Some(g) = ctx.groups.get(gid).map(|g| g.clone()) {
+        let gg = GroupGossip {
+            origin: ctx.node_id.to_vec(),
+            body: Some(nm_proto::pb::group_gossip::Body::Announce(g)),
+        };
+        let _ = ctx.group_pub.send(gg.encode_to_vec());
     }
 }
 
@@ -1758,6 +1915,13 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
         }
         other => (false, None, format!("unknown method: {other}")),
     };
+    // 群状态变更：立即向联邦 gossip 广播一次群公告，让成员节点尽快学到群（发现 + 成员表），
+    // 免等 20s 周期——发现驱动跨节点群消息投递。
+    if ok && cmd.method.starts_with("group.") && cmd.method != "group.list" {
+        if let Some(op) = cmd.params.as_ref().and_then(|p| GroupOp::decode(p.value.as_slice()).ok()) {
+            announce_group(ctx, &op.group_id);
+        }
+    }
     let cr = CommandResult {
         correlation_id: cmd.correlation_id,
         ok,

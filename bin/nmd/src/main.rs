@@ -424,6 +424,7 @@ async fn main() -> anyhow::Result<()> {
             card,
         });
         node.clone().spawn_presence(m.federation.clone()); // P2：在线状态 gossip + TTL
+        node.clone().spawn_group_sync(m.federation.clone()); // 群联邦：发现 + 消息扇出走 gossip（免 s2s 中继）
         tracing::info!(
             federation = %cfg.membership.federation,
             "membership auto-discovery started"
