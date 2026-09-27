@@ -311,8 +311,9 @@ async fn finish_session(
                 "msg": {
                     "id": gram.gram_id.to_string(),
                     "from": hex(&gram.sender),
-                    "to": hex(&gram.receiver),                 // 群消息=群id；私聊=本人id
+                    "to": hex(&gram.receiver),                 // 群消息=群id；频道=频道id；私聊=本人id
                     "group": matches!(gram.kind(), nm_proto::GramKind::GroupMessage),
+                    "channel": matches!(gram.kind(), nm_proto::GramKind::ChannelPublish),
                     "body": body,
                     "ts": gram.timestamp_ms,
                 }
@@ -623,6 +624,51 @@ async fn send_group(state: State<'_, AppState>, group_id: String, text: String) 
     session.send_group(parse_id(&group_id)?, &text).await.map(|_| ()).map_err(|e| e.to_string())
 }
 
+// ── 频道 / 主题（P4）──
+#[tauri::command]
+async fn channel_create(state: State<'_, AppState>, name: String, topic: String) -> Result<String, String> {
+    let session = session_of(&state).await?;
+    let cid = nm_transport::SecretKey::generate().to_bytes(); // 随机 32 字节频道 id
+    session.channel_create(cid, name.trim(), topic.trim()).await.map_err(|e| e.to_string())?;
+    Ok(hex(&cid))
+}
+
+#[tauri::command]
+async fn channel_list(state: State<'_, AppState>) -> Result<Vec<Value>, String> {
+    let session = session_of(&state).await?;
+    let chans = session.channel_list().await.map_err(|e| e.to_string())?;
+    Ok(chans.iter().map(|c| json!({
+        "id": hex(&c.channel_id), "name": c.name, "owner": hex(&c.owner), "topic": c.topic,
+    })).collect())
+}
+
+#[tauri::command]
+async fn channel_sub(state: State<'_, AppState>, channel_id: String, name: String) -> Result<(), String> {
+    let session = session_of(&state).await?;
+    session.channel_sub(parse_id(&channel_id)?, name.trim()).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn channel_unsub(state: State<'_, AppState>, channel_id: String) -> Result<(), String> {
+    let session = session_of(&state).await?;
+    session.channel_unsub(parse_id(&channel_id)?).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn channel_publish(state: State<'_, AppState>, channel_id: String, body: String) -> Result<(), String> {
+    let session = session_of(&state).await?;
+    session.channel_publish(parse_id(&channel_id)?, &body).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn channel_backfill(state: State<'_, AppState>, channel_id: String, since_seq: u64) -> Result<Vec<Value>, String> {
+    let session = session_of(&state).await?;
+    let msgs = session.channel_backfill(parse_id(&channel_id)?, since_seq).await.map_err(|e| e.to_string())?;
+    Ok(msgs.iter().map(|m| json!({
+        "from": hex(&m.sender), "seq": m.seq, "ts": m.ts, "body": m.body,
+    })).collect())
+}
+
 #[tauri::command]
 async fn my_id(state: State<'_, AppState>) -> Result<String, String> {
     let g = state.conn.lock().await;
@@ -673,6 +719,12 @@ pub fn run() {
             group_dissolve,
             group_leave,
             send_group,
+            channel_create,
+            channel_list,
+            channel_sub,
+            channel_unsub,
+            channel_publish,
+            channel_backfill,
             node_users,
             my_id,
             disconnect,

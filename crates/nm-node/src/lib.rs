@@ -10,8 +10,9 @@ use std::sync::Arc;
 use dashmap::{DashMap, DashSet};
 use nm_core::Directory;
 use nm_proto::{
-    now_ms, Any, BlobData, BlobPut, BlobRef, Command, CommandResult, DirectoryQuery, Entity,
-    EntityList, FedSyncResp, Gram, GramKind, Group, GroupList, GroupOp, PROTOCOL_VERSION,
+    now_ms, Any, BlobData, BlobPut, BlobRef, Channel, ChannelBackfillReq, ChannelList, ChannelLog,
+    ChannelMsg, ChannelOp, ChannelPub, Command, CommandResult, DirectoryQuery, Entity, EntityList,
+    FedSyncResp, Gram, GramKind, Group, GroupList, GroupOp, PROTOCOL_VERSION,
 };
 use nm_store::RedbStore;
 use nm_transport::{read_gram, write_gram, IrohConnection, NodeEndpoint};
@@ -119,6 +120,18 @@ struct PresenceAnnounce {
 const PRESENCE_INTERVAL_SECS: u64 = 10; // presence 广播间隔
 const PRESENCE_TTL_SECS: u64 = 35; // 超此未刷新即视为离线（≈3× 间隔）
 
+/// 频道运行态（P4）：iroh-gossip 主题上的开放 pub/sub。每个已订阅频道一个后台任务：
+/// 收播 gossip 消息 → 追加日志 + 转发给本地订阅会话；发布经 mpsc 交给该任务广播。
+struct ChannelEntry {
+    meta: Channel,
+    subs: Arc<DashSet<Vec<u8>>>, // 本地订阅会话 id
+    log: Arc<std::sync::Mutex<std::collections::VecDeque<ChannelMsg>>>, // 近期消息（回填用）
+    seq: Arc<std::sync::atomic::AtomicU64>, // 本地发布序号（单调）
+    pub_tx: tokio::sync::mpsc::UnboundedSender<ChannelMsg>, // → 频道任务：待广播消息
+}
+type Channels = DashMap<Vec<u8>, ChannelEntry>;
+const CHANNEL_LOG_CAP: usize = 300; // 每频道内存日志上限（回填近期）
+
 /// 联邦成员发现配置（nmd 透传）。
 pub struct MembershipCfg {
     /// 联邦名：同名者组成同一 gossip 叠加网；改名即隔离独立联邦。
@@ -184,6 +197,8 @@ struct Ctx {
     sessions_meta: Arc<SessionsMeta>,
     presence: Arc<PresenceMap>,      // 在线状态缓存（gossip + 本地会话，TTL 过期即离线）
     status_intent: Arc<StatusIntent>, // 用户设定状态（away/busy/dnd…），广播时采用
+    channels: Arc<Channels>,          // P4 频道运行态（gossip pub/sub）
+    gossip: Gossip,                   // 频道动态 join 需要
 }
 
 /// 内存实体目录：`entity_id → Entity`，支持 kind 前缀 / 能力 / 属性过滤。
@@ -275,6 +290,7 @@ pub struct Node {
     peer_info: Arc<DashMap<Vec<u8>, PeerInfo>>,        // 对等元数据（名称/地址/email/mobile/gps）
     presence: Arc<PresenceMap>,                        // 在线状态缓存（gossip + 本地会话，TTL）
     status_intent: Arc<StatusIntent>,                  // 用户设定状态（away/busy/dnd…）
+    channels: Arc<Channels>,                           // P4 频道运行态（gossip pub/sub）
 }
 
 impl Node {
@@ -412,6 +428,7 @@ impl Node {
             peer_info,
             presence: Arc::new(PresenceMap::new()),
             status_intent: Arc::new(StatusIntent::new()),
+            channels: Arc::new(Channels::new()),
         })
     }
 
@@ -669,6 +686,8 @@ impl Node {
                 sessions_meta: self.sessions_meta.clone(),
                 presence: self.presence.clone(),
                 status_intent: self.status_intent.clone(),
+                channels: self.channels.clone(),
+                gossip: self.gossip.clone(),
             },
         };
         let gossip_gate = GossipGate {
@@ -1031,6 +1050,110 @@ fn presence_status(sessions: &Sessions, presence: &PresenceMap, intent: &StatusI
         }
     }
     "offline".to_string()
+}
+
+// ── 频道 / 主题（P4）：iroh-gossip 上的开放 pub/sub ──
+
+/// 频道 gossip 主题 seed：blake3("nmspace:channel:" + hex(channel_id))。
+fn channel_topic(channel_id: &[u8]) -> [u8; 32] {
+    nm_crypto::content_hash(format!("nmspace:channel:{}", hex_encode(channel_id)).as_bytes())
+}
+
+/// 确保频道已 join gossip 并起收播任务（幂等）。首次订阅时调用。
+async fn ensure_channel(ctx: &Ctx, channel_id: &[u8], meta: Option<Channel>) -> bool {
+    if ctx.channels.contains_key(channel_id) {
+        return true;
+    }
+    let bootstrap: Vec<[u8; 32]> = ctx
+        .peers
+        .iter()
+        .filter_map(|e| <[u8; 32]>::try_from(e.key().as_slice()).ok())
+        .collect();
+    let topic = match nm_gossip::ChannelHub::new(ctx.gossip.clone())
+        .join(channel_topic(channel_id), bootstrap)
+        .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("channel join failed: {e}");
+            return false;
+        }
+    };
+    let subs = Arc::new(DashSet::new());
+    let log = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let seq = Arc::new(std::sync::atomic::AtomicU64::new(1));
+    let (pub_tx, pub_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(run_channel(channel_id.to_vec(), topic, subs.clone(), log.clone(), ctx.sessions.clone(), pub_rx));
+    let meta = meta.unwrap_or(Channel { channel_id: channel_id.to_vec(), ..Default::default() });
+    ctx.channels.insert(channel_id.to_vec(), ChannelEntry { meta, subs, log, seq, pub_tx });
+    tracing::info!("channel joined");
+    true
+}
+
+/// 频道后台任务：发布队列 + gossip 收播；两路都「追加日志 + 转发本地订阅会话」。
+async fn run_channel(
+    channel_id: Vec<u8>,
+    mut topic: nm_gossip::ChannelTopic,
+    subs: Arc<DashSet<Vec<u8>>>,
+    log: Arc<std::sync::Mutex<std::collections::VecDeque<ChannelMsg>>>,
+    sessions: Arc<Sessions>,
+    mut pub_rx: tokio::sync::mpsc::UnboundedReceiver<ChannelMsg>,
+) {
+    loop {
+        while let Ok(m) = pub_rx.try_recv() {
+            let _ = topic.publish(m.encode_to_vec()).await; // 广播到主题网格
+            channel_ingest(&m, &log, &subs, &sessions).await; // 本地落库 + 转发
+        }
+        match tokio::time::timeout(std::time::Duration::from_millis(400), topic.recv()).await {
+            Ok(Some(cm)) => {
+                if let Ok(m) = ChannelMsg::decode(cm.content.as_slice()) {
+                    if m.channel_id == channel_id {
+                        channel_ingest(&m, &log, &subs, &sessions).await;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// 追加到频道日志(限长、去重) + 推送给本地订阅会话。
+async fn channel_ingest(
+    m: &ChannelMsg,
+    log: &std::sync::Mutex<std::collections::VecDeque<ChannelMsg>>,
+    subs: &DashSet<Vec<u8>>,
+    sessions: &Sessions,
+) {
+    {
+        let mut l = log.lock().unwrap();
+        if l.iter().any(|x| x.channel_id == m.channel_id && x.sender == m.sender && x.seq == m.seq) {
+            return; // gossip 可能重投，去重
+        }
+        l.push_back(m.clone());
+        while l.len() > CHANNEL_LOG_CAP {
+            l.pop_front();
+        }
+    }
+    let gram = channel_gram(m);
+    let targets: Vec<Vec<u8>> = subs.iter().map(|s| s.key().clone()).collect();
+    for sid in targets {
+        try_push(&sid, &gram, sessions).await;
+    }
+}
+
+/// 把 ChannelMsg 包成一条 CHANNEL_PUBLISH gram（receiver=频道id，客户端据此归入频道流）。
+fn channel_gram(m: &ChannelMsg) -> Gram {
+    Gram {
+        version: PROTOCOL_VERSION,
+        kind: GramKind::ChannelPublish as i32,
+        gram_id: m.seq,
+        ref_gram_id: None,
+        sender: m.sender.clone(),
+        receiver: m.channel_id.clone(),
+        timestamp_ms: m.ts as u64,
+        payload: Some(Any { type_url: "text/plain".to_string(), value: m.body.clone().into_bytes() }),
+        crc: Vec::new(),
+    }
 }
 
 /// nmspace 单播/命令/联邦协议处理器：包住既有的每连接处理逻辑，注册到 `Router` 的 `nmspace/0`。
@@ -1435,6 +1558,67 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
         "group.demote" => group_mutate(&cmd, groups, store, caller, GroupMut::Demote),
         "group.rename" => group_mutate(&cmd, groups, store, caller, GroupMut::Rename),
         "group.dissolve" => group_dissolve(&cmd, groups, store, caller),
+        // ── 频道 / 主题（P4）──
+        "channel.create" => match cmd.params.as_ref().and_then(|p| ChannelOp::decode(p.value.as_slice()).ok()) {
+            Some(op) if op.channel_id.len() == 32 => {
+                let meta = Channel {
+                    channel_id: op.channel_id.clone(), name: op.name, owner: caller.to_vec(),
+                    created_at: now_ms() as i64, topic: op.topic,
+                };
+                ensure_channel(ctx, &op.channel_id, Some(meta)).await;
+                if let Some(e) = ctx.channels.get(&op.channel_id) { e.subs.insert(caller.to_vec()); }
+                (true, None, String::new())
+            }
+            _ => (false, None, "invalid channel op".into()),
+        },
+        "channel.sub" => match cmd.params.as_ref().and_then(|p| ChannelOp::decode(p.value.as_slice()).ok()) {
+            Some(op) if op.channel_id.len() == 32 => {
+                let meta = Channel { channel_id: op.channel_id.clone(), name: op.name, topic: op.topic, ..Default::default() };
+                if ensure_channel(ctx, &op.channel_id, Some(meta)).await {
+                    if let Some(e) = ctx.channels.get(&op.channel_id) { e.subs.insert(caller.to_vec()); }
+                    (true, None, String::new())
+                } else {
+                    (false, None, "channel join failed".into())
+                }
+            }
+            _ => (false, None, "invalid channel op".into()),
+        },
+        "channel.unsub" => match cmd.params.as_ref().and_then(|p| ChannelOp::decode(p.value.as_slice()).ok()) {
+            Some(op) => {
+                if let Some(e) = ctx.channels.get(&op.channel_id) { e.subs.remove(caller); }
+                (true, None, String::new())
+            }
+            None => (false, None, "invalid channel op".into()),
+        },
+        "channel.publish" => match cmd.params.as_ref().and_then(|p| ChannelPub::decode(p.value.as_slice()).ok()) {
+            Some(pp) => match ctx.channels.get(&pp.channel_id) {
+                Some(e) => {
+                    let seq = e.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let m = ChannelMsg {
+                        channel_id: pp.channel_id.clone(), sender: caller.to_vec(),
+                        seq, ts: now_ms() as i64, body: pp.body,
+                    };
+                    let _ = e.pub_tx.send(m);
+                    (true, None, String::new())
+                }
+                None => (false, None, "not subscribed to channel".into()),
+            },
+            None => (false, None, "invalid channel pub".into()),
+        },
+        "channel.backfill" => match cmd.params.as_ref().and_then(|p| ChannelBackfillReq::decode(p.value.as_slice()).ok()) {
+            Some(req) => match ctx.channels.get(&req.channel_id) {
+                Some(e) => {
+                    let msgs: Vec<ChannelMsg> = e.log.lock().unwrap().iter().filter(|x| x.seq > req.since_seq).cloned().collect();
+                    (true, Some(Any { type_url: "nmspace.v1.ChannelLog".to_string(), value: ChannelLog { msgs }.encode_to_vec() }), String::new())
+                }
+                None => (false, None, "unknown channel".into()),
+            },
+            None => (false, None, "invalid backfill req".into()),
+        },
+        "channel.list" => {
+            let channels: Vec<Channel> = ctx.channels.iter().map(|e| e.meta.clone()).collect();
+            (true, Some(Any { type_url: "nmspace.v1.ChannelList".to_string(), value: ChannelList { channels }.encode_to_vec() }), String::new())
+        }
         "group.list" => {
             let mine: Vec<Group> = groups
                 .iter()

@@ -142,6 +142,29 @@ message GroupOp {
 }
 message GroupList { repeated Group groups = 1; }
 
+// 频道 / 主题（P4）：iroh-gossip 主题上的开放 pub/sub（1→N 广播，订阅制，大规模）。
+// 与「群」区别：群=封闭成员表、双向、小规模；频道=开放订阅、广播、可海量订阅者。
+message Channel {
+  bytes channel_id = 1;               // 32 字节频道标识
+  string name = 2;
+  bytes owner = 3;                    // 创建者（可定发布白名单 / 事后审核）
+  int64 created_at = 4;
+  string topic = 5;                   // 频道简介/主题
+}
+// 频道消息（gossip 载荷 + 转发给订阅者）。sender 为发布者；seq 单调用于回填游标/去重。
+message ChannelMsg {
+  bytes channel_id = 1;
+  bytes sender = 2;
+  uint64 seq = 3;
+  int64 ts = 4;
+  string body = 5;
+}
+message ChannelOp   { bytes channel_id = 1; string name = 2; string topic = 3; } // create/sub/unsub 参数
+message ChannelPub  { bytes channel_id = 1; string body = 2; }                    // publish 参数
+message ChannelList { repeated Channel channels = 1; }
+message ChannelBackfillReq { bytes channel_id = 1; uint64 since_seq = 2; }
+message ChannelLog  { repeated ChannelMsg msgs = 1; }
+
 // Job / 任务（算力网：训练、推理、批处理）
 message ResourceReq { map<string, string> selectors = 1; }   // model / gpu / region / ...
 message JobSpec { string job_type = 1; Any spec = 2; ResourceReq requirements = 3; }
