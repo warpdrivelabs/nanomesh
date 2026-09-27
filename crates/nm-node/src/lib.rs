@@ -95,6 +95,30 @@ struct MembershipAnnounce {
     sig: String,
 }
 
+/// 在线状态缓存记录（临时、TTL 过期即离线；不进持久目录，仅内存）。
+#[derive(Clone)]
+struct PresenceRec {
+    status: String, // online / away / busy / dnd
+    last_seen: u64, // unix 秒
+    #[allow(dead_code)] // 记录来源节点（备调试/未来 presence 回源），当前不读取
+    home_node: Vec<u8>,
+}
+type PresenceMap = DashMap<Vec<u8>, PresenceRec>; // entity_id -> presence
+type StatusIntent = DashMap<Vec<u8>, String>; // entity_id -> 用户设定的状态意图
+
+/// 在线状态广播卡片（presence 频道 gossip）；`sig` 覆盖 entity+status+ts，由 home_node 私钥签发。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PresenceAnnounce {
+    entity: String,
+    status: String,
+    ts: u64,
+    home_node: String,
+    sig: String,
+}
+
+const PRESENCE_INTERVAL_SECS: u64 = 10; // presence 广播间隔
+const PRESENCE_TTL_SECS: u64 = 35; // 超此未刷新即视为离线（≈3× 间隔）
+
 /// 联邦成员发现配置（nmd 透传）。
 pub struct MembershipCfg {
     /// 联邦名：同名者组成同一 gossip 叠加网；改名即隔离独立联邦。
@@ -158,6 +182,8 @@ struct Ctx {
     node_id: [u8; 32],
     blacklist: Arc<DashSet<[u8; 32]>>,
     sessions_meta: Arc<SessionsMeta>,
+    presence: Arc<PresenceMap>,      // 在线状态缓存（gossip + 本地会话，TTL 过期即离线）
+    status_intent: Arc<StatusIntent>, // 用户设定状态（away/busy/dnd…），广播时采用
 }
 
 /// 内存实体目录：`entity_id → Entity`，支持 kind 前缀 / 能力 / 属性过滤。
@@ -247,6 +273,8 @@ pub struct Node {
     blacklist: Arc<DashSet<[u8; 32]>>,                 // 黑名单：被禁公钥（无白名单，默认放行）
     sessions_meta: Arc<SessionsMeta>,                  // 会话旁挂元数据（接入时间）
     peer_info: Arc<DashMap<Vec<u8>, PeerInfo>>,        // 对等元数据（名称/地址/email/mobile/gps）
+    presence: Arc<PresenceMap>,                        // 在线状态缓存（gossip + 本地会话，TTL）
+    status_intent: Arc<StatusIntent>,                  // 用户设定状态（away/busy/dnd…）
 }
 
 impl Node {
@@ -382,6 +410,8 @@ impl Node {
             blacklist,
             sessions_meta: Arc::new(SessionsMeta::new()),
             peer_info,
+            presence: Arc::new(PresenceMap::new()),
+            status_intent: Arc::new(StatusIntent::new()),
         })
     }
 
@@ -637,6 +667,8 @@ impl Node {
                 node_id: self.ep.id_bytes(),
                 blacklist: self.blacklist.clone(),
                 sessions_meta: self.sessions_meta.clone(),
+                presence: self.presence.clone(),
+                status_intent: self.status_intent.clone(),
             },
         };
         let gossip_gate = GossipGate {
@@ -846,6 +878,159 @@ impl Node {
             }
         })
     }
+
+    // ---- 在线状态 presence（gossip + TTL；临时，不进持久目录）----
+
+    /// presence 频道 topic（独立于成员频道）。
+    fn presence_channel(federation: &str) -> [u8; 32] {
+        nm_crypto::content_hash(format!("nmspace-presence:{federation}").as_bytes())
+    }
+
+    /// presence 卡片签名字节：home_node ‖ entity ‖ ts ‖ status（0 分隔）。由 home_node 私钥签发。
+    fn presence_signing_bytes(home: &[u8; 32], entity: &[u8], ts: u64, status: &str) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(home);
+        b.push(0);
+        b.extend_from_slice(entity);
+        b.push(0);
+        b.extend_from_slice(&ts.to_be_bytes());
+        b.push(0);
+        b.extend_from_slice(status.as_bytes());
+        b
+    }
+
+    /// 设置某实体的状态意图（away/busy/dnd…；online/空=清除）。广播时采用；本地即时刷新。
+    pub fn set_status(&self, entity: &[u8], status: &str) {
+        let s = status.trim();
+        if s.is_empty() || s == "online" {
+            self.status_intent.remove(entity);
+        } else {
+            self.status_intent.insert(entity.to_vec(), s.to_string());
+        }
+        if self.sessions.contains_key(entity) {
+            self.presence.insert(
+                entity.to_vec(),
+                PresenceRec {
+                    status: if s.is_empty() { "online".into() } else { s.to_string() },
+                    last_seen: now_secs(),
+                    home_node: self.ep.id_bytes().to_vec(),
+                },
+            );
+        }
+    }
+
+    /// 计算某实体对外状态（管理台/自查用）。
+    pub fn presence_of(&self, entity: &[u8]) -> String {
+        presence_status(&self.sessions, &self.presence, &self.status_intent, entity)
+    }
+
+    /// 处理收到的 presence 广播：验签(按 home_node) → 反陈旧 → LWW 入缓存；不覆盖本地在线。
+    fn on_presence_msg(&self, content: &[u8]) {
+        let ann: PresenceAnnounce = match serde_json::from_slice(content) {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+        let (home, entity) = match (hex_decode_n::<32>(&ann.home_node), hex_decode_n::<32>(&ann.entity)) {
+            (Some(h), Some(e)) => (h, e),
+            _ => return,
+        };
+        if self.blacklist.contains(&entity) || self.blacklist.contains(&home) {
+            return;
+        }
+        let sig = match hex_decode_n::<64>(&ann.sig) {
+            Some(s) => s,
+            None => return,
+        };
+        let signing = Self::presence_signing_bytes(&home, &entity, ann.ts, &ann.status);
+        if nm_crypto::verify_bytes(&home, &signing, &sig).is_err() {
+            return;
+        }
+        let now = now_secs();
+        if ann.ts + 300 < now || ann.ts > now + 300 {
+            return; // 反陈旧/未来
+        }
+        if self.sessions.contains_key(&entity[..]) {
+            return; // 本地在线会话权威，不被远端覆盖
+        }
+        if let Some(cur) = self.presence.get(&entity[..]) {
+            if cur.last_seen >= ann.ts {
+                return; // LWW：仅接受更新的
+            }
+        }
+        self.presence.insert(
+            entity.to_vec(),
+            PresenceRec { status: ann.status, last_seen: ann.ts, home_node: home.to_vec() },
+        );
+    }
+
+    /// 后台 presence：周期广播本地在线会话状态；收播他人状态入缓存（TTL 在读时判定）。镜像 spawn_membership。
+    pub fn spawn_presence(self: Arc<Self>, federation: String) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let channel = Self::presence_channel(&federation);
+            let mut topic = loop {
+                match self.join_channel(channel, self.peers_list()).await {
+                    Ok(t) => break t,
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_secs(2)).await,
+                }
+            };
+            tracing::info!(%federation, "presence gossip joined");
+            let interval = std::time::Duration::from_secs(PRESENCE_INTERVAL_SECS);
+            let mut last_bcast = tokio::time::Instant::now() - interval;
+            loop {
+                if last_bcast.elapsed() >= interval {
+                    let home = self.ep.id_bytes();
+                    let ts = now_secs();
+                    // 守卫不跨 await：先收集本地会话公钥。
+                    let entities: Vec<Vec<u8>> = self.sessions.iter().map(|e| e.key().clone()).collect();
+                    for ent in entities {
+                        let status = self
+                            .status_intent
+                            .get(&ent)
+                            .map(|s| s.clone())
+                            .unwrap_or_else(|| "online".to_string());
+                        self.presence.insert(
+                            ent.clone(),
+                            PresenceRec { status: status.clone(), last_seen: ts, home_node: home.to_vec() },
+                        );
+                        let sig = nm_crypto::sign_bytes(
+                            self.ep.secret_key(),
+                            &Self::presence_signing_bytes(&home, &ent, ts, &status),
+                        );
+                        let ann = PresenceAnnounce {
+                            entity: hex_encode(&ent),
+                            status,
+                            ts,
+                            home_node: hex_encode(&home),
+                            sig: hex_encode(&sig),
+                        };
+                        let _ = topic.publish(serde_json::to_vec(&ann).unwrap_or_default()).await;
+                    }
+                    last_bcast = tokio::time::Instant::now();
+                }
+                match tokio::time::timeout(std::time::Duration::from_secs(1), topic.recv()).await {
+                    Ok(Some(msg)) => self.on_presence_msg(&msg.content),
+                    Ok(None) => match self.join_channel(channel, self.peers_list()).await {
+                        Ok(t) => topic = t,
+                        Err(_) => tokio::time::sleep(std::time::Duration::from_secs(2)).await,
+                    },
+                    Err(_) => {}
+                }
+            }
+        })
+    }
+}
+
+/// 计算实体对外状态：本地在线会话优先（权威，取状态意图或 online）；否则查 presence 缓存并按 TTL 判离线。
+fn presence_status(sessions: &Sessions, presence: &PresenceMap, intent: &StatusIntent, entity: &[u8]) -> String {
+    if sessions.contains_key(entity) {
+        return intent.get(entity).map(|s| s.clone()).unwrap_or_else(|| "online".to_string());
+    }
+    if let Some(r) = presence.get(entity) {
+        if now_secs().saturating_sub(r.last_seen) <= PRESENCE_TTL_SECS {
+            return r.status.clone();
+        }
+    }
+    "offline".to_string()
 }
 
 /// nmspace 单播/命令/联邦协议处理器：包住既有的每连接处理逻辑，注册到 `Router` 的 `nmspace/0`。
@@ -1149,7 +1334,12 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
                 .as_ref()
                 .and_then(|p| DirectoryQuery::decode(p.value.as_slice()).ok())
                 .unwrap_or_default();
-            let list = dir.query(&q).await.unwrap_or_default();
+            let mut list = dir.query(&q).await.unwrap_or_default();
+            // P2：给每个实体盖上实时 presence（本地会话/gossip 缓存 + TTL）到 attributes["presence"]。
+            for e in list.iter_mut() {
+                let p = presence_status(&ctx.sessions, &ctx.presence, &ctx.status_intent, &e.entity_id);
+                e.attributes.insert("presence".to_string(), p);
+            }
             let el = EntityList { entities: list };
             (
                 true,
@@ -1159,6 +1349,30 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
                 }),
                 String::new(),
             )
+        }
+        // P2：设置本人在线状态（away/busy/dnd/online）；params.value = 状态字符串(UTF-8)。
+        "presence.set" => {
+            let status = cmd
+                .params
+                .as_ref()
+                .map(|p| String::from_utf8_lossy(&p.value).trim().to_string())
+                .unwrap_or_default();
+            if status.is_empty() || status == "online" {
+                ctx.status_intent.remove(caller);
+            } else {
+                ctx.status_intent.insert(caller.to_vec(), status.clone());
+            }
+            if ctx.sessions.contains_key(caller) {
+                ctx.presence.insert(
+                    caller.to_vec(),
+                    PresenceRec {
+                        status: if status.is_empty() { "online".into() } else { status },
+                        last_seen: now_secs(),
+                        home_node: ctx.node_id.to_vec(),
+                    },
+                );
+            }
+            (true, None, String::new())
         }
         // P1：内容寻址 blob —— 存头像等小媒体，档案只带 b3:hash，避免内联撑爆目录/gossip。
         "blob.put" => match cmd.params.as_ref().and_then(|p| BlobPut::decode(p.value.as_slice()).ok()) {

@@ -13,14 +13,19 @@ function updateUserChip() {
   const nameEl = document.getElementById("tb-user-name");
   const avEl = document.getElementById("tb-user-av");
   if (nameEl) nameEl.textContent = cur ? Identity.label(cur) : "未登录";
+  const btn = document.getElementById("tb-user");
+  if (btn) btn.title = cur ? Identity.label(cur) + " · 点击切换身份 / 编辑资料" : "未登录（点击）"; // 昵称经悬浮提示可见
   if (avEl) {
     const av = (window.Profile && cur) ? Profile.ownAvatar(cur) : "";
     if (window.Profile && Profile.isImg(av)) {
-      avEl.textContent = ""; avEl.style.background = "transparent"; avEl.style.padding = "0"; avEl.style.overflow = "hidden";
-      avEl.innerHTML = `<img src="${av}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit">`;
+      avEl.style.background = "transparent";
+      avEl.innerHTML = `<img src="${av}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:50%">`;
     } else {
-      avEl.innerHTML = ""; avEl.textContent = cur ? Identity.label(cur).slice(0, 1) : "?";
-      avEl.style.background = cur ? uColor(cur) : "var(--muted)"; avEl.style.padding = ""; avEl.style.overflow = "";
+      avEl.innerHTML = cur ? escapeHtml(Identity.label(cur).slice(0, 1)) : "?";
+      avEl.style.background = cur ? uColor(cur) : "var(--muted)";
+    }
+    if (window.Profile && cur) { // 自己的在线状态圆点
+      avEl.insertAdjacentHTML("beforeend", Profile.presenceDot(Profile.get(cur).status || "online", 10));
     }
   }
 }
@@ -45,11 +50,20 @@ async function toggleUserMenu() {
     </div>`;
   }).join("") +
     `<div class="um-sep"></div>
+     ${cur && window.Profile ? `<div class="um-status" id="um-status">${["online", "away", "busy", "dnd"].map((s) => `<button class="um-st${(Profile.get(cur).status || "online") === s ? " on" : ""}" data-st="${s}"><span class="um-stdot" style="background:${Profile.presenceColor(s)}"></span>${Profile.presenceLabel(s)}</button>`).join("")}</div><div class="um-sep"></div>` : ""}
      ${cur ? `<div class="um-item um-copy" id="um-copy"><span class="um-av um-plus">📋</span><span class="um-meta"><b>复制当前用户 id</b><small>${shortNode(cur)}</small></span></div>` : ""}
      ${cur ? `<div class="um-item um-profile" id="um-profile"><span class="um-av um-plus">🪪</span><span class="um-meta"><b>编辑资料</b><small>昵称 · 状态 · 简介</small></span></div>` : ""}
      <div class="um-item um-sec" id="um-sec"><span class="um-av um-plus">🔐</span><span class="um-meta"><b>安全设置</b><small>自动锁定 · 改口令 · 备份</small></span></div>
      <div class="um-item um-new" id="um-new"><span class="um-av um-plus">＋</span><span class="um-meta"><b>新建 / 切换账号</b><small>回到启动页</small></span></div>`;
   m.classList.add("on");
+  m.querySelectorAll("#um-status .um-st").forEach((b) => b.addEventListener("click", async () => {
+    const st = b.dataset.st;
+    const p = Profile.get(cur); p.status = st; Profile.save(cur, p);
+    try { await NM.inv("presence_set", { status: st }); } catch (_) {}
+    if (typeof updateUserChip === "function") updateUserChip();
+    m.classList.remove("on");
+    if (window.toast) toast("状态：" + Profile.presenceLabel(st));
+  }));
   m.querySelectorAll(".um-item[data-pk]").forEach((el) => el.addEventListener("click", () => {
     m.classList.remove("on");
     const pk = el.dataset.pk;

@@ -172,6 +172,7 @@
     if (typeof updateUserChip === "function") updateUserChip();
     document.getElementById("profile-modal").classList.remove("on");
     const ok = await publish();
+    applyPresence(); // P2：把所选状态应用为 live presence
     if (window.toast) toast(ok ? "资料已保存并发布" : "资料已本地保存（连接后自动发布）");
   }
 
@@ -191,6 +192,25 @@
     m.classList.add("on");
   }
 
-  window.Profile = { get, save, publish, open, statusLabel, avatarHtml, isImg, isRef, resolveAvatar, resolveList, ownAvatar };
+  window.Profile = { get, save, publish, open, statusLabel, avatarHtml, isImg, isRef, resolveAvatar, resolveList, ownAvatar, presenceColor, presenceLabel, presenceDot, applyPresence };
   window.openProfileModal = open;
+
+  // ── P2 在线状态 ──
+  function presenceColor(p) {
+    return p === "online" ? "#22c55e" : p === "away" ? "#f59e0b" : (p === "busy" || p === "dnd") ? "#ef4444" : "#94a3b8";
+  }
+  function presenceLabel(p) {
+    return ({ online: "在线", away: "离开", busy: "忙碌", dnd: "勿扰" })[p] || "离线";
+  }
+  // 头像角标小圆点（容器需 position:relative）。size=直径像素。
+  function presenceDot(p, size) {
+    const s = size || 10;
+    return `<span class="pdot" style="width:${s}px;height:${s}px;background:${presenceColor(p)}"></span>`;
+  }
+  // 把本地选择的状态应用为 live presence（连接后 / 改状态后调用）。
+  async function applyPresence() {
+    const pk = window.Identity && Identity.current();
+    if (!pk || !window.NM || !NM.hasTauri || !NM.hasTauri()) return;
+    try { await NM.inv("presence_set", { status: get(pk).status || "online" }); } catch (_) {}
+  }
 })();

@@ -54,6 +54,7 @@ fn person_entity_json(e: &nm_proto::pb::Entity) -> Value {
         "kind": e.kind,
         "name": e.display_name,
         "status": e.attributes.get("status").cloned().unwrap_or_default(),
+        "presence": e.attributes.get("presence").cloned().unwrap_or_default(),
         "bio": pp.as_ref().map(|p| p.bio.clone()).unwrap_or_default(),
         "statusText": pp.as_ref().map(|p| p.status_text.clone()).unwrap_or_default(),
         "avatar": pp.as_ref().map(|p| p.avatar_url.clone()).unwrap_or_default(),
@@ -538,6 +539,13 @@ async fn blob_get(
     Ok(uri)
 }
 
+/// 设置本人在线状态（P2）：online / away / busy / dnd。节点据此 gossip 广播，其他端按 TTL 判在线。
+#[tauri::command]
+async fn presence_set(state: State<'_, AppState>, status: String) -> Result<(), String> {
+    let session = session_of(&state).await?;
+    session.presence_set(status.trim()).await.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn my_id(state: State<'_, AppState>) -> Result<String, String> {
     let g = state.conn.lock().await;
@@ -577,6 +585,7 @@ pub fn run() {
             update_profile,
             blob_put,
             blob_get,
+            presence_set,
             node_users,
             my_id,
             disconnect,

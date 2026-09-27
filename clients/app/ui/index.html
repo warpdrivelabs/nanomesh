@@ -21,11 +21,6 @@
   <div class="titlebar" data-tauri-drag-region>
     <span class="tb-title" data-tauri-drag-region>NANO MESH</span>
     <div class="sp" data-tauri-drag-region></div>
-    <button class="tb-user" id="tb-user" title="切换用户身份">
-      <span class="tb-user-av" id="tb-user-av">?</span>
-      <span id="tb-user-name">未登录</span>
-      <span class="tb-user-chev">▾</span>
-    </button>
     <div class="tb-ctrls">
       <button class="tb-btn" data-act="toggleSidebar" title="隐藏/显示左侧栏"><span class="ico" id="tb-side-ico">⇤</span></button>
       <button class="tb-btn" data-act="toggleTheme" title="浅色/深色主题"><span class="ico" id="tb-theme-ico">☀</span></button>
@@ -101,6 +96,11 @@
       <div class="act active" id="act-im" data-act="showPanel" data-panel="im" title="即时通讯"><span>💬</span></div>
       <div class="act" id="act-entities" data-act="showPanel" data-panel="entities" title="实体目录"><span>📇</span></div>
       <div class="act" id="act-nodesvc" data-act="showPanel" data-panel="nodesvc" title="节点服务"><span>🖧</span></div>
+      <div class="act-sp"></div>
+      <!-- 活动栏底部：当前用户头像（点开切换身份/编辑资料；昵称见悬浮提示与下拉）-->
+      <button class="act act-user" id="tb-user" title="切换用户身份 / 编辑资料">
+        <span class="tb-user-av" id="tb-user-av">?</span>
+      </button>
     </div>
     <!-- 左侧栏：消息会话 / 实体目录 / 节点服务（同时只显示一个 .panel.on）-->
     <aside>

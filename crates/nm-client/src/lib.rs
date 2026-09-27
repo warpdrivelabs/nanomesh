@@ -338,6 +338,20 @@ impl Session {
         Ok((bd.data, bd.mime))
     }
 
+    /// 设置本人在线状态（P2）：online / away / busy / dnd（空/online = 清除意图）。
+    pub async fn presence_set(&self, status: &str) -> Result<(), ClientError> {
+        let params = Any {
+            type_url: "nmspace.v1/presence.status".to_string(),
+            value: status.as_bytes().to_vec(),
+        };
+        let res = rpc_over(&self.conn, self.my_id, "presence.set", Some(params)).await?;
+        if res.ok {
+            Ok(())
+        } else {
+            Err(ClientError::Other(res.error))
+        }
+    }
+
     /// 向群发消息（节点扇出到各成员，在线路由/离线入库）。返回节点 ack。
     pub async fn send_group(&self, group_id: [u8; 32], text: &str) -> Result<Gram, ClientError> {
         let n = self.next_corr.fetch_add(1, Ordering::SeqCst);

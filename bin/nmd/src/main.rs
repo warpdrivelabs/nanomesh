@@ -423,6 +423,7 @@ async fn main() -> anyhow::Result<()> {
             ttl_secs: m.ttl_secs,
             card,
         });
+        node.clone().spawn_presence(m.federation.clone()); // P2：在线状态 gossip + TTL
         tracing::info!(
             federation = %cfg.membership.federation,
             "membership auto-discovery started"

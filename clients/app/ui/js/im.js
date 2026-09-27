@@ -53,7 +53,9 @@ async function imStart(myId) {
   ACTIVE = null; DETAIL_ID = null; CONTACTS = [];
   if (typeof updateUserChip === "function") updateUserChip();
   if (typeof window.renderNodeSvcList === "function") window.renderNodeSvcList(); // 连接后刷新节点服务面板（hydrate 后数据已就绪）
-  if (window.Profile) Profile.publish(); // 连接后把本地资料(昵称/状态/简介)发布到家节点（LWW 收敛）
+  if (window.Profile) { Profile.publish(); Profile.applyPresence(); } // 连接后发布资料 + 应用在线状态(P2)
+  if (window._nmPresenceTimer) clearInterval(window._nmPresenceTimer);
+  window._nmPresenceTimer = setInterval(() => { if (MY_ID) imRefresh(); }, 15000); // P2：定期刷新在线状态
   if (!_coreUnlisten) _coreUnlisten = await NM.onCoreEvent(onCoreEvent);
   bindPanelUI();
   await imRefresh();
@@ -130,7 +132,7 @@ function renderGroup(icon, label, items) {
 
 function itemHtml(c, sub, unread, sel) {
   return `<div class="im-item ${c.id === sel ? "on" : ""}" data-id="${c.id}" title="${escapeHtml(c.id)}">
-    <span class="av" style="background:${avatarColor(c.id)}${(window.Profile && Profile.isImg(c.avatar)) ? ";padding:0;overflow:hidden" : ""}">${(window.Profile && Profile.isImg(c.avatar)) ? `<img src="${c.avatar}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit">` : escapeHtml((c.name || "?").slice(0, 1))}</span>
+    <span class="av" style="background:${avatarColor(c.id)}">${(window.Profile && Profile.isImg(c.avatar)) ? `<img src="${c.avatar}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:50%">` : escapeHtml((c.name || "?").slice(0, 1))}${(window.Profile && c.presence) ? Profile.presenceDot(c.presence, 11) : ""}</span>
     <span class="mid">
       <span class="r1"><span class="nm">${escapeHtml(c.name || shortId(c.id))}</span></span>
       <span class="r2"><span class="msg">${sub || ""}</span>${unread ? `<span class="unread">${unread}</span>` : ""}</span>
@@ -154,10 +156,11 @@ function showEntityDetail(id) {
       <span class="conv-kind">${tm.icon} ${escapeHtml(tm.label)}</span>
     </div>
     <div class="ent-detail">
-      <div class="ed-avatar" style="background:${avatarColor(id)}${(window.Profile && Profile.isImg(c.avatar)) ? ";padding:0;overflow:hidden" : ""}">${(window.Profile && Profile.isImg(c.avatar)) ? `<img src="${c.avatar}" alt="" style="width:100%;height:100%;object-fit:cover">` : escapeHtml((c.name || "?").slice(0, 1))}</div>
+      <div class="ed-avatar" style="background:${avatarColor(id)}">${(window.Profile && Profile.isImg(c.avatar)) ? `<img src="${c.avatar}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:50%">` : escapeHtml((c.name || "?").slice(0, 1))}${(window.Profile && c.presence) ? Profile.presenceDot(c.presence, 15) : ""}</div>
       <div class="ed-name">${escapeHtml(c.name || "(未命名)")}</div>
+      ${(window.Profile && c.presence) ? `<div style="margin:1px 0 4px;font-size:12px;color:${Profile.presenceColor(c.presence)}">● ${Profile.presenceLabel(c.presence)}</div>` : ""}
       <div class="ed-type">${tm.icon} ${escapeHtml(tm.label)}${c.kind ? ` · <code>${escapeHtml(c.kind)}</code>` : ""}</div>
-      ${(c.status || c.statusText) ? `<div style="margin:2px 0 6px">${c.status ? `<span style="padding:1px 8px;border-radius:10px;background:var(--accent-soft);color:var(--aqua);font-size:12px">${escapeHtml(window.Profile ? Profile.statusLabel(c.status) : c.status)}</span>` : ""}${c.statusText ? ` <span style="color:var(--muted)">${escapeHtml(c.statusText)}</span>` : ""}</div>` : ""}
+      ${c.statusText ? `<div style="margin:2px 0 6px;color:var(--muted)">${escapeHtml(c.statusText)}</div>` : ""}
       ${c.bio ? `<div style="margin:4px 0;color:var(--text)">${escapeHtml(c.bio)}</div>` : ""}
       ${(c.links && c.links.length) ? `<div style="margin:4px 0;font-size:12px">${c.links.map((l) => `<code>${escapeHtml(l)}</code>`).join(" · ")}</div>` : ""}
       <div class="ed-field">

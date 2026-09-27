@@ -9,7 +9,15 @@
 .tb-user:hover { background: var(--hover); border-color: var(--border2); }
 .tb-user-av { width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 11px; font-weight: 700; flex: 0 0 auto; }
 .tb-user-chev { color: var(--muted); font-size: 10px; }
-.user-menu { position: fixed; top: 36px; right: 8px; z-index: 2500; width: 268px; max-height: 60vh; overflow: auto;
+/* 活动栏底部：当前用户头像（与 💬/📇/🖧 图标同列、置底）；沿用 .act 的尺寸/圆角/hover */
+.act-user { border: 0; background: transparent; padding: 0; -webkit-app-region: no-drag; }
+.act-user .tb-user-av { width: 30px; height: 30px; font-size: 13px; }
+/* P2 在线状态角标圆点 */
+.av, .ed-avatar, .act-user .tb-user-av { position: relative; }
+.pdot { position: absolute; right: -1px; bottom: -1px; border-radius: 50%; border: 2px solid var(--panel); box-sizing: border-box; }
+.ed-avatar .pdot { right: 3px; bottom: 3px; }
+/* 身份下拉：从活动栏底部向上/向右弹出 */
+.user-menu { position: fixed; left: 58px; bottom: 12px; top: auto; right: auto; z-index: 2500; width: 268px; max-height: 70vh; overflow: auto;
   background: var(--panel2); border: 1px solid var(--border2); border-radius: 12px; box-shadow: 0 10px 34px rgba(0,0,0,.4);
   padding: 6px; display: none; }
 .user-menu.on { display: block; }
@@ -23,6 +31,12 @@
 .um-meta small { font-size: 11px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .um-cur { font-size: 10.5px; color: var(--aqua); background: var(--accent-soft); padding: 2px 7px; border-radius: 10px; flex: 0 0 auto; }
 .um-sep { height: 1px; background: var(--border); margin: 5px 4px; }
+/* P2 状态快捷选择器 */
+.um-status { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 2px; }
+.um-st { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--ink); font-size: 12px; }
+.um-st:hover { background: var(--hover); }
+.um-st.on { border-color: var(--aqua); background: var(--accent-soft); }
+.um-stdot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
 
 /* ── 锁屏 / 首启设主口令 ── */
 /* 连接页顶部透明拖拽条（原仅非 macOS 显示，导致 mac 上连接页无法拖窗）：常驻，全平台可拖 */
