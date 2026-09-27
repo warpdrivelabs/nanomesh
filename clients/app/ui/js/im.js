@@ -284,12 +284,15 @@ function renderConversation() {
   const grp = window.Groups ? Groups.byId(ACTIVE) : null;
   const chn = (!grp && window.Channels) ? Channels.byId(ACTIVE) : null;
   const showSender = !!grp || !!chn;
-  const c = grp ? { id: ACTIVE, name: grp.name || "群", kind: "group" }
-    : chn ? { id: ACTIVE, name: chn.name || "频道", kind: "channel" }
+  const c = grp ? { id: ACTIVE, name: grp.name || "群", kind: "group", avatar: grp.avatar }
+    : chn ? { id: ACTIVE, name: chn.name || "频道", kind: "channel", avatar: chn.avatar }
     : (entityById(ACTIVE) || { id: ACTIVE, name: "", kind: "" });
-  const headAv = (grp || chn)
-    ? `<span class="av av-sm" style="background:${avatarColor(ACTIVE)}">${grp ? "👥" : "📡"}</span>`
-    : `<span class="av av-sm" style="background:${avatarColor(ACTIVE)}${(window.Profile && Profile.isImg(c.avatar)) ? ";padding:0;overflow:hidden" : ""}">${(window.Profile && Profile.isImg(c.avatar)) ? `<img src="${c.avatar}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit">` : escapeHtml((c.name || "?").slice(0, 1))}</span>`;
+  const hasImg = window.Profile && Profile.isImg(c.avatar);
+  const headAv = hasImg
+    ? `<span class="av av-sm" id="conv-hav" style="background:${avatarColor(ACTIVE)};padding:0;overflow:hidden"><img src="${c.avatar}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit"></span>`
+    : (grp || chn)
+    ? `<span class="av av-sm" id="conv-hav" style="background:${avatarColor(ACTIVE)}">${grp ? "👥" : "📡"}</span>`
+    : `<span class="av av-sm" id="conv-hav" style="background:${avatarColor(ACTIVE)}">${escapeHtml((c.name || "?").slice(0, 1))}</span>`;
   const headMeta = grp
     ? `<span class="conv-kind">群 · <b id="conv-grp-count">${(grp.members || []).length}</b> 人</span>`
     : chn ? `<span class="conv-kind">📡 频道${chn.topic ? " · " + escapeHtml(chn.topic) : ""}</span>`
@@ -301,15 +304,33 @@ function renderConversation() {
   const body = grp
     ? `<div class="grp-body"><div class="grp-chat">${logHtml}${composerHtml}</div><div class="grp-members" id="grp-members"></div></div>`
     : `${logHtml}${composerHtml}`;
+  const chnOwner = chn && window.Channels && Channels.isOwner && Channels.isOwner(ACTIVE);
   conv.innerHTML = `
     <div class="conv-head">
       ${headAv}
       <b>${escapeHtml(c.name || shortId(ACTIVE))}</b>
       ${headMeta}
       <span class="sp"></span>
-      <code class="conv-id" title="${escapeHtml(ACTIVE)}">${escapeHtml(shortId(ACTIVE))}</code>
+      ${chnOwner ? `<button class="conv-gear" id="conv-chn-edit" title="编辑频道信息">⚙</button>` : ""}
+      <code class="conv-id" id="conv-id" title="点击复制完整 id：${escapeHtml(ACTIVE)}">${escapeHtml(shortId(ACTIVE))} 📋</code>
     </div>
     ${body}`;
+  const idEl = document.getElementById("conv-id");
+  if (idEl) idEl.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(ACTIVE); if (window.toast) toast((chn ? "频道" : grp ? "群" : "") + "id 已复制"); }
+    catch (_) { if (window.toast) toast("复制失败，请手动选中"); }
+  });
+  const gearEl = document.getElementById("conv-chn-edit");
+  if (gearEl) gearEl.addEventListener("click", () => Channels.editChannel(ACTIVE));
+  // 群/频道头像若为 b3: 引用，异步解析后就地替换头部头像。
+  const meta = grp || chn;
+  if (meta && window.Profile && Profile.isRef(meta.avatar)) {
+    Profile.resolveAvatar(meta.avatar, meta.homeNode).then((uri) => {
+      if (!uri) return; meta.avatar = uri;
+      const el = document.getElementById("conv-hav");
+      if (el) { el.style.padding = "0"; el.style.overflow = "hidden"; el.innerHTML = `<img src="${uri}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit">`; }
+    });
+  }
   const input = document.getElementById("conv-input");
   const doSend = () => sendMsg(input.value);
   document.getElementById("conv-send").addEventListener("click", doSend);

@@ -86,7 +86,14 @@
     const displayName = (p.displayName || (window.Identity ? Identity.nameOf(pk) : "") || "").trim();
     const links = Array.isArray(p.links) ? p.links
       : (p.links ? String(p.links).split(/[,\n]/).map((s) => s.trim()).filter(Boolean) : []);
-    const avatar = (isRef(p.avatar) || isImg(p.avatar)) ? p.avatar : ""; // 发布 b3:hash（或 P0 遗留内联）
+    let avatar = (isRef(p.avatar) || isImg(p.avatar)) ? p.avatar : ""; // 发布 b3:hash（或 P0 遗留内联）
+    // 头像若为内容寻址引用：用本地原图幂等重传，确保 blob 在「当前家节点」。
+    // 否则换机/重连/换节点后 blob 不在本家节点 → 他人 blob_get 拉不到 → 头像不显示，
+    // 得「再改一次」才好（用户反馈的问题）；内容寻址 hash 恒定，重传不改变引用。
+    if (isImg(p.avatarData)) {
+      const ref = await putBlob(p.avatarData);
+      if (ref) { avatar = ref; avCache.set(ref, p.avatarData); }
+    }
     try {
       await NM.inv("update_profile", {
         displayName, bio: p.bio || "", statusText: p.statusText || "",
@@ -94,6 +101,61 @@
       });
       return true;
     } catch (e) { if (window.toast) toast("资料发布失败：" + (e && e.message ? e.message : e)); return false; }
+  }
+
+  // ── 通用「名称 + 简介 + 头像」编辑器（群 / 频道复用）。保存时上传头像 blob 后回调 onSave({name,bio,avatar})。
+  async function metaEditor(opts) {
+    opts = opts || {};
+    const cur = opts.avatar || "";
+    let pending = null; // null=未改动 / ""=移除 / data:URI=新图
+    const m = document.createElement("div");
+    m.className = "sec-overlay on";
+    m.innerHTML = `
+      <div class="sec-box"><div class="sec-head">${escapeHtml(opts.title || "编辑信息")}<button class="sec-x">✕</button></div>
+        <div class="sec-body"><div class="sec-sec">
+          <div class="sec-row" style="align-items:center"><label>头像</label>
+            <div style="display:flex;align-items:center;gap:10px">
+              <span class="me-prev"></span>
+              <button class="ns-btn me-pick">选择图片</button>
+              <button class="ns-btn me-clear">移除</button>
+              <input type="file" class="me-file" accept="image/*" style="display:none">
+            </div></div>
+          <div class="sec-row"><label>名称</label><input class="me-name sec-input" placeholder="${escapeHtml(opts.namePh || "名称")}"></div>
+          <div class="sec-row"><label>${escapeHtml(opts.bioLabel || "简介")}</label><input class="me-bio sec-input" placeholder="${escapeHtml(opts.bioPh || "一句话简介")}"></div>
+          <div class="sec-actions"><button class="ns-btn me-cancel">取消</button><button class="ns-btn ns-primary me-save">保存</button></div>
+        </div></div></div>`;
+    document.body.appendChild(m);
+    let previewData = isImg(cur) ? cur : (isRef(cur) ? await resolveAvatar(cur, opts.homeNode) : "");
+    const paint = () => { m.querySelector(".me-prev").innerHTML = avatarHtml(pending === "" ? "" : (pending || previewData), (opts.name || "?").slice(0, 1), 48); };
+    m.querySelector(".me-name").value = opts.name || "";
+    m.querySelector(".me-bio").value = opts.bio || "";
+    paint();
+    const close = () => m.remove();
+    m.querySelector(".sec-x").onclick = close;
+    m.querySelector(".me-cancel").onclick = close;
+    m.addEventListener("click", (e) => { if (e.target === m) close(); });
+    m.querySelector(".me-pick").onclick = () => m.querySelector(".me-file").click();
+    m.querySelector(".me-clear").onclick = () => { pending = ""; paint(); };
+    m.querySelector(".me-file").onchange = async (e) => {
+      const f = e.target.files && e.target.files[0]; e.target.value = "";
+      if (!f) return;
+      try {
+        let data = await fileToAvatar(f, 256, 0.85);
+        if (data.length > AV_MAX) data = await fileToAvatar(f, 192, 0.72);
+        if (data.length > AV_MAX) { if (window.toast) toast("图片太大，请换更简单的图"); return; }
+        pending = data; paint();
+      } catch (err) { if (window.toast) toast("处理图片失败：" + (err && err.message ? err.message : err)); }
+    };
+    m.querySelector(".me-save").onclick = async () => {
+      let avatar = (isRef(cur) || isImg(cur)) ? cur : "";
+      if (pending === "") avatar = "";
+      else if (pending) { const ref = await putBlob(pending); if (ref) { avatar = ref; avCache.set(ref, pending); } else avatar = pending; }
+      const name = m.querySelector(".me-name").value.trim();
+      const bio = m.querySelector(".me-bio").value.trim();
+      close();
+      try { if (opts.onSave) await opts.onSave({ name, bio, avatar }); }
+      catch (e) { if (window.toast) toast("保存失败：" + (e && e.message ? e.message : e)); }
+    };
   }
 
   function ensureModal() {
@@ -192,7 +254,7 @@
     m.classList.add("on");
   }
 
-  window.Profile = { get, save, publish, open, statusLabel, avatarHtml, isImg, isRef, resolveAvatar, resolveList, ownAvatar, presenceColor, presenceLabel, presenceDot, applyPresence };
+  window.Profile = { get, save, publish, open, statusLabel, avatarHtml, isImg, isRef, resolveAvatar, resolveList, ownAvatar, presenceColor, presenceLabel, presenceDot, applyPresence, metaEditor };
   window.openProfileModal = open;
 
   // ── P2 在线状态 ──

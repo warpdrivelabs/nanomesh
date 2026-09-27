@@ -227,7 +227,11 @@ main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .conv-head b { font-size: 14px; }
 .conv-kind { font-size: 11px; color: var(--aqua); background: var(--accent-soft); padding: 2px 8px; border-radius: 20px; }
 .conv-head .sp { flex: 1; }
-.conv-id { font-size: 11px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.conv-id { font-size: 11px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  cursor: pointer; padding: 2px 8px; border-radius: 20px; border: 1px solid var(--border); transition: background .12s, color .12s; }
+.conv-id:hover { background: var(--accent-soft); color: var(--aqua); }
+.conv-gear { background: none; border: none; color: var(--muted); font-size: 15px; cursor: pointer; padding: 2px 6px; border-radius: 6px; }
+.conv-gear:hover { background: var(--hover); color: var(--ink); }
 .conv .av { width: 40px; height: 40px; border-radius: 50%; flex: 0 0 40px; display: flex; align-items: center; justify-content: center; font-size: 18px; color: #fff; }
 .conv .av-sm { width: 26px; height: 26px; flex: 0 0 26px; font-size: 13px; }
 

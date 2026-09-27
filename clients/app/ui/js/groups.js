@@ -17,14 +17,25 @@
     try { GROUPS = await NM.inv("group_list"); } catch (e) { GROUPS = []; }
   }
 
+  // 群头像：已解析为 data:URI → 图；否则 👥 底色块。
+  function groupAv(g, size) {
+    const s = size || 40;
+    if (window.Profile && Profile.isImg(g.avatar)) return `<img src="${g.avatar}" alt="" style="width:${s}px;height:${s}px;border-radius:50%;object-fit:cover;display:block">`;
+    return `<span class="av" style="width:${s}px;height:${s}px;background:${avatarColor(g.id)}">👥</span>`;
+  }
+
   async function renderGroupsList() {
     await refresh();
+    paintGroupsList();
+    if (window.Profile) Profile.resolveList(GROUPS, paintGroupsList); // 解析 b3: 群头像后重绘
+  }
+  function paintGroupsList() {
     const box = document.getElementById("groups-list");
     if (!box) return;
     if (!GROUPS.length) { box.innerHTML = '<div class="ns-empty">还没有群组。点上方「＋」新建。</div>'; return; }
     box.innerHTML = GROUPS.map((g) => `
       <div class="im-item" data-gid="${g.id}" title="${escapeHtml(g.id)}">
-        <span class="av" style="background:${avatarColor(g.id)}">👥</span>
+        ${groupAv(g)}
         <span class="mid">
           <span class="r1"><span class="nm">${escapeHtml(g.name || "(未命名群)")}</span></span>
           <span class="r2"><span class="msg">${(g.members || []).length} 人 · ${roleLabel(myRole(g)) || "非成员"}</span></span>
@@ -62,13 +73,14 @@
     conv.innerHTML = `
       <div class="conv-head"><b>群详情</b><span class="sp"></span><span class="conv-kind">${roleLabel(role) || "非成员"}</span></div>
       <div class="ent-detail">
-        <div class="ed-avatar" style="background:${avatarColor(gid)}">👥</div>
+        <div class="ed-avatar ed-avatar-slot" style="background:${avatarColor(gid)}">${groupAv(g, 72)}</div>
         <div class="ed-name">${escapeHtml(g.name || "(未命名群)")}</div>
         <div class="ed-type">👥 群组 · ${(g.members || []).length} 人</div>
+        ${g.topic ? `<div style="margin:4px 0;color:var(--text)">${escapeHtml(g.topic)}</div>` : ""}
         <div class="ed-actions">
           <button class="ns-btn ns-primary" id="grp-open-chat">进入群聊</button>
+          ${isAdmin ? `<button class="ns-btn" id="grp-edit">编辑群信息</button>` : ""}
           ${isAdmin ? `<button class="ns-btn" id="grp-add">添加成员</button>` : ""}
-          ${isAdmin ? `<button class="ns-btn" id="grp-rename">改群名</button>` : ""}
           ${isOwner ? `<button class="ns-btn" id="grp-dissolve">解散群</button>` : `<button class="ns-btn" id="grp-leave">退出群</button>`}
         </div>
         <div class="ed-users">
@@ -76,13 +88,17 @@
           <div class="nsu-list">${memberRows}</div>
         </div>
       </div>`;
+    // 群头像若为 b3: 引用，异步解析后就地替换预览。
+    if (window.Profile && Profile.isRef(g.avatar)) {
+      Profile.resolveAvatar(g.avatar, g.homeNode).then((uri) => {
+        if (!uri) return; g.avatar = uri;
+        const slot = conv.querySelector(".ed-avatar-slot"); if (slot) slot.innerHTML = groupAv(g, 72);
+      });
+    }
     const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener("click", fn); };
     on("grp-open-chat", () => { if (window.openGroupChat) window.openGroupChat(gid); });
+    on("grp-edit", () => editGroupMeta(gid));
     on("grp-add", () => openAddMember(gid));
-    on("grp-rename", async () => {
-      const name = await textPrompt("改群名", "新的群名", g.name || "");
-      if (name != null) { await act("group_rename", { groupId: gid, name }, "已改名"); openDetail(gid); }
-    });
     on("grp-dissolve", async () => { if (confirm("确定解散该群？此操作不可恢复。")) { await act("group_dissolve", { groupId: gid }, "群已解散"); if (window.Tabs) Tabs.close("g:" + gid); else backToList(); renderGroupsList(); } });
     on("grp-leave", async () => { if (confirm("退出该群？")) { await act("group_leave", { groupId: gid }, "已退出"); if (window.Tabs) Tabs.close("g:" + gid); else backToList(); renderGroupsList(); } });
     conv.querySelectorAll(".grp-kick").forEach((b) => b.addEventListener("click", async () => { await act("group_kick", { groupId: gid, target: b.dataset.id }, "已移除"); openDetail(gid); }));
@@ -105,6 +121,26 @@
       openDetail(gid);
       if (window.toast) toast("群已创建");
     } catch (e) { if (window.toast) toast("建群失败：" + (e && e.message ? e.message : e)); }
+  }
+
+  // 编辑群信息（名称 + 简介 + 头像）：owner/admin。经通用 metaEditor 上传头像 blob 后落 group_set_meta。
+  async function editGroupMeta(gid) {
+    const g = byId(gid);
+    if (!g || !window.Profile || !Profile.metaEditor) return;
+    Profile.metaEditor({
+      title: "编辑群信息", name: g.name || "", bio: g.topic || "", avatar: g.avatar || "", homeNode: g.homeNode || "",
+      namePh: "群名称", bioLabel: "群简介", bioPh: "群公告 / 一句话简介",
+      onSave: async ({ name, bio, avatar }) => {
+        await NM.inv("group_set_meta", { groupId: gid, name: name || (g.name || ""), topic: bio, avatar });
+        await refresh();
+        if (window.Tabs) { Tabs.retitle("g:" + gid, name || g.name || "群", "👥"); Tabs.retitle("c:" + gid, name || g.name || "群", "👥"); }
+        renderGroupsList();
+        const conv = document.getElementById("conv");
+        if (conv && conv.querySelector(".ed-avatar-slot")) renderGroupDetail(gid); // 详情页在看 → 重绘
+        const mb = document.getElementById("grp-members"); if (mb) renderMembersPanel(gid, mb); // 群聊成员栏在看 → 重绘
+        if (window.toast) toast("群信息已更新");
+      },
+    });
   }
 
   // 添加成员：从实体目录挑人（person）或粘贴公钥。
@@ -167,7 +203,7 @@
     const role = myRole(g), isOwner = role === "owner", isAdmin = isOwner || role === "admin";
     const top = [];
     if (isAdmin) top.push(`<button class="ns-btn grp-p-add" title="添加成员">＋ 加人</button>`);
-    if (isAdmin) top.push(`<button class="ns-btn grp-p-rename" title="改群名">改名</button>`);
+    if (isAdmin) top.push(`<button class="ns-btn grp-p-edit" title="编辑群信息">群信息</button>`);
     if (isOwner) top.push(`<button class="ns-btn grp-p-dissolve" title="解散群">解散</button>`);
     else top.push(`<button class="ns-btn grp-p-leave" title="退出群">退群</button>`);
     const rows = (g.members || []).map((id) => {
@@ -188,7 +224,7 @@
     const q = (sel, fn) => { const el = box.querySelector(sel); if (el) el.addEventListener("click", fn); };
     const each = (sel, fn) => box.querySelectorAll(sel).forEach((el) => el.addEventListener("click", () => fn(el.dataset.id)));
     q(".grp-p-add", () => openAddMember(gid));
-    q(".grp-p-rename", async () => { const name = await textPrompt("改群名", "新的群名", g.name || ""); if (name != null) { await act("group_rename", { groupId: gid, name }, "已改名"); if (window.Tabs) Tabs.retitle("c:" + gid, name, "👥"); redraw(); refreshHeaderCount(gid); } });
+    q(".grp-p-edit", () => editGroupMeta(gid));
     q(".grp-p-dissolve", async () => { if (confirm("解散该群？此操作不可恢复。")) { await act("group_dissolve", { groupId: gid }, "群已解散"); if (window.Tabs) Tabs.close("c:" + gid); renderGroupsList(); } });
     q(".grp-p-leave", async () => { if (confirm("退出该群？")) { await act("group_leave", { groupId: gid }, "已退出"); if (window.Tabs) Tabs.close("c:" + gid); renderGroupsList(); } });
     each(".grp-p-msg", (id) => { if (typeof selectContact === "function") selectContact(id); });
