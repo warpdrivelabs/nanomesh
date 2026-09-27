@@ -44,6 +44,21 @@ window.openGroupChat = function (gid) {
   if (window.Tabs) Tabs.open({ key: "c:" + gid, kind: "chat", title, ico: "👥", render: draw });
   else draw();
 };
+// 打开某频道的订阅流（作为一个 tab）。
+window.openChannel = function (cid) {
+  const c = window.Channels && Channels.byId(cid);
+  const title = c ? (c.name || "频道") : shortId(cid);
+  const draw = () => { ACTIVE = cid; DETAIL_ID = null; UNREAD[cid] = 0; renderPanels(); renderConversation(); };
+  if (window.Tabs) Tabs.open({ key: "c:" + cid, kind: "chat", title, ico: "📡", render: draw });
+  else draw();
+};
+// 供 channels.js 回填历史消息到会话缓存（不计未读；已存 id 去重）。
+window.imBackfill = function (convId, msgs) {
+  const arr = (CONVOS[convId] = CONVOS[convId] || []);
+  for (const m of (msgs || [])) if (!arr.some((x) => x.id === m.id)) arr.push(m);
+  arr.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  if (convId === ACTIVE) renderConversation(); else renderPanels();
+};
 
 // ── 手动添加实体的本地存储（按当前身份隔离）──
 function loadAdded() { try { return (JSON.parse(localStorage.getItem("nmspace-entities") || "{}")[MY_ID]) || []; } catch (_) { return []; } }
@@ -65,6 +80,8 @@ async function imStart(myId) {
   if (typeof updateUserChip === "function") updateUserChip();
   if (typeof window.renderNodeSvcList === "function") window.renderNodeSvcList(); // 连接后刷新节点服务面板（hydrate 后数据已就绪）
   if (typeof window.renderGroupsList === "function") window.renderGroupsList(); // P3：刷新群组列表
+  if (typeof window.renderChannelsList === "function") window.renderChannelsList(); // P4：刷新频道列表
+  if (window.Channels && Channels.primeChannels) Channels.primeChannels(); // P4：订阅已知频道 + 回填历史
   if (window.Profile) { Profile.publish(); Profile.applyPresence(); } // 连接后发布资料 + 应用在线状态(P2)
   if (window._nmPresenceTimer) clearInterval(window._nmPresenceTimer);
   window._nmPresenceTimer = setInterval(() => { if (MY_ID) imRefresh(); }, 15000); // P2：定期刷新在线状态
@@ -265,16 +282,22 @@ function renderConversation() {
   }
   const msgs = CONVOS[ACTIVE] || [];
   const grp = window.Groups ? Groups.byId(ACTIVE) : null;
-  const c = grp ? { id: ACTIVE, name: grp.name || "群", kind: "group" } : (entityById(ACTIVE) || { id: ACTIVE, name: "", kind: "" });
-  const headAv = grp
-    ? `<span class="av av-sm" style="background:${avatarColor(ACTIVE)}">👥</span>`
+  const chn = (!grp && window.Channels) ? Channels.byId(ACTIVE) : null;
+  const showSender = !!grp || !!chn;
+  const c = grp ? { id: ACTIVE, name: grp.name || "群", kind: "group" }
+    : chn ? { id: ACTIVE, name: chn.name || "频道", kind: "channel" }
+    : (entityById(ACTIVE) || { id: ACTIVE, name: "", kind: "" });
+  const headAv = (grp || chn)
+    ? `<span class="av av-sm" style="background:${avatarColor(ACTIVE)}">${grp ? "👥" : "📡"}</span>`
     : `<span class="av av-sm" style="background:${avatarColor(ACTIVE)}${(window.Profile && Profile.isImg(c.avatar)) ? ";padding:0;overflow:hidden" : ""}">${(window.Profile && Profile.isImg(c.avatar)) ? `<img src="${c.avatar}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit">` : escapeHtml((c.name || "?").slice(0, 1))}</span>`;
   const headMeta = grp
     ? `<span class="conv-kind">群 · <b id="conv-grp-count">${(grp.members || []).length}</b> 人</span>`
+    : chn ? `<span class="conv-kind">📡 频道${chn.topic ? " · " + escapeHtml(chn.topic) : ""}</span>`
     : (c.kind ? `<span class="conv-kind">${escapeHtml(c.kind)}</span>` : "");
-  const logHtml = `<div class="log" id="conv-log">${msgs.map((m) => msgHtml(m, grp)).join("") || '<div class="im-empty im-empty--center">暂无消息</div>'}</div>`;
-  const composerHtml = `<div class="im-composer"><input id="conv-input" type="text" placeholder="${grp ? "群内发言，⏎ 发送…" : "输入消息，⏎ 发送…"}" autocomplete="off" /><button id="conv-send" class="send" title="发送 ⏎">↑</button></div>`;
-  // 群聊：会话在左、群成员面板在右（顶部群操作 + 逐成员操作）。私聊：单栏。
+  const logHtml = `<div class="log" id="conv-log">${msgs.map((m) => msgHtml(m, showSender)).join("") || '<div class="im-empty im-empty--center">暂无消息</div>'}</div>`;
+  const ph = grp ? "群内发言，⏎ 发送…" : chn ? "发布到频道，⏎ 发送…" : "输入消息，⏎ 发送…";
+  const composerHtml = `<div class="im-composer"><input id="conv-input" type="text" placeholder="${ph}" autocomplete="off" /><button id="conv-send" class="send" title="发送 ⏎">↑</button></div>`;
+  // 群聊：左会话 + 右成员栏。私聊 / 频道：单栏（频道=订阅流 + 发布框）。
   const body = grp
     ? `<div class="grp-body"><div class="grp-chat">${logHtml}${composerHtml}</div><div class="grp-members" id="grp-members"></div></div>`
     : `${logHtml}${composerHtml}`;
@@ -296,11 +319,11 @@ function renderConversation() {
   scrollLog();
 }
 
-function msgHtml(m, grp) {
+function msgHtml(m, showSender) {
   const mine = m.from === MY_ID;
   const who = mine ? "我" : (window.entityName ? entityName(m.from) : (m.from || "").slice(0, 6) + "…");
   return `<div class="im-msg ${mine ? "me" : ""}">
-    ${(grp && !mine) ? `<span class="im-sender">${escapeHtml(who)}</span>` : ""}
+    ${(showSender && !mine) ? `<span class="im-sender">${escapeHtml(who)}</span>` : ""}
     <span class="im-bubble">${escapeHtml(m.body)}</span>
     <span class="im-from">${escapeHtml(who)}</span>
   </div>`;
@@ -311,10 +334,17 @@ async function sendMsg(text) {
   if (!text || !ACTIVE) return;
   const input = document.getElementById("conv-input");
   const isGroup = !!(window.Groups && Groups.byId(ACTIVE));
+  const isChannel = !isGroup && !!(window.Channels && Channels.byId(ACTIVE));
   try {
-    if (isGroup) await NM.inv("send_group", { groupId: ACTIVE, text });
-    else await NM.inv("send_to", { target: ACTIVE, text });
-    pushMsg(ACTIVE, { id: "l" + Date.now(), from: MY_ID, body: text, ts: Date.now(), group: isGroup, to: ACTIVE });
+    if (isChannel) {
+      await NM.inv("channel_publish", { channelId: ACTIVE, body: text }); // 节点会回投给本地订阅者(含自己)，不做乐观插入以免重复
+    } else if (isGroup) {
+      await NM.inv("send_group", { groupId: ACTIVE, text });
+      pushMsg(ACTIVE, { id: "l" + Date.now(), from: MY_ID, body: text, ts: Date.now(), group: true, to: ACTIVE });
+    } else {
+      await NM.inv("send_to", { target: ACTIVE, text });
+      pushMsg(ACTIVE, { id: "l" + Date.now(), from: MY_ID, body: text, ts: Date.now(), to: ACTIVE });
+    }
     if (input) { input.value = ""; input.focus(); }
   } catch (e) {
     if (window.toast) toast("发送失败：" + (e && e.message ? e.message : e));
@@ -324,7 +354,7 @@ async function sendMsg(text) {
 function onCoreEvent(ev) {
   if (!ev || ev.type !== "message" || !ev.msg) return;
   const m = ev.msg;
-  const key = m.group ? m.to : m.from; // 群消息按群 id 归会话；私聊按发送方
+  const key = (m.group || m.channel) ? m.to : m.from; // 群/频道按其 id 归会话；私聊按发送方
   pushMsg(key, m);
   if (key !== ACTIVE) UNREAD[key] = (UNREAD[key] || 0) + 1;
   renderPanels();

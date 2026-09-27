@@ -97,6 +97,7 @@
       <div class="act" id="act-entities" data-act="showPanel" data-panel="entities" title="实体目录"><span>📇</span></div>
       <div class="act" id="act-nodesvc" data-act="showPanel" data-panel="nodesvc" title="节点服务"><span>🖧</span></div>
       <div class="act" id="act-groups" data-act="showPanel" data-panel="groups" title="群组"><span>👥</span></div>
+      <div class="act" id="act-channels" data-act="showPanel" data-panel="channels" title="频道"><span>📡</span></div>
       <div class="act-sp"></div>
       <!-- 活动栏底部：当前用户头像（点开切换身份/编辑资料；昵称见悬浮提示与下拉）-->
       <button class="act act-user" id="tb-user" title="切换用户身份 / 编辑资料">
@@ -133,6 +134,14 @@
           <button class="brand-refresh" id="grp-refresh-btn" title="刷新">⟳</button>
         </div>
         <div class="im-list" id="groups-list"></div>
+      </div>
+      <div class="panel channels-panel" id="panel-channels">
+        <div class="brand"><span class="uname">频道</span>
+          <button class="brand-refresh" id="chn-new-btn" title="新建频道">＋</button>
+          <button class="brand-refresh" id="chn-sub-btn" title="粘贴频道 id 订阅">⇩</button>
+          <button class="brand-refresh" id="chn-refresh-btn" title="刷新">⟳</button>
+        </div>
+        <div class="im-list" id="channels-list"></div>
       </div>
     </aside>
     <div class="splitter" id="splitter" title="拖动调整左侧栏宽度"></div>
@@ -240,6 +249,7 @@
 <script src="js/usermenu.js" defer></script>
 <script src="js/profile.js" defer></script>
 <script src="js/groups.js" defer></script>
+<script src="js/channels.js" defer></script>
 <script src="js/im.js" defer></script>
 <script src="js/main.js" defer></script>
 <script src="js/auth.js" defer></script>
