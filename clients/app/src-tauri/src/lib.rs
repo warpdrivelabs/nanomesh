@@ -571,6 +571,9 @@ async fn group_list(state: State<'_, AppState>) -> Result<Vec<Value>, String> {
                 "owner": hex(&g.owner),
                 "members": g.members.iter().map(|m| hex(m)).collect::<Vec<_>>(),
                 "admins": g.admins.iter().map(|a| hex(a)).collect::<Vec<_>>(),
+                "topic": g.topic,
+                "avatar": g.avatar_url,
+                "homeNode": hex(&g.home_node),
             })
         })
         .collect())
@@ -606,6 +609,25 @@ async fn group_rename(state: State<'_, AppState>, group_id: String, name: String
     session.group_rename(parse_id(&group_id)?, name.trim()).await.map_err(|e| e.to_string())
 }
 
+/// owner/admin 设置群信息（名称/简介/头像）。avatar 传 "b3:<hash>" 或空。
+#[tauri::command]
+async fn group_set_meta(
+    state: State<'_, AppState>,
+    group_id: String,
+    name: String,
+    topic: String,
+    avatar: String,
+) -> Result<(), String> {
+    if avatar.len() > 128 * 1024 {
+        return Err("头像过大（请用更小的图）".into());
+    }
+    let session = session_of(&state).await?;
+    session
+        .group_set_meta(parse_id(&group_id)?, name.trim(), topic.trim(), avatar.trim())
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn group_dissolve(state: State<'_, AppState>, group_id: String) -> Result<(), String> {
     let session = session_of(&state).await?;
@@ -626,10 +648,13 @@ async fn send_group(state: State<'_, AppState>, group_id: String, text: String) 
 
 // ── 频道 / 主题（P4）──
 #[tauri::command]
-async fn channel_create(state: State<'_, AppState>, name: String, topic: String) -> Result<String, String> {
+async fn channel_create(state: State<'_, AppState>, name: String, topic: String, avatar: String) -> Result<String, String> {
+    if avatar.len() > 128 * 1024 {
+        return Err("头像过大（请用更小的图）".into());
+    }
     let session = session_of(&state).await?;
     let cid = nm_transport::SecretKey::generate().to_bytes(); // 随机 32 字节频道 id
-    session.channel_create(cid, name.trim(), topic.trim()).await.map_err(|e| e.to_string())?;
+    session.channel_create(cid, name.trim(), topic.trim(), avatar.trim()).await.map_err(|e| e.to_string())?;
     Ok(hex(&cid))
 }
 
@@ -639,7 +664,27 @@ async fn channel_list(state: State<'_, AppState>) -> Result<Vec<Value>, String> 
     let chans = session.channel_list().await.map_err(|e| e.to_string())?;
     Ok(chans.iter().map(|c| json!({
         "id": hex(&c.channel_id), "name": c.name, "owner": hex(&c.owner), "topic": c.topic,
+        "avatar": c.avatar_url, "homeNode": hex(&c.home_node),
     })).collect())
+}
+
+/// owner 设置频道信息（名称/简介/头像）→ gossip 广播给订阅者。
+#[tauri::command]
+async fn channel_set_meta(
+    state: State<'_, AppState>,
+    channel_id: String,
+    name: String,
+    topic: String,
+    avatar: String,
+) -> Result<(), String> {
+    if avatar.len() > 128 * 1024 {
+        return Err("头像过大（请用更小的图）".into());
+    }
+    let session = session_of(&state).await?;
+    session
+        .channel_set_meta(parse_id(&channel_id)?, name.trim(), topic.trim(), avatar.trim())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -716,6 +761,7 @@ pub fn run() {
             group_promote,
             group_demote,
             group_rename,
+            group_set_meta,
             group_dissolve,
             group_leave,
             send_group,
@@ -724,6 +770,7 @@ pub fn run() {
             channel_sub,
             channel_unsub,
             channel_publish,
+            channel_set_meta,
             channel_backfill,
             node_users,
             my_id,

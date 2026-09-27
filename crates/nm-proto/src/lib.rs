@@ -13,9 +13,10 @@ pub mod pb {
 
 /// 线协议消息与类型（由 protobuf 生成）。
 pub use pb::{
-    Any, BlobData, BlobPut, BlobRef, Capability, Channel, ChannelBackfillReq, ChannelList,
-    ChannelLog, ChannelMsg, ChannelOp, ChannelPub, Command, CommandResult, DirectoryQuery, Entity,
-    EntityList, Grant, Gram, FedSyncReq, FedSyncResp, GramKind, Group, GroupList, GroupOp, JobSpec,
+    Any, BlobData, BlobPut, BlobRef, Capability, Channel, ChannelBackfillReq, ChannelGram,
+    ChannelList, ChannelLog, ChannelMsg, ChannelOp, ChannelPub, Command, CommandResult,
+    DirectoryQuery, Entity, EntityList, Grant, Gram, FedSyncReq, FedSyncResp, GramKind, Group,
+    GroupList, GroupOp, JobSpec,
 };
 
 /// 协议主版本；握手时协商，拒绝不兼容主版本。

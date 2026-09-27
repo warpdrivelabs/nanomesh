@@ -133,12 +133,17 @@ message Group {
   repeated bytes members = 4;         // 成员 EntityId 列表（含 owner）
   int64 updated_at = 5;
   repeated bytes admins = 6;          // 管理员 EntityId 列表（owner 不必在内；owner > admin > member）
+  string topic = 7;                   // 群简介 / 公告
+  string avatar_url = 8;              // 群头像："b3:<hash>"（内容寻址，blob 存 home_node）或内联 data:URI
+  bytes home_node = 9;                // 群归属节点（头像 blob 所在；跨节点 blob_get 寻址用）
 }
-// 群操作参数（method=group.create/join/leave/kick/list 时装入 Command.params）。
+// 群操作参数（method=group.create/join/leave/kick/set_meta/list 时装入 Command.params）。
 message GroupOp {
   bytes group_id = 1;
-  string name = 2;                    // create 用
-  bytes target = 3;                   // kick 用：被移除的成员
+  string name = 2;                    // create / set_meta 用
+  bytes target = 3;                   // kick/add/promote/demote 用：目标成员
+  string topic = 4;                   // set_meta 用：群简介
+  string avatar_url = 5;              // set_meta 用：群头像引用
 }
 message GroupList { repeated Group groups = 1; }
 
@@ -150,6 +155,8 @@ message Channel {
   bytes owner = 3;                    // 创建者（可定发布白名单 / 事后审核）
   int64 created_at = 4;
   string topic = 5;                   // 频道简介/主题
+  string avatar_url = 6;              // 频道头像："b3:<hash>" 或内联 data:URI
+  bytes home_node = 7;                // 频道创建者的家节点（头像 blob 所在；跨节点解析用）
 }
 // 频道消息（gossip 载荷 + 转发给订阅者）。sender 为发布者；seq 单调用于回填游标/去重。
 message ChannelMsg {
@@ -159,7 +166,14 @@ message ChannelMsg {
   int64 ts = 4;
   string body = 5;
 }
-message ChannelOp   { bytes channel_id = 1; string name = 2; string topic = 3; } // create/sub/unsub 参数
+// 频道 gossip 载荷信封：消息 or 元信息（名称/简介/头像）广播，令订阅者收敛频道展示信息。
+message ChannelGram {
+  oneof kind {
+    ChannelMsg msg = 1;               // 一条频道消息
+    Channel meta = 2;                 // 频道元信息广播（owner/已知者周期重播，晚订阅者据此补全）
+  }
+}
+message ChannelOp   { bytes channel_id = 1; string name = 2; string topic = 3; string avatar_url = 4; } // create/sub/set_meta 参数
 message ChannelPub  { bytes channel_id = 1; string body = 2; }                    // publish 参数
 message ChannelList { repeated Channel channels = 1; }
 message ChannelBackfillReq { bytes channel_id = 1; uint64 since_seq = 2; }

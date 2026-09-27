@@ -283,7 +283,7 @@ impl Session {
 
     /// 创建群（caller 为 owner 兼首成员）；返回 group_id。
     pub async fn group_create(&self, group_id: [u8; 32], name: &str) -> Result<[u8; 32], ClientError> {
-        let op = GroupOp { group_id: group_id.to_vec(), name: name.to_string(), target: Vec::new() };
+        let op = GroupOp { group_id: group_id.to_vec(), name: name.to_string(), ..Default::default() };
         self.group_op("group.create", op).await?;
         Ok(group_id)
     }
@@ -329,6 +329,20 @@ impl Session {
         self.group_op(
             "group.rename",
             GroupOp { group_id: group_id.to_vec(), name: name.to_string(), ..Default::default() },
+        )
+        .await
+    }
+    /// owner/admin 设置群信息（名称/简介/头像）。
+    pub async fn group_set_meta(&self, group_id: [u8; 32], name: &str, topic: &str, avatar_url: &str) -> Result<(), ClientError> {
+        self.group_op(
+            "group.set_meta",
+            GroupOp {
+                group_id: group_id.to_vec(),
+                name: name.to_string(),
+                topic: topic.to_string(),
+                avatar_url: avatar_url.to_string(),
+                ..Default::default()
+            },
         )
         .await
     }
@@ -399,8 +413,12 @@ impl Session {
         let res = rpc_over(&self.conn, self.my_id, method, Some(params)).await?;
         if res.ok { Ok(()) } else { Err(ClientError::Other(res.error)) }
     }
-    pub async fn channel_create(&self, channel_id: [u8; 32], name: &str, topic: &str) -> Result<(), ClientError> {
-        self.channel_op("channel.create", ChannelOp { channel_id: channel_id.to_vec(), name: name.to_string(), topic: topic.to_string() }).await
+    pub async fn channel_create(&self, channel_id: [u8; 32], name: &str, topic: &str, avatar_url: &str) -> Result<(), ClientError> {
+        self.channel_op("channel.create", ChannelOp { channel_id: channel_id.to_vec(), name: name.to_string(), topic: topic.to_string(), avatar_url: avatar_url.to_string() }).await
+    }
+    /// owner 设置频道信息（名称/简介/头像）→ gossip 广播给订阅者。
+    pub async fn channel_set_meta(&self, channel_id: [u8; 32], name: &str, topic: &str, avatar_url: &str) -> Result<(), ClientError> {
+        self.channel_op("channel.set_meta", ChannelOp { channel_id: channel_id.to_vec(), name: name.to_string(), topic: topic.to_string(), avatar_url: avatar_url.to_string() }).await
     }
     pub async fn channel_sub(&self, channel_id: [u8; 32], name: &str) -> Result<(), ClientError> {
         self.channel_op("channel.sub", ChannelOp { channel_id: channel_id.to_vec(), name: name.to_string(), ..Default::default() }).await
