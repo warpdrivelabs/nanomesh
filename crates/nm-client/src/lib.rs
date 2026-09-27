@@ -299,6 +299,46 @@ impl Session {
         )
         .await
     }
+    /// owner/admin 添加成员。
+    pub async fn group_add(&self, group_id: [u8; 32], target: [u8; 32]) -> Result<(), ClientError> {
+        self.group_op(
+            "group.add",
+            GroupOp { group_id: group_id.to_vec(), target: target.to_vec(), ..Default::default() },
+        )
+        .await
+    }
+    /// owner 提升成员为管理员。
+    pub async fn group_promote(&self, group_id: [u8; 32], target: [u8; 32]) -> Result<(), ClientError> {
+        self.group_op(
+            "group.promote",
+            GroupOp { group_id: group_id.to_vec(), target: target.to_vec(), ..Default::default() },
+        )
+        .await
+    }
+    /// owner 取消某人的管理员。
+    pub async fn group_demote(&self, group_id: [u8; 32], target: [u8; 32]) -> Result<(), ClientError> {
+        self.group_op(
+            "group.demote",
+            GroupOp { group_id: group_id.to_vec(), target: target.to_vec(), ..Default::default() },
+        )
+        .await
+    }
+    /// owner/admin 改群名。
+    pub async fn group_rename(&self, group_id: [u8; 32], name: &str) -> Result<(), ClientError> {
+        self.group_op(
+            "group.rename",
+            GroupOp { group_id: group_id.to_vec(), name: name.to_string(), ..Default::default() },
+        )
+        .await
+    }
+    /// owner 解散群。
+    pub async fn group_dissolve(&self, group_id: [u8; 32]) -> Result<(), ClientError> {
+        self.group_op(
+            "group.dissolve",
+            GroupOp { group_id: group_id.to_vec(), ..Default::default() },
+        )
+        .await
+    }
     pub async fn group_list(&self) -> Result<Vec<Group>, ClientError> {
         let res = rpc_over(&self.conn, self.my_id, "group.list", None).await?;
         if !res.ok {

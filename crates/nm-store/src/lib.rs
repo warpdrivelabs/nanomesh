@@ -187,6 +187,17 @@ impl RedbStore {
         Ok(())
     }
 
+    /// 删除一个群（解散）。
+    pub fn del_group(&self, group_id: &[u8]) -> Result<()> {
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        {
+            let mut t = wtx.open_table(GROUPS).map_err(db_err)?;
+            t.remove(group_id).map_err(db_err)?;
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+
     pub fn get_group(&self, group_id: &[u8]) -> Result<Option<Group>> {
         let rtx = self.db.begin_read().map_err(db_err)?;
         let t = rtx.open_table(GROUPS).map_err(db_err)?;

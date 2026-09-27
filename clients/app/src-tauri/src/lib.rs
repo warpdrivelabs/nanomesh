@@ -311,6 +311,8 @@ async fn finish_session(
                 "msg": {
                     "id": gram.gram_id.to_string(),
                     "from": hex(&gram.sender),
+                    "to": hex(&gram.receiver),                 // 群消息=群id；私聊=本人id
+                    "group": matches!(gram.kind(), nm_proto::GramKind::GroupMessage),
                     "body": body,
                     "ts": gram.timestamp_ms,
                 }
@@ -546,6 +548,81 @@ async fn presence_set(state: State<'_, AppState>, status: String) -> Result<(), 
     session.presence_set(status.trim()).await.map_err(|e| e.to_string())
 }
 
+// ── 群组（P3）：建群 / 成员与角色管理 / 群消息 ──
+#[tauri::command]
+async fn group_create(state: State<'_, AppState>, name: String) -> Result<String, String> {
+    let session = session_of(&state).await?;
+    let gid = nm_transport::SecretKey::generate().to_bytes(); // 随机 32 字节群 id
+    session.group_create(gid, name.trim()).await.map_err(|e| e.to_string())?;
+    Ok(hex(&gid))
+}
+
+#[tauri::command]
+async fn group_list(state: State<'_, AppState>) -> Result<Vec<Value>, String> {
+    let session = session_of(&state).await?;
+    let groups = session.group_list().await.map_err(|e| e.to_string())?;
+    Ok(groups
+        .iter()
+        .map(|g| {
+            json!({
+                "id": hex(&g.group_id),
+                "name": g.name,
+                "owner": hex(&g.owner),
+                "members": g.members.iter().map(|m| hex(m)).collect::<Vec<_>>(),
+                "admins": g.admins.iter().map(|a| hex(a)).collect::<Vec<_>>(),
+            })
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn group_add(state: State<'_, AppState>, group_id: String, target: String) -> Result<(), String> {
+    let session = session_of(&state).await?;
+    session.group_add(parse_id(&group_id)?, parse_id(&target)?).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn group_kick(state: State<'_, AppState>, group_id: String, target: String) -> Result<(), String> {
+    let session = session_of(&state).await?;
+    session.group_kick(parse_id(&group_id)?, parse_id(&target)?).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn group_promote(state: State<'_, AppState>, group_id: String, target: String) -> Result<(), String> {
+    let session = session_of(&state).await?;
+    session.group_promote(parse_id(&group_id)?, parse_id(&target)?).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn group_demote(state: State<'_, AppState>, group_id: String, target: String) -> Result<(), String> {
+    let session = session_of(&state).await?;
+    session.group_demote(parse_id(&group_id)?, parse_id(&target)?).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn group_rename(state: State<'_, AppState>, group_id: String, name: String) -> Result<(), String> {
+    let session = session_of(&state).await?;
+    session.group_rename(parse_id(&group_id)?, name.trim()).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn group_dissolve(state: State<'_, AppState>, group_id: String) -> Result<(), String> {
+    let session = session_of(&state).await?;
+    session.group_dissolve(parse_id(&group_id)?).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn group_leave(state: State<'_, AppState>, group_id: String) -> Result<(), String> {
+    let session = session_of(&state).await?;
+    session.group_leave(parse_id(&group_id)?).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn send_group(state: State<'_, AppState>, group_id: String, text: String) -> Result<(), String> {
+    let session = session_of(&state).await?;
+    session.send_group(parse_id(&group_id)?, &text).await.map(|_| ()).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn my_id(state: State<'_, AppState>) -> Result<String, String> {
     let g = state.conn.lock().await;
@@ -586,6 +663,16 @@ pub fn run() {
             blob_put,
             blob_get,
             presence_set,
+            group_create,
+            group_list,
+            group_add,
+            group_kick,
+            group_promote,
+            group_demote,
+            group_rename,
+            group_dissolve,
+            group_leave,
+            send_group,
             node_users,
             my_id,
             disconnect,

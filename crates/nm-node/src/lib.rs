@@ -1233,10 +1233,8 @@ async fn fanout_group(gram: &Gram, ctx: &Ctx, caller: &[u8]) {
         if member.as_slice() == caller {
             continue; // 不回发给自己
         }
-        // 逐成员定制一份（receiver=成员），便于其本地按会话入库/展示。
-        let mut per = gram.clone();
-        per.receiver = member.clone();
-        deliver_or_store(member, &per, ctx).await;
+        // 保留 receiver=group_id（成员端据此把消息归入「群会话」而非私聊）；仅按 member 路由投递。
+        deliver_or_store(member, gram, ctx).await;
     }
 }
 
@@ -1431,7 +1429,12 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
         "group.create" => group_create(&cmd, groups, store, caller),
         "group.join" => group_mutate(&cmd, groups, store, caller, GroupMut::Join),
         "group.leave" => group_mutate(&cmd, groups, store, caller, GroupMut::Leave),
+        "group.add" => group_mutate(&cmd, groups, store, caller, GroupMut::Add),
         "group.kick" => group_mutate(&cmd, groups, store, caller, GroupMut::Kick),
+        "group.promote" => group_mutate(&cmd, groups, store, caller, GroupMut::Promote),
+        "group.demote" => group_mutate(&cmd, groups, store, caller, GroupMut::Demote),
+        "group.rename" => group_mutate(&cmd, groups, store, caller, GroupMut::Rename),
+        "group.dissolve" => group_dissolve(&cmd, groups, store, caller),
         "group.list" => {
             let mine: Vec<Group> = groups
                 .iter()
@@ -1475,7 +1478,7 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
     Some(command_result_gram(gram, &cr))
 }
 
-enum GroupMut { Join, Leave, Kick }
+enum GroupMut { Join, Leave, Add, Kick, Promote, Demote, Rename }
 
 fn persist_group(store: &Option<Arc<RedbStore>>, g: &Group) {
     if let Some(s) = store {
@@ -1483,6 +1486,10 @@ fn persist_group(store: &Option<Arc<RedbStore>>, g: &Group) {
             tracing::warn!("persist group failed: {e}");
         }
     }
+}
+
+fn is_group_admin(g: &Group, who: &[u8]) -> bool {
+    g.owner.as_slice() == who || g.admins.iter().any(|a| a.as_slice() == who)
 }
 
 /// 创建群：caller 为 owner 兼首个成员。group_id 由参数给定（客户端生成，通常随机）。
@@ -1507,6 +1514,7 @@ fn group_create(
         owner: caller.to_vec(),
         members: vec![caller.to_vec()],
         updated_at: now_ms() as i64,
+        admins: Vec::new(),
     };
     persist_group(store, &g);
     groups.insert(g.group_id.clone(), g);
@@ -1514,7 +1522,32 @@ fn group_create(
     (true, None, String::new())
 }
 
-/// 加入/退出/踢人。join：caller 加自己；leave：caller 移除自己；kick：仅 owner 可移除 target。
+/// 解散群（仅 owner）。
+fn group_dissolve(
+    cmd: &Command,
+    groups: &DashMap<Vec<u8>, Group>,
+    store: &Option<Arc<RedbStore>>,
+    caller: &[u8],
+) -> (bool, Option<Any>, String) {
+    let Some(op) = cmd.params.as_ref().and_then(|p| GroupOp::decode(p.value.as_slice()).ok()) else {
+        return (false, None, "invalid group op".into());
+    };
+    let owner_ok = groups.get(&op.group_id).map(|g| g.owner.as_slice() == caller);
+    match owner_ok {
+        None => (false, None, "group not found".into()),
+        Some(false) => (false, None, "only owner can dissolve".into()),
+        Some(true) => {
+            groups.remove(&op.group_id);
+            if let Some(s) = store {
+                let _ = s.del_group(&op.group_id);
+            }
+            tracing::info!("group dissolved");
+            (true, None, String::new())
+        }
+    }
+}
+
+/// 成员/角色变更（按 owner>admin>member 鉴权）。
 fn group_mutate(
     cmd: &Command,
     groups: &DashMap<Vec<u8>, Group>,
@@ -1528,6 +1561,9 @@ fn group_mutate(
     let Some(mut entry) = groups.get_mut(&op.group_id) else {
         return (false, None, "group not found".into());
     };
+    let caller_owner = entry.owner.as_slice() == caller;
+    let caller_admin = is_group_admin(&entry, caller);
+    let target_ok = op.target.len() == 32;
     match op_kind {
         GroupMut::Join => {
             if !entry.members.iter().any(|m| m.as_slice() == caller) {
@@ -1535,16 +1571,62 @@ fn group_mutate(
             }
         }
         GroupMut::Leave => {
+            if caller_owner {
+                return (false, None, "群主不能退出，请先转让或解散群".into());
+            }
             entry.members.retain(|m| m.as_slice() != caller);
+            entry.admins.retain(|a| a.as_slice() != caller);
+        }
+        GroupMut::Add => {
+            if !caller_admin {
+                return (false, None, "only owner/admin can add members".into());
+            }
+            if !target_ok {
+                return (false, None, "add target required".into());
+            }
+            if !entry.members.iter().any(|m| m.as_slice() == op.target.as_slice()) {
+                entry.members.push(op.target.clone());
+            }
         }
         GroupMut::Kick => {
-            if entry.owner.as_slice() != caller {
-                return (false, None, "only owner can kick".into());
+            if !caller_admin {
+                return (false, None, "only owner/admin can kick".into());
             }
-            if op.target.is_empty() {
+            if !target_ok {
                 return (false, None, "kick target required".into());
             }
+            if op.target.as_slice() == entry.owner.as_slice() {
+                return (false, None, "cannot kick owner".into());
+            }
+            let target_admin = entry.admins.iter().any(|a| a.as_slice() == op.target.as_slice());
+            if target_admin && !caller_owner {
+                return (false, None, "only owner can remove an admin".into());
+            }
             entry.members.retain(|m| m.as_slice() != op.target.as_slice());
+            entry.admins.retain(|a| a.as_slice() != op.target.as_slice());
+        }
+        GroupMut::Promote => {
+            if !caller_owner {
+                return (false, None, "only owner can promote".into());
+            }
+            if !target_ok || !entry.members.iter().any(|m| m.as_slice() == op.target.as_slice()) {
+                return (false, None, "target is not a member".into());
+            }
+            if !entry.admins.iter().any(|a| a.as_slice() == op.target.as_slice()) {
+                entry.admins.push(op.target.clone());
+            }
+        }
+        GroupMut::Demote => {
+            if !caller_owner {
+                return (false, None, "only owner can demote".into());
+            }
+            entry.admins.retain(|a| a.as_slice() != op.target.as_slice());
+        }
+        GroupMut::Rename => {
+            if !caller_admin {
+                return (false, None, "only owner/admin can rename".into());
+            }
+            entry.name = op.name.clone();
         }
     }
     entry.updated_at = now_ms() as i64;

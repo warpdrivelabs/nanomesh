@@ -129,9 +129,10 @@ message BlobData { bytes hash = 1; bytes data = 2; string mime = 3; }
 message Group {
   bytes group_id = 1;                 // 32 字节群标识
   string name = 2;
-  bytes owner = 3;                    // 创建者 EntityId（管理员）
+  bytes owner = 3;                    // 创建者 EntityId（权限最高）
   repeated bytes members = 4;         // 成员 EntityId 列表（含 owner）
   int64 updated_at = 5;
+  repeated bytes admins = 6;          // 管理员 EntityId 列表（owner 不必在内；owner > admin > member）
 }
 // 群操作参数（method=group.create/join/leave/kick/list 时装入 Command.params）。
 message GroupOp {
