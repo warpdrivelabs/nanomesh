@@ -84,7 +84,11 @@ async fn real_cross_seed_group_and_channel() {
     let (_bc, mut bob) = nat_online([204u8; 32], b).await;
     bob.register_as::<kinds::Person>(&PersonProfile::default(), "BobX", HashMap::new()).await.unwrap();
 
-    let gid = [220u8; 32];
+    let mut gid = [220u8; 32];
+    let mut cid = [221u8; 32];
+    let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos().to_le_bytes();
+    gid[..16].copy_from_slice(&n); // 每次运行用新 id，避免与上次残留冲突
+    cid[..16].copy_from_slice(&n);
     owner.group_create(gid, "跨种子群").await.unwrap();
     owner.group_add(gid, bob.id_bytes()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -94,7 +98,7 @@ async fn real_cross_seed_group_and_channel() {
         _ => eprintln!("❌ X-GROUP: bob(异节点) 未收到群消息 → 跨种子联邦不通"),
     }
 
-    let cid = [221u8; 32];
+    let cid = cid; // 见上：已按时间戳生成唯一 id
     owner.channel_create(cid, "跨种子频道", "简介", "").await.unwrap();
     bob.channel_sub(cid, "跨种子频道").await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
