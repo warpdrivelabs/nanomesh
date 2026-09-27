@@ -965,6 +965,19 @@ impl Node {
                     }
                 }
             }
+            Some(nm_proto::pb::group_gossip::Body::Direct(gram)) => {
+                // 私聊单播：仅当本节点负责该收件人时投递（在线直投 / 本节点为其 home 则离线入库）。
+                let to = &gram.receiver;
+                if self.sessions.contains_key(to.as_slice()) {
+                    try_push(to, &gram, &self.sessions).await;
+                } else if let Ok(Some(e)) = self.dir.get(to).await {
+                    if e.home_node == self.ep.id_bytes().as_slice() {
+                        if let Some(s) = &self.store {
+                            let _ = s.push_inbox(to, &gram);
+                        }
+                    }
+                }
+            }
             None => {}
         }
     }
@@ -1515,10 +1528,10 @@ async fn handle_gram(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
             }
         }
         // Message 可离线暂存；Command/CommandResult 仅在线路由。
-        // 单播消息的离线暂存同样可能触发目录查询/中继（带网络超时），后台执行以免拖慢 ack。
+        // 单播私聊改走 gossip（本地投递不了则联邦广播，对端节点投递）——取代 NAT 下常不通的 s2s 中继。
         if matches!(gram.kind(), GramKind::Message) {
             let (g, c) = (gram.clone(), ctx.clone());
-            tokio::spawn(async move { deliver_or_store(&g.receiver, &g, &c).await });
+            tokio::spawn(async move { deliver_direct(&g, &c).await });
         } else {
             try_push(to, gram, &ctx.sessions).await;
         }
@@ -1588,6 +1601,42 @@ fn announce_group(ctx: &Ctx, gid: &[u8]) {
         };
         let _ = ctx.group_pub.send(gg.encode_to_vec());
     }
+}
+
+/// 私聊单播投递（不依赖 s2s 中继）：
+/// 1) 本地在线 → 直投；2) 已知且 home==本节点(离线) → 本地离线库；
+/// 3) 已知远端 → 仅联邦 gossip 广播（对端节点投递/入库）；
+/// 4) 完全未知 → 本地离线库兜底(可能连来本节点) + 联邦 gossip 广播(可能在远端)。
+async fn deliver_direct(gram: &Gram, ctx: &Ctx) {
+    let to = &gram.receiver;
+    // 1) 本地在线会话直投。
+    if ctx.sessions.contains_key(to.as_slice()) {
+        try_push(to, gram, &ctx.sessions).await;
+        return;
+    }
+    let known_remote = match ctx.dir.get(to).await {
+        Ok(Some(e)) if e.home_node == ctx.node_id.as_slice() => {
+            // 2) 收件人 home 在本节点、当前离线 → 入本地离线库，重连补投。
+            if let Some(s) = &ctx.store {
+                let _ = s.push_inbox(to, gram);
+            }
+            return;
+        }
+        Ok(Some(_)) => true, // 3) 已知远端
+        _ => false,          // 4) 完全未知
+    };
+    if !known_remote {
+        // 未知收件人：本地兜底入库（可能连来本节点），同时下面再联邦广播（可能在远端）。
+        if let Some(s) = &ctx.store {
+            let _ = s.push_inbox(to, gram);
+        }
+    }
+    // 远端 / 未知：经联邦 gossip 广播；对端节点收到后投递（取代 s2s 中继）。
+    let gg = GroupGossip {
+        origin: ctx.node_id.to_vec(),
+        body: Some(nm_proto::pb::group_gossip::Body::Direct(gram.clone())),
+    };
+    let _ = ctx.group_pub.send(gg.encode_to_vec());
 }
 
 /// 尝试把 gram 经 uni 流推送给某在线会话；返回是否投递成功。

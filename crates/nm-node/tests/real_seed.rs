@@ -107,6 +107,13 @@ async fn real_cross_seed_group_and_channel() {
         Ok(Some(g)) => eprintln!("✅ X-CHANNEL recv body={:?}", String::from_utf8_lossy(&g.payload.unwrap().value)),
         _ => eprintln!("❌ X-CHANNEL: bob(异节点) 未收到频道消息 → 跨种子 gossip 不通"),
     }
+
+    // ---- 私聊：owner(种子A) → bob(种子B) 跨种子单播（走 gossip Direct）----
+    owner.send_to(bob.id_bytes(), "跨种子私信").await.unwrap();
+    match tokio::time::timeout(Duration::from_secs(15), bob.recv()).await {
+        Ok(Some(g)) => eprintln!("✅ X-DIRECT recv body={:?}", String::from_utf8_lossy(&g.payload.unwrap().value)),
+        _ => eprintln!("❌ X-DIRECT: bob(异节点) 未收到私信 → 跨种子私聊不通"),
+    }
 }
 
 fn env_id(k: &str, dflt: &str) -> [u8; 32] {

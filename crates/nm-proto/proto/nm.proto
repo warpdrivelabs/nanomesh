@@ -147,14 +147,16 @@ message GroupOp {
 }
 message GroupList { repeated Group groups = 1; }
 
-// 群联邦 gossip 信封（联邦级主题 nmspace-groups:<fed>，所有节点加入）：
-// 既做群状态发现(announce → 各节点据此填充群目录/成员表)，又做群消息扇出(msg → 各节点投递给本地成员)。
-// 取代跨节点 s2s 中继（NAT 下常不通）；origin 防自回环。TODO：签名 + 每群独立主题 + 加密。
+// 群/私聊联邦 gossip 信封（联邦级主题 nmspace-groups:<fed>，所有节点加入）：
+// 既做群状态发现(announce → 各节点据此填充群目录/成员表)、群消息扇出(msg)，
+// 也做私聊单播的跨节点投递(direct)——统一取代跨节点 s2s 中继（NAT 下常不通）；origin 防自回环。
+// TODO：签名 + 每群独立主题 + 端到端加密（当前明文广播到联邦各节点）。
 message GroupGossip {
   bytes origin = 1;                   // 广播源节点 id（收到 origin==自身则忽略）
   oneof body {
     Group announce = 2;               // 群状态广播（发现 + 成员表，home 节点周期/变更时发）
     Gram msg = 3;                     // 群消息扇出（kind=GroupMessage，receiver=group_id）
+    Gram direct = 4;                  // 私聊单播（kind=Message，receiver=对端 EntityId）；仅在本地投递不了时才广播
   }
 }
 
