@@ -10,7 +10,7 @@ async function winToggleMaximize(){
   await w.toggleMaximize();
   try{
     const maxed = await w.isMaximized();
-    document.getElementById("win-max-btn").querySelector(".ico").textContent = maxed ? "❐" : "□";
+    document.getElementById("win-max-btn").querySelector(".ico").innerHTML = nmIcon(maxed ? "restore" : "maximize");
   }catch(e){}
 }
 async function winClose(){ const w=_tauriWin(); if(w) await w.close(); }

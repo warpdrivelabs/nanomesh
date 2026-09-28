@@ -22,15 +22,15 @@
     <span class="tb-title" data-tauri-drag-region>NANO MESH</span>
     <div class="sp" data-tauri-drag-region></div>
     <div class="tb-ctrls">
-      <button class="tb-btn" data-act="toggleSidebar" title="隐藏/显示左侧栏"><span class="ico" id="tb-side-ico">⇤</span></button>
-      <button class="tb-btn" data-act="toggleTheme" title="浅色/深色主题"><span class="ico" id="tb-theme-ico">☀</span></button>
-      <button class="tb-btn" data-act="lock" title="锁定（清零内存密钥）"><span class="ico">🔒</span></button>
-      <button class="tb-btn" data-act="disconnect" title="断开 / 切换服务器"><span class="ico">⎋</span><span>断开</span></button>
+      <button class="tb-btn" data-act="toggleSidebar" title="隐藏/显示左侧栏"><span class="ico" id="tb-side-ico" data-ico="sidebar-close"></span></button>
+      <button class="tb-btn" data-act="toggleTheme" title="浅色/深色主题"><span class="ico" id="tb-theme-ico" data-ico="sun"></span></button>
+      <button class="tb-btn" data-act="lock" title="锁定（清零内存密钥）"><span class="ico" data-ico="lock"></span></button>
+      <button class="tb-btn" data-act="disconnect" title="断开 / 切换服务器"><span class="ico" data-ico="disconnect"></span></button>
     </div>
     <div class="win-ctrls" id="win-ctrls" style="display:none">
-      <button class="win-btn" data-act="winMinimize" title="最小化"><span class="ico">─</span></button>
-      <button class="win-btn" id="win-max-btn" data-act="winToggleMaximize" title="最大化"><span class="ico">□</span></button>
-      <button class="win-btn win-close" data-act="winClose" title="关闭"><span class="ico">✕</span></button>
+      <button class="win-btn" data-act="winMinimize" title="最小化"><span class="ico" data-ico="minimize"></span></button>
+      <button class="win-btn" id="win-max-btn" data-act="winToggleMaximize" title="最大化"><span class="ico" data-ico="maximize"></span></button>
+      <button class="win-btn win-close" data-act="winClose" title="关闭"><span class="ico" data-ico="close"></span></button>
     </div>
   </div>
   <!-- 用户切换下拉（标题栏 tb-user 触发；position:fixed，DOM 位置无关） -->
@@ -38,7 +38,7 @@
   <!-- 安全设置弹窗（P2）：自动锁定 / 改主口令 / 加密备份 -->
   <div class="sec-overlay" id="sec-modal">
     <div class="sec-box">
-      <div class="sec-head">🔐 安全设置 <button class="sec-x" id="sec-close" title="关闭">✕</button></div>
+      <div class="sec-head"><span class="ico" data-ico="shield"></span>安全设置 <button class="sec-x" id="sec-close" title="关闭"><span class="ico" data-ico="close"></span></button></div>
       <div class="sec-body">
         <div class="sec-sec">
           <div class="sec-t">自动锁定</div>
@@ -93,11 +93,11 @@
   <div class="workspace">
     <!-- 活动栏：即时通讯（消息）+ 实体目录 + 节点服务 -->
     <div class="activitybar">
-      <div class="act active" id="act-im" data-act="showPanel" data-panel="im" title="即时通讯"><span>💬</span></div>
-      <div class="act" id="act-entities" data-act="showPanel" data-panel="entities" title="实体目录"><span>📇</span></div>
-      <div class="act" id="act-nodesvc" data-act="showPanel" data-panel="nodesvc" title="节点服务"><span>🖧</span></div>
-      <div class="act" id="act-groups" data-act="showPanel" data-panel="groups" title="群组"><span>👥</span></div>
-      <div class="act" id="act-channels" data-act="showPanel" data-panel="channels" title="频道"><span>📡</span></div>
+      <div class="act active" id="act-im" data-act="showPanel" data-panel="im" title="即时通讯"><span class="ico" data-ico="chat"></span></div>
+      <div class="act" id="act-entities" data-act="showPanel" data-panel="entities" title="实体目录"><span class="ico" data-ico="contacts"></span></div>
+      <div class="act" id="act-nodesvc" data-act="showPanel" data-panel="nodesvc" title="节点服务"><span class="ico" data-ico="nodes"></span></div>
+      <div class="act" id="act-groups" data-act="showPanel" data-panel="groups" title="群组"><span class="ico" data-ico="groups"></span></div>
+      <div class="act" id="act-channels" data-act="showPanel" data-panel="channels" title="频道"><span class="ico" data-ico="channels"></span></div>
       <div class="act-sp"></div>
       <!-- 活动栏底部：当前用户头像（点开切换身份/编辑资料；昵称见悬浮提示与下拉）-->
       <button class="act act-user" id="tb-user" title="切换用户身份 / 编辑资料">
@@ -107,39 +107,39 @@
     <!-- 左侧栏：消息会话 / 实体目录 / 节点服务（同时只显示一个 .panel.on）-->
     <aside>
       <div class="panel im-panel on" id="panel-im">
-        <div class="brand"><span class="uname">消息</span><button class="brand-refresh" data-act="imRefresh" title="刷新目录">⟳</button></div>
-        <div class="im-search"><input id="im-search-input" type="text" placeholder="🔍 搜索会话" /></div>
+        <div class="brand"><span class="uname">消息</span><button class="brand-refresh" data-act="imRefresh" title="刷新目录"><span class="ico" data-ico="refresh"></span></button></div>
+        <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="im-search-input" type="text" placeholder="搜索会话" /></div>
         <div class="im-list" id="im-list"></div>
       </div>
       <div class="panel entities-panel" id="panel-entities">
         <div class="brand"><span class="uname">实体目录</span>
-          <button class="brand-refresh" id="ent-add-btn" title="添加实体">＋</button>
-          <button class="brand-refresh" data-act="imRefresh" title="刷新目录">⟳</button>
+          <button class="brand-refresh" id="ent-add-btn" title="添加实体"><span class="ico" data-ico="plus"></span></button>
+          <button class="brand-refresh" data-act="imRefresh" title="刷新目录"><span class="ico" data-ico="refresh"></span></button>
         </div>
-        <div class="im-search"><input id="entity-search-input" type="text" placeholder="🔍 搜索实体" /></div>
+        <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="entity-search-input" type="text" placeholder="搜索实体" /></div>
         <div class="nodesvc-form entity-form" id="entity-form" style="display:none"></div>
         <div class="entity-list" id="entity-list"></div>
       </div>
       <div class="panel nodesvc-panel" id="panel-nodesvc">
         <div class="brand"><span class="uname">节点服务</span></div>
         <div class="nodesvc-actions">
-          <button class="ns-btn ns-primary" id="ns-new">＋ 新增节点服务</button>
+          <button class="ns-btn ns-primary" id="ns-new"><span class="ico" data-ico="plus"></span> 新增节点服务</button>
         </div>
         <div class="nodesvc-form" id="nodesvc-form" style="display:none"></div>
         <div class="nodesvc-list" id="nodesvc-list"></div>
       </div>
       <div class="panel groups-panel" id="panel-groups">
         <div class="brand"><span class="uname">群组</span>
-          <button class="brand-refresh" id="grp-new-btn" title="新建群">＋</button>
-          <button class="brand-refresh" id="grp-refresh-btn" title="刷新">⟳</button>
+          <button class="brand-refresh" id="grp-new-btn" title="新建群"><span class="ico" data-ico="plus"></span></button>
+          <button class="brand-refresh" id="grp-refresh-btn" title="刷新"><span class="ico" data-ico="refresh"></span></button>
         </div>
         <div class="im-list" id="groups-list"></div>
       </div>
       <div class="panel channels-panel" id="panel-channels">
         <div class="brand"><span class="uname">频道</span>
-          <button class="brand-refresh" id="chn-new-btn" title="新建频道">＋</button>
-          <button class="brand-refresh" id="chn-sub-btn" title="粘贴频道 id 订阅">⇩</button>
-          <button class="brand-refresh" id="chn-refresh-btn" title="刷新">⟳</button>
+          <button class="brand-refresh" id="chn-new-btn" title="新建频道"><span class="ico" data-ico="plus"></span></button>
+          <button class="brand-refresh" id="chn-sub-btn" title="粘贴频道 id 订阅"><span class="ico" data-ico="subscribe"></span></button>
+          <button class="brand-refresh" id="chn-refresh-btn" title="刷新"><span class="ico" data-ico="refresh"></span></button>
         </div>
         <div class="im-list" id="channels-list"></div>
       </div>
@@ -147,7 +147,31 @@
     <div class="splitter" id="splitter" title="拖动调整左侧栏宽度"></div>
     <!-- 主区：多 tab 工作区（会话 / 实体详情 / 群详情 / 节点服务详情各成一页）-->
     <main>
-      <div class="tabbar" id="tabbar" style="display:none"><div class="tabstrip" id="tabstrip"></div></div>
+      <div class="tabbar" id="tabbar" style="display:none">
+        <div class="tabstrip" id="tabstrip"></div>
+        <button type="button" class="tab-more" id="tab-more" title="未显示的标签"></button>
+        <div class="tab-over" id="tab-over" hidden></div>
+      </div>
+      <template id="conv-home-tpl">
+        <div class="home">
+          <div class="home-sky" aria-hidden="true">
+            <div class="home-glow home-glow--a"></div>
+            <div class="home-glow home-glow--b"></div>
+            <div class="home-mesh"></div>
+          </div>
+          <div class="home-body">
+            <img src="nanomesh-logo.png" class="home-logo" alt="" />
+            <h1 class="home-name">NANO<span>MESH</span></h1>
+            <p class="home-lead">基于 QUIC/P2P 的去中心化网格<br>按节点公钥直连 · 同网优先 · 穿透兜底</p>
+            <ul class="home-feats">
+              <li><span>01</span><div><strong>去中心 P2P</strong><em>节点即身份 · 无中心服务器</em></div></li>
+              <li><span>02</span><div><strong>同网优先 · 穿透兜底</strong><em>同一网络直连 · 跨网 NAT 打洞</em></div></li>
+              <li><span>03</span><div><strong>本地身份</strong><em>私钥本地落盘 · 重启复用</em></div></li>
+            </ul>
+            <p class="home-hint">从左侧打开会话、实体、群或节点服务</p>
+          </div>
+        </div>
+      </template>
       <div class="conv" id="conv"></div>
     </main>
   </div>
@@ -157,9 +181,9 @@
 <div id="login-view" class="spa-view" style="display:none">
   <div class="login-drag-strip" data-tauri-drag-region></div>
   <div class="login-win-ctrls" id="login-win-ctrls" style="display:none">
-    <button class="win-btn" data-act="winMinimize" title="最小化"><span class="ico">─</span></button>
-    <button class="win-btn" data-act="winToggleMaximize" title="最大化"><span class="ico">□</span></button>
-    <button class="win-btn win-close" data-act="winClose" title="关闭"><span class="ico">✕</span></button>
+    <button class="win-btn" data-act="winMinimize" title="最小化"><span class="ico" data-ico="minimize"></span></button>
+    <button class="win-btn" data-act="winToggleMaximize" title="最大化"><span class="ico" data-ico="maximize"></span></button>
+    <button class="win-btn win-close" data-act="winClose" title="关闭"><span class="ico" data-ico="close"></span></button>
   </div>
   <div class="login-page">
     <div class="brand-panel" data-tauri-drag-region>
@@ -180,7 +204,7 @@
       <div class="brand-content">
         <div class="brand-eyebrow"><span class="brand-eyebrow__dot"></span> 去中心化网格 · P2P</div>
         <h1 class="brand-title"><span class="brand-title__text">NANO<span class="brand-title__accent">MESH</span></span></h1>
-        <p class="brand-desc">基于 iroh 的去中心化网格<br>按节点公钥直连 · 同网优先 · 穿透兜底</p>
+        <p class="brand-desc">基于 QUIC/P2P 的去中心化网格<br>按节点公钥直连 · 同网优先 · 穿透兜底</p>
         <ul class="brand-features">
           <li><span class="feature-index">01</span><div class="feature-text"><strong>去中心 P2P</strong><em>节点即身份 · 无中心服务器</em></div></li>
           <li><span class="feature-index">02</span><div class="feature-text"><strong>同网优先 · 穿透兜底</strong><em>同一网络直连 · 跨网 NAT 打洞</em></div></li>
@@ -203,7 +227,7 @@
               <label for="c-user">用户身份</label>
               <div class="pubkey-row">
                 <select id="c-user" class="pubkey-select"></select>
-                <button type="button" class="pubkey-gen" id="c-newuser" title="新建一个身份（公钥）——像多开一个 QQ/微信号">＋ 新建身份</button>
+                <button type="button" class="pubkey-gen" id="c-newuser" title="新建一个身份（公钥）——像多开一个 QQ/微信号"><span class="ico" data-ico="plus"></span> 新建身份</button>
               </div>
               <div class="import-box" id="newuser-box" style="display:none">
                 <input id="newuser-name" type="text" placeholder="给这个身份起个昵称（如 工作号 / 生活号）" />
@@ -215,12 +239,12 @@
               <label for="c-service">节点服务</label>
               <div class="pubkey-row">
                 <select id="c-service" class="pubkey-select"></select>
-                <button type="button" class="pubkey-gen" id="c-newsvc" title="新建节点服务（可填公钥/地址、名称、联系方式、地理位置等）">＋ 新建服务</button>
+                <button type="button" class="pubkey-gen" id="c-newsvc" title="新建节点服务（可填公钥/地址、名称、联系方式、地理位置等）"><span class="ico" data-ico="plus"></span> 新建服务</button>
               </div>
               <div class="nodesvc-form svc-form-box" id="svc-form-box" style="display:none"></div>
-              <div class="svc-hint">节点服务是公用的（所有身份共享）；在主界面「🖧 节点服务」面板也可新增/管理。</div>
+              <div class="svc-hint">节点服务是公用的（所有身份共享）；在主界面「节点服务」面板也可新增/管理。</div>
             </div>
-            <button class="login-submit" id="c-submit" type="submit">连 接</button>
+            <button class="login-submit" id="c-submit" type="submit">连接</button>
             <div class="error" id="c-error" role="alert"></div>
           </form>
         </div>
@@ -231,6 +255,17 @@
 
 <!-- ═════════════════ 锁屏视图（首启设置主口令 / 解锁）═════════════════ -->
 <div id="lock-view" class="spa-view" style="display:none">
+  <div class="lock-sky" aria-hidden="true">
+    <div class="lock-nebula lock-nebula--a"></div>
+    <div class="lock-nebula lock-nebula--b"></div>
+    <div class="lock-milky">
+      <div class="lock-milky-glow"></div>
+      <div class="lock-milky-dust space-stars" id="lock-band-stars"></div>
+    </div>
+    <div class="space-stars" id="lock-stars-far"></div>
+    <div class="space-stars" id="lock-stars-mid"></div>
+    <div class="space-shooters" id="lock-shooters"></div>
+  </div>
   <div class="lock-page" data-tauri-drag-region>
     <img src="nanomesh-logo.png" class="lock-logo" alt="NANO MESH" />
     <div class="lock-brand">NANO MESH</div>
@@ -238,6 +273,7 @@
   </div>
 </div>
 
+<script src="js/icons.js" defer></script>
 <script src="js/bridge.js" defer></script>
 <script src="js/store.js" defer></script>
 <script src="js/platform.js" defer></script>

@@ -69,7 +69,7 @@ function renderNodeSvcList() {
   const box = document.getElementById("nodesvc-list");
   if (!box) return;
   const list = NodeSvc.list();
-  if (!list.length) { box.innerHTML = '<div class="ns-empty">还没有节点服务。点上方「＋ 新增」。</div>'; return; }
+  if (!list.length) { box.innerHTML = '<div class="ns-empty">还没有节点服务。点上方「新增节点服务」。</div>'; return; }
   box.innerHTML = list.map((s) => {
     const pk = NodeSvc.pubkeyOf(s.node) || s.node;
     const extra = [s.contact, s.location].filter(Boolean).join(" · ");
@@ -80,8 +80,8 @@ function renderNodeSvcList() {
         <small>${escapeHtml(shortNode(pk))}</small>
         ${extra ? `<small class="ns-extra">${escapeHtml(extra)}</small>` : ""}
       </span>
-      <button class="ns-edit" data-edit="${s.id}" title="编辑">✎</button>
-      <button class="ns-del" data-del="${s.id}" title="删除">✕</button>
+      <button class="ns-edit" data-edit="${s.id}" title="编辑">${nmIcon("edit")}</button>
+      <button class="ns-del" data-del="${s.id}" title="删除">${nmIcon("close")}</button>
     </div>`;
   }).join("");
   box.querySelectorAll(".ns-item").forEach((el) => el.addEventListener("click", (e) => {
@@ -96,7 +96,7 @@ function renderNodeSvcList() {
 function showNodeSvcDetail(id) {
   const s = NodeSvc.get(id);
   const title = s ? (s.name || "(未命名)") : id;
-  if (window.Tabs) Tabs.open({ key: "n:" + id, kind: "nodesvc", title, ico: "🖧", render: () => renderNodeSvcDetail(id) });
+  if (window.Tabs) Tabs.open({ key: "n:" + id, kind: "nodesvc", title, ico: "nodes", render: () => renderNodeSvcDetail(id) });
   else renderNodeSvcDetail(id);
 }
 function renderNodeSvcDetail(id) {
@@ -118,7 +118,7 @@ function renderNodeSvcDetail(id) {
   conv.innerHTML = `
     <div class="conv-head"><b>节点服务详情</b><span class="sp"></span><span class="conv-kind">${escapeHtml(s.mode)}</span></div>
     <div class="ent-detail">
-      <div class="ed-avatar" style="background:var(--accent-soft);color:var(--aqua);font-size:34px">🖧</div>
+      <div class="ed-avatar" style="background:var(--accent-soft);color:var(--aqua)">${nmIcon("nodes")}</div>
       <div class="ed-name">${escapeHtml(s.name || "(未命名)")}</div>
       <div class="ed-field"><label>节点公钥 / 地址</label>
         <div class="ed-key"><code>${escapeHtml(s.node)}</code><button class="ns-btn ns-primary" id="nsd-copy">复制</button></div></div>
@@ -136,7 +136,7 @@ function renderNodeSvcDetail(id) {
   document.getElementById("nsd-edit").addEventListener("click", () => buildSvcForm(document.getElementById("nodesvc-form"), NodeSvc.get(id), nsRefresh));
   document.getElementById("nsd-del").addEventListener("click", () => {
     NodeSvc.remove(id); NSVC_SEL = null; nsRefresh();
-    conv.innerHTML = '<div class="im-center"><div class="ico">🖧</div><div class="txt">节点服务已删除</div></div>';
+    conv.innerHTML = '<div class="im-center"><div class="ico">' + nmIcon("nodes") + '</div><div class="txt">节点服务已删除</div></div>';
   });
   document.getElementById("nsd-refresh").addEventListener("click", () => loadNodeUsers(s));
 }

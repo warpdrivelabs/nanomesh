@@ -4,7 +4,7 @@
 //    展示端按 hash 经 blob_get 拉取 + 本地缓存。兼容 P0 遗留的内联 data:URI 头像。
 (function () {
   const KEY = (pk) => "nmspace:profile:" + pk;
-  const STATUS_OPTS = [["", "（不设置）"], ["online", "🟢 在线"], ["away", "🟡 离开"], ["busy", "🔴 忙碌"], ["dnd", "⛔ 勿扰"]];
+  const STATUS_OPTS = [["", "（不设置）"], ["online", "在线"], ["away", "离开"], ["busy", "忙碌"], ["dnd", "勿扰"]];
   const AV_MAX = 200 * 1024; // 缩放后原始图上限（内容寻址，节点侧约 1MiB 硬限）
   const avCache = new Map(); // "b3:<hash>" -> data:URI（会话内缓存，避免重复 blob_get）
   let pendingAvatar = null;  // 模态框内待保存头像：null=未改动 / ""=移除 / data:URI=新图
@@ -111,7 +111,7 @@
     const m = document.createElement("div");
     m.className = "sec-overlay on";
     m.innerHTML = `
-      <div class="sec-box"><div class="sec-head">${escapeHtml(opts.title || "编辑信息")}<button class="sec-x">✕</button></div>
+      <div class="sec-box"><div class="sec-head">${escapeHtml(opts.title || "编辑信息")}<button class="sec-x">${nmIcon("close")}</button></div>
         <div class="sec-body"><div class="sec-sec">
           <div class="sec-row" style="align-items:center"><label>头像</label>
             <div style="display:flex;align-items:center;gap:10px">
@@ -165,7 +165,7 @@
     m.className = "sec-overlay"; m.id = "profile-modal";
     m.innerHTML = `
       <div class="sec-box">
-        <div class="sec-head">🪪 编辑资料 <button class="sec-x" id="pf-close" title="关闭">✕</button></div>
+        <div class="sec-head"><span class="ico">${nmIcon("contacts")}</span>编辑资料 <button class="sec-x" id="pf-close" title="关闭">${nmIcon("close")}</button></div>
         <div class="sec-body"><div class="sec-sec">
           <div class="sec-row" style="align-items:center">
             <label>头像</label>

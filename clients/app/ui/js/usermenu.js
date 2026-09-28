@@ -51,10 +51,10 @@ async function toggleUserMenu() {
   }).join("") +
     `<div class="um-sep"></div>
      ${cur && window.Profile ? `<div class="um-status" id="um-status">${["online", "away", "busy", "dnd"].map((s) => `<button class="um-st${(Profile.get(cur).status || "online") === s ? " on" : ""}" data-st="${s}"><span class="um-stdot" style="background:${Profile.presenceColor(s)}"></span>${Profile.presenceLabel(s)}</button>`).join("")}</div><div class="um-sep"></div>` : ""}
-     ${cur ? `<div class="um-item um-copy" id="um-copy"><span class="um-av um-plus">📋</span><span class="um-meta"><b>复制当前用户 id</b><small>${shortNode(cur)}</small></span></div>` : ""}
+     ${cur ? `<div class="um-item um-copy" id="um-copy"><span class="um-av um-plus">${nmIcon("copy")}</span><span class="um-meta"><b>复制当前用户 id</b><small>${shortNode(cur)}</small></span></div>` : ""}
      ${cur ? `<div class="um-item um-profile" id="um-profile"><span class="um-av um-plus">🪪</span><span class="um-meta"><b>编辑资料</b><small>昵称 · 状态 · 简介</small></span></div>` : ""}
-     <div class="um-item um-sec" id="um-sec"><span class="um-av um-plus">🔐</span><span class="um-meta"><b>安全设置</b><small>自动锁定 · 改口令 · 备份</small></span></div>
-     <div class="um-item um-new" id="um-new"><span class="um-av um-plus">＋</span><span class="um-meta"><b>新建 / 切换账号</b><small>回到启动页</small></span></div>`;
+     <div class="um-item um-sec" id="um-sec"><span class="um-av um-plus">${nmIcon("shield")}</span><span class="um-meta"><b>安全设置</b><small>自动锁定 · 改口令 · 备份</small></span></div>
+     <div class="um-item um-new" id="um-new"><span class="um-av um-plus">${nmIcon("plus")}</span><span class="um-meta"><b>新建 / 切换账号</b><small>回到启动页</small></span></div>`;
   m.classList.add("on");
   m.querySelectorAll("#um-status .um-st").forEach((b) => b.addEventListener("click", async () => {
     const st = b.dataset.st;

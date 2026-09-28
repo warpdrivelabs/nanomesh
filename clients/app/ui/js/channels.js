@@ -16,7 +16,7 @@
   function channelAv(c, size) {
     const s = size || 40;
     if (window.Profile && Profile.isImg(c.avatar)) return `<img src="${c.avatar}" alt="" style="width:${s}px;height:${s}px;border-radius:50%;object-fit:cover;display:block">`;
-    return `<span class="av" style="width:${s}px;height:${s}px;background:${avatarColor(c.id)}">📡</span>`;
+    return `<span class="av" style="width:${s}px;height:${s}px;background:${avatarColor(c.id)}">${nmIcon("channels")}</span>`;
   }
 
   async function renderChannelsList() {
@@ -27,7 +27,7 @@
   function paintChannelsList() {
     const box = document.getElementById("channels-list");
     if (!box) return;
-    if (!CHANNELS.length) { box.innerHTML = '<div class="ns-empty">还没有频道。点上方「＋」新建，或「⇩」粘贴频道 id 订阅。</div>'; return; }
+    if (!CHANNELS.length) { box.innerHTML = '<div class="ns-empty">还没有频道。点上方加号新建，或订阅按钮粘贴频道 id。</div>'; return; }
     box.innerHTML = CHANNELS.map((c) => `
       <div class="im-item" data-cid="${c.id}" title="${escapeHtml(c.id)}">
         ${channelAv(c)}
@@ -35,6 +35,21 @@
         <span class="r2"><span class="msg">${escapeHtml(c.topic || "频道")}</span></span></span>
       </div>`).join("");
     box.querySelectorAll(".im-item").forEach((el) => el.addEventListener("click", () => { if (window.openChannel) openChannel(el.dataset.cid); }));
+    syncSelection();
+  }
+
+  function currentChannelId() {
+    const key = window.Tabs && Tabs.active ? Tabs.active() : "";
+    if (!key || !key.startsWith("c:")) return "";
+    const id = key.slice(2);
+    if (window.Groups && Groups.byId && Groups.byId(id)) return "";
+    return byId(id) ? id : "";
+  }
+  function syncSelection() {
+    const box = document.getElementById("channels-list");
+    if (!box) return;
+    const sel = currentChannelId();
+    box.querySelectorAll(".im-item").forEach((el) => el.classList.toggle("on", !!sel && el.dataset.cid === sel));
   }
 
   async function createChannel() {
@@ -61,7 +76,7 @@
       onSave: async ({ name, bio, avatar }) => {
         await NM.inv("channel_set_meta", { channelId: cid, name: name || (c.name || ""), topic: bio, avatar });
         await renderChannelsList();
-        if (window.Tabs) Tabs.retitle("c:" + cid, name || c.name || "频道", "📡");
+        if (window.Tabs) Tabs.retitle("c:" + cid, name || c.name || "频道", "channels");
         if (typeof renderConversation === "function") renderConversation(); // 频道流头部在看 → 重绘
         if (window.toast) toast("频道信息已更新");
       },
@@ -99,7 +114,7 @@
   function prompt2(title, ph, val) {
     return new Promise((resolve) => {
       const m = document.createElement("div"); m.className = "sec-overlay on";
-      m.innerHTML = `<div class="sec-box"><div class="sec-head">${escapeHtml(title)}<button class="sec-x">✕</button></div><div class="sec-body"><div class="sec-sec">
+      m.innerHTML = `<div class="sec-box"><div class="sec-head">${escapeHtml(title)}<button class="sec-x">${nmIcon("close")}</button></div><div class="sec-body"><div class="sec-sec">
         <input class="sec-input pv-inp" placeholder="${escapeHtml(ph)}" value="${escapeHtml(val || "")}">
         <div class="sec-actions"><button class="ns-btn pv-c">取消</button><button class="ns-btn ns-primary pv-ok">确定</button></div></div></div>`;
       document.body.appendChild(m);
@@ -119,6 +134,6 @@
     const rf = document.getElementById("chn-refresh-btn"); if (rf) rf.addEventListener("click", renderChannelsList);
   })();
 
-  window.Channels = { refresh, byId, isOwner, editChannel, list: () => CHANNELS, primeChannels };
+  window.Channels = { refresh, byId, isOwner, editChannel, list: () => CHANNELS, primeChannels, syncSelection };
   window.renderChannelsList = renderChannelsList;
 })();

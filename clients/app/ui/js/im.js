@@ -8,23 +8,25 @@ let CONVOS = {};                // 当前身份的会话：id -> [{id,from,body,
 let ACTIVE = null;              // 当前会话对端 id（消息视图高亮）
 let DETAIL_ID = null;          // 当前查看详情的实体 id（实体目录高亮）
 let UNREAD = {};                // 当前身份的未读：id -> 数
+const ENT_FOLDED = new Set();  // 实体目录已收起的类型
 let _coreUnlisten = null;
 let CONVOS_BY_USER = {};
 let UNREAD_BY_USER = {};
 
 const ENTITY_TYPES = [
-  { key: "person",  label: "人类",   icon: "👤", prefixes: ["person"] },
-  { key: "device",  label: "设备",   icon: "📟", prefixes: ["device"] },
-  { key: "vehicle", label: "车辆",   icon: "🚗", prefixes: ["vehicle"] },
-  { key: "agent",   label: "智能体", icon: "🤖", prefixes: ["agent"] },
-  { key: "compute", label: "算力体", icon: "⚡", prefixes: ["compute"] },
+  { key: "person",  label: "朋友",   icon: "person", prefixes: ["person"] },
+  { key: "device",  label: "设备",   icon: "device", prefixes: ["device"] },
+  { key: "vehicle", label: "车辆",   icon: "vehicle", prefixes: ["vehicle"] },
+  { key: "agent",   label: "智能体", icon: "agent", prefixes: ["agent"] },
+  { key: "robot",   label: "机器人", icon: "robot",  prefixes: ["robot"] },
+  { key: "compute", label: "算力体", icon: "compute", prefixes: ["compute"] },
 ];
 function kindType(kind) {
   const k = (kind || "").toLowerCase();
   for (const t of ENTITY_TYPES) if (t.prefixes.some((p) => k === p || k.startsWith(p + "."))) return t.key;
   return "other";
 }
-function typeMeta(kind) { return ENTITY_TYPES.find((t) => t.key === kindType(kind)) || { key: "other", label: "其他", icon: "📦" }; }
+function typeMeta(kind) { return ENTITY_TYPES.find((t) => t.key === kindType(kind)) || { key: "other", label: "其他", icon: "file" }; }
 
 // 发现实体 + 手动添加合并（去重；发现的以直播目录为准）。
 function mergedEntities() {
@@ -41,7 +43,7 @@ window.openGroupChat = function (gid) {
   const g = window.Groups && Groups.byId(gid);
   const title = g ? (g.name || "群") : shortId(gid);
   const draw = () => { ACTIVE = gid; DETAIL_ID = null; UNREAD[gid] = 0; renderPanels(); renderConversation(); };
-  if (window.Tabs) Tabs.open({ key: "c:" + gid, kind: "chat", title, ico: "👥", render: draw });
+  if (window.Tabs) Tabs.open({ key: "c:" + gid, kind: "chat", title, ico: "groups", render: draw });
   else draw();
 };
 // 打开某频道的订阅流（作为一个 tab）。
@@ -49,7 +51,7 @@ window.openChannel = function (cid) {
   const c = window.Channels && Channels.byId(cid);
   const title = c ? (c.name || "频道") : shortId(cid);
   const draw = () => { ACTIVE = cid; DETAIL_ID = null; UNREAD[cid] = 0; renderPanels(); renderConversation(); };
-  if (window.Tabs) Tabs.open({ key: "c:" + cid, kind: "chat", title, ico: "📡", render: draw });
+  if (window.Tabs) Tabs.open({ key: "c:" + cid, kind: "chat", title, ico: "channels", render: draw });
   else draw();
 };
 // 供 channels.js 回填历史消息到会话缓存（不计未读；已存 id 去重）。
@@ -126,7 +128,7 @@ function renderConversations() {
   }).filter(({ c }) => !q || (c.name || "").toLowerCase().includes(q) || c.id.includes(q))
     .sort((a, b) => b.ts - a.ts);
   if (!peers.length) {
-    box.innerHTML = '<div class="im-empty">还没有会话。去左侧「📇 实体目录」选一个实体开始聊。</div>';
+    box.innerHTML = '<div class="im-empty">还没有会话。去左侧「实体目录」选一个实体开始聊。</div>';
     return;
   }
   box.innerHTML = peers.map(({ c, last }) => {
@@ -144,18 +146,33 @@ function renderEntities() {
   const list = mergedEntities().filter((c) => !q || (c.name || "").toLowerCase().includes(q) || (c.id || "").includes(q));
   const groups = {};
   list.forEach((c) => { (groups[kindType(c.kind)] = groups[kindType(c.kind)] || []).push(c); });
-  const sections = ENTITY_TYPES.map((t) => renderGroup(t.icon, t.label, groups[t.key] || []));
-  if ((groups.other || []).length) sections.push(renderGroup("📦", "其他", groups.other));
+  const sections = ENTITY_TYPES.map((t) => renderGroup(t.key, t.icon, t.label, groups[t.key] || []));
+  if ((groups.other || []).length) sections.push(renderGroup("other", "file", "其他", groups.other));
   box.innerHTML = sections.join("");
   wireItems(box, showEntityDetail);
+  box.querySelectorAll(".ent-head").forEach((head) => head.addEventListener("click", () => {
+    const g = head.closest(".ent-group");
+    const key = g.dataset.type;
+    if (ENT_FOLDED.has(key)) ENT_FOLDED.delete(key); else ENT_FOLDED.add(key);
+    const folded = ENT_FOLDED.has(key);
+    g.classList.toggle("folded", folded);
+    head.setAttribute("aria-expanded", folded ? "false" : "true");
+  }));
 }
-function renderGroup(icon, label, items) {
+function renderGroup(key, icon, label, items) {
+  const q = (document.getElementById("entity-search-input").value || "").trim();
+  const folded = !q && ENT_FOLDED.has(key);
   const rows = items.length
     ? items.map((c) => itemHtml(c, escapeHtml(c.kind || "") + (c.added ? " · 手动" : ""), 0, DETAIL_ID)).join("")
     : '<div class="ent-empty">暂无</div>';
-  return `<div class="ent-group">
-    <div class="ent-head"><span class="ent-ico">${icon}</span><span class="ent-label">${label}</span><span class="ent-count">${items.length}</span></div>
-    ${rows}
+  return `<div class="ent-group${folded ? " folded" : ""}" data-type="${key}">
+    <button type="button" class="ent-head" aria-expanded="${folded ? "false" : "true"}">
+      <span class="ent-chev">${nmIcon("chevron")}</span>
+      <span class="ent-ico">${nmIcon(icon)}</span>
+      <span class="ent-label">${escapeHtml(label)}</span>
+      <span class="ent-count">${items.length}</span>
+    </button>
+    <div class="ent-body">${rows}</div>
   </div>`;
 }
 
@@ -175,7 +192,7 @@ function wireItems(box, handler) {
 function showEntityDetail(id) {
   const c = entityById(id) || { id, name: "", kind: "" };
   const title = c.name || shortId(id);
-  const ico = (typeof typeMeta === "function" ? (typeMeta(c.kind).icon || "📇") : "📇");
+  const ico = (typeof typeMeta === "function" ? (typeMeta(c.kind).icon || "contacts") : "contacts");
   if (window.Tabs) Tabs.open({ key: "e:" + id, kind: "entity", title, ico, render: () => renderEntityDetail(id) });
   else renderEntityDetail(id);
 }
@@ -189,13 +206,13 @@ function renderEntityDetail(id) {
   conv.innerHTML = `
     <div class="conv-head">
       <b>实体详情</b><span class="sp"></span>
-      <span class="conv-kind">${tm.icon} ${escapeHtml(tm.label)}</span>
+      <span class="conv-kind">${nmIcon(tm.icon)} ${escapeHtml(tm.label)}</span>
     </div>
     <div class="ent-detail">
-      <div class="ed-avatar" style="background:${avatarColor(id)}">${(window.Profile && Profile.isImg(c.avatar)) ? `<img src="${c.avatar}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:50%">` : escapeHtml((c.name || "?").slice(0, 1))}${(window.Profile && c.presence) ? Profile.presenceDot(c.presence, 15) : ""}</div>
+      <div class="ed-avatar" style="background:${avatarColor(id)}">${(window.Profile && Profile.isImg(c.avatar)) ? `<img src="${c.avatar}" alt="" style="width:100%;height:100%;object-fit:cover">` : escapeHtml((c.name || "?").slice(0, 1))}${(window.Profile && c.presence) ? Profile.presenceDot(c.presence, 12) : ""}</div>
       <div class="ed-name">${escapeHtml(c.name || "(未命名)")}</div>
       ${(window.Profile && c.presence) ? `<div style="margin:1px 0 4px;font-size:12px;color:${Profile.presenceColor(c.presence)}">● ${Profile.presenceLabel(c.presence)}</div>` : ""}
-      <div class="ed-type">${tm.icon} ${escapeHtml(tm.label)}${c.kind ? ` · <code>${escapeHtml(c.kind)}</code>` : ""}</div>
+      <div class="ed-type">${nmIcon(tm.icon)} ${escapeHtml(tm.label)}${c.kind ? ` · <code>${escapeHtml(c.kind)}</code>` : ""}</div>
       ${c.statusText ? `<div style="margin:2px 0 6px;color:var(--muted)">${escapeHtml(c.statusText)}</div>` : ""}
       ${c.bio ? `<div style="margin:4px 0;color:var(--text)">${escapeHtml(c.bio)}</div>` : ""}
       ${(c.links && c.links.length) ? `<div style="margin:4px 0;font-size:12px">${c.links.map((l) => `<code>${escapeHtml(l)}</code>`).join(" · ")}</div>` : ""}
@@ -225,7 +242,7 @@ function toggleEntityForm() {
   if (f.style.display !== "none" && f.innerHTML) { f.style.display = "none"; f.innerHTML = ""; return; }
   f.innerHTML = `
     <div class="ns-ftitle">添加实体</div>
-    <div class="ns-frow"><label>类型</label><select class="ef-type">${ENTITY_TYPES.map((t) => `<option value="${t.key}">${t.icon} ${t.label}</option>`).join("")}</select></div>
+    <div class="ns-frow"><label>类型</label><select class="ef-type">${ENTITY_TYPES.map((t) => `<option value="${t.key}">${t.label}</option>`).join("")}</select></div>
     <div class="ns-frow"><label>公钥（64 位 hex，可粘贴）</label><input class="ef-key" type="text" placeholder="粘贴或输入 64 位公钥 hex"></div>
     <div class="ns-frow"><label>名称（可选）</label><input class="ef-name" type="text" placeholder="备注名"></div>
     <div class="ns-factions"><button class="ns-btn ef-cancel">取消</button><button class="ns-btn ns-primary ef-save">添加</button></div>`;
@@ -264,7 +281,7 @@ function selectContact(id) {
   const c = entityById(id) || { id, name: "" };
   const title = c.name || shortId(id);
   const draw = () => { ACTIVE = id; DETAIL_ID = null; UNREAD[id] = 0; renderPanels(); renderConversation(); };
-  if (window.Tabs) Tabs.open({ key: "c:" + id, kind: "chat", title, ico: "💬", render: draw });
+  if (window.Tabs) Tabs.open({ key: "c:" + id, kind: "chat", title, ico: "chat", render: draw });
   else draw();
 }
 
@@ -273,11 +290,9 @@ function renderConversation() {
   const conv = document.getElementById("conv");
   if (!conv) return;
   if (!ACTIVE) {
-    conv.innerHTML = `<div class="im-center">
-      <div class="ico">💬</div>
-      <div class="txt">选择一个实体开始会话</div>
-      <div class="sub">在「📇 实体目录」里点实体看详情，再「发消息」；或在「消息」里继续会话</div>
-    </div>`;
+    // 实体详情等非会话标签自己占着主区，不要盖掉。没有任何标签时才是介绍页。
+    if (window.Tabs && Tabs.active()) return;
+    if (window.Tabs && Tabs.showEmpty) Tabs.showEmpty();
     return;
   }
   const msgs = CONVOS[ACTIVE] || [];
@@ -291,15 +306,15 @@ function renderConversation() {
   const headAv = hasImg
     ? `<span class="av av-sm" id="conv-hav" style="background:${avatarColor(ACTIVE)};padding:0;overflow:hidden"><img src="${c.avatar}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit"></span>`
     : (grp || chn)
-    ? `<span class="av av-sm" id="conv-hav" style="background:${avatarColor(ACTIVE)}">${grp ? "👥" : "📡"}</span>`
+    ? `<span class="av av-sm" id="conv-hav" style="background:${avatarColor(ACTIVE)}">${nmIcon(grp ? "groups" : "channels")}</span>`
     : `<span class="av av-sm" id="conv-hav" style="background:${avatarColor(ACTIVE)}">${escapeHtml((c.name || "?").slice(0, 1))}</span>`;
   const headMeta = grp
     ? `<span class="conv-kind">群 · <b id="conv-grp-count">${(grp.members || []).length}</b> 人</span>`
-    : chn ? `<span class="conv-kind">📡 频道${chn.topic ? " · " + escapeHtml(chn.topic) : ""}</span>`
+    : chn ? `<span class="conv-kind">${nmIcon("channels")} 频道${chn.topic ? " · " + escapeHtml(chn.topic) : ""}</span>`
     : (c.kind ? `<span class="conv-kind">${escapeHtml(c.kind)}</span>` : "");
   const logHtml = `<div class="log" id="conv-log">${msgs.map((m) => msgHtml(m, showSender)).join("") || '<div class="im-empty im-empty--center">暂无消息</div>'}</div>`;
   const ph = grp ? "群内发言，⏎ 发送…" : chn ? "发布到频道，⏎ 发送…" : "输入消息，⏎ 发送…";
-  const composerHtml = `<div class="im-composer"><input id="conv-input" type="text" placeholder="${ph}" autocomplete="off" /><button id="conv-send" class="send" title="发送 ⏎">↑</button></div>`;
+  const composerHtml = `<div class="im-composer"><input id="conv-input" type="text" placeholder="${ph}" autocomplete="off" /><button id="conv-send" class="send" title="发送 ⏎">${nmIcon("send")}</button></div>`;
   // 群聊：左会话 + 右成员栏。私聊 / 频道：单栏（频道=订阅流 + 发布框）。
   const body = grp
     ? `<div class="grp-body"><div class="grp-chat">${logHtml}${composerHtml}</div><div class="grp-members" id="grp-members"></div></div>`
@@ -311,8 +326,8 @@ function renderConversation() {
       <b>${escapeHtml(c.name || shortId(ACTIVE))}</b>
       ${headMeta}
       <span class="sp"></span>
-      ${chnOwner ? `<button class="conv-gear" id="conv-chn-edit" title="编辑频道信息">⚙</button>` : ""}
-      <code class="conv-id" id="conv-id" title="点击复制完整 id：${escapeHtml(ACTIVE)}">${escapeHtml(shortId(ACTIVE))} 📋</code>
+      ${chnOwner ? `<button class="conv-gear" id="conv-chn-edit" title="编辑频道信息">${nmIcon("settings")}</button>` : ""}
+      <code class="conv-id" id="conv-id" title="点击复制完整 id：${escapeHtml(ACTIVE)}">${escapeHtml(shortId(ACTIVE))}</code>
     </div>
     ${body}`;
   const idEl = document.getElementById("conv-id");

@@ -1,8 +1,8 @@
-﻿  .cmx-act img{width:30px;height:30px;border-radius:8px;object-fit:cover;display:block}
+﻿  .cmx-act img{width:32px;height:32px;border-radius:8px;object-fit:cover;display:block}
   .cmx-act:hover{background:var(--hover)}
   /* 用户菜单样式已删除（重构：收拢进设置中心「账户」分区，见 css/settings.css） */
   button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
-  ::-webkit-scrollbar{width:8px;height:8px} ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px}
+  ::-webkit-scrollbar{width:8px;height:8px} ::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--border2) 65%,var(--ink));border-radius:4px} ::-webkit-scrollbar-track{background:transparent}
 
   /* 原生标题条：贯穿窗口顶部一整行，与系统交通灯同一行（Overlay 标题栏）。
      整条可拖动（app-region: drag）；左侧留 78px 给交通灯；右侧放控件（控件本身设 no-drag）。
@@ -12,11 +12,11 @@
     background:var(--panel);border-bottom:1px solid var(--border);
     padding:0 10px 0 82px;-webkit-app-region:drag;user-select:none}
   body.no-native-decor .titlebar{padding-left:12px}
-  .titlebar .tb-title{font-size:12.5px;color:var(--muted);font-weight:600}
+  .titlebar .tb-title{font-size:12px;color:var(--muted);font-weight:600;letter-spacing:0.06em}
   .titlebar .sp{flex:1}
-  .tb-ctrls{display:flex;align-items:center;gap:3px;-webkit-app-region:no-drag}
-  .tb-btn{display:flex;align-items:center;gap:6px;height:26px;padding:0 8px;border-radius:7px;color:var(--ink2);
-    font-size:12.5px;background:transparent;border:1px solid transparent}
+  .tb-ctrls{display:flex;align-items:center;gap:2px;-webkit-app-region:no-drag}
+  .tb-btn{display:flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border-radius:var(--r-ctrl);color:var(--ink2);
+    font-size:12px;background:transparent;border:1px solid transparent}
   .tb-btn:hover{background:var(--hover);color:var(--ink);border-color:var(--border)}
   .tb-btn .ico{font-size:14px;line-height:1}
   .tb-update{color:var(--aqua)} .tb-update:hover{border-color:var(--aqua)}
@@ -24,7 +24,7 @@
   .win-ctrls{display:flex;align-items:center;-webkit-app-region:no-drag;margin-left:4px}
   .win-btn{display:flex;align-items:center;justify-content:center;width:44px;height:32px;color:var(--ink2);border-radius:0}
   .win-btn:hover{background:var(--hover);color:var(--ink)}
-  .win-btn.win-close:hover{background:#e34948;color:#fff}
+  .win-btn.win-close:hover{background:var(--red);color:#fff}
   .win-btn .ico{font-size:12px;line-height:1}
   /* 无系统边框缩放热区：仅 Windows/Linux 显示（initPlatformChrome 控制），macOS 用系统边框缩放 */
   .resize-handle{position:fixed;z-index:9999;display:none}
@@ -46,49 +46,50 @@
   /* 左右分栏拖动条：单条分隔线（取代 aside 右边框），中间有可拖动手柄 */
   .splitter{flex:0 0 6px;align-self:stretch;cursor:col-resize;position:relative;z-index:5;background:transparent}
   .splitter::before{content:"";position:absolute;top:0;bottom:0;left:50%;transform:translateX(-50%);width:1px;background:var(--border)}
-  .splitter::after{content:"";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:4px;height:34px;border-radius:3px;background:var(--border2);transition:background .15s,height .15s}
-  .splitter:hover::after,.splitter.dragging::after{background:var(--aqua);height:52px}
+  .splitter::after{content:"";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:4px;height:34px;border-radius:3px;background:var(--aqua);opacity:0;transition:opacity .15s,height .15s}
+  .splitter:hover::after,.splitter.dragging::after{opacity:1;height:52px}
   body.sidebar-collapsed .splitter{display:none}
   /* 三面板：同一时刻只显示一个 */
   .panel{display:none;flex-direction:column;flex:1;min-height:0}
   .panel.on{display:flex}
   /* IM / 插件 面板共用件 */
-  .im-search{padding:8px 4px}
-  .im-search input{width:100%;background:var(--surface);border:1px solid var(--border);border-radius:9px;
-    padding:8px 11px;color:var(--ink);font-size:13px;outline:none;font-family:inherit}
+  .im-search{position:relative;padding:8px 4px}
+  .im-search-ico{position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--muted);pointer-events:none}
+  .im-search input{width:100%;height:32px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-ctrl);
+    padding:0 11px 0 30px;color:var(--ink);font-size:13px;outline:none;font-family:inherit}
   .im-search input:focus{border-color:var(--aqua)}
   .im-list,
   /* Telegram 式会话行 */
-  .im-item{display:flex;gap:10px;padding:9px 8px;border-radius:9px;cursor:pointer}
+  .im-item{display:flex;gap:10px;padding:9px 8px;border-radius:var(--r-ctrl);cursor:pointer}
   .im-item:hover{background:var(--hover)}
   .im-item .av{width:40px;height:40px;border-radius:50%;flex:0 0 40px;display:flex;align-items:center;justify-content:center;
-    font-size:19px;color:#fff}
+    font-size:16px;color:#fff}
   .im-item .mid{flex:1;min-width:0}
-  .im-item .r1{display:flex;align-items:center;gap:6px} .im-item .nm{font-weight:600;font-size:13.5px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .im-item .r1{display:flex;align-items:center;gap:6px} .im-item .nm{font-weight:600;font-size:14px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .im-item .tm{font-size:11px;color:var(--muted);flex:0 0 auto}
   .im-item .r2{display:flex;align-items:center;gap:6px;margin-top:2px}
-  .im-item .msg{flex:1;font-size:12.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .im-item .unread{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--aqua);color:#fff;
+  .im-item .msg{flex:1;font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .im-item .unread{min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:var(--aqua);color:var(--on-accent);
     font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
   /* VSCode 式插件行 */
-  .plug-item{display:flex;gap:10px;padding:9px 8px;border-radius:9px;cursor:pointer}
+  .plug-item{display:flex;gap:10px;padding:9px 8px;border-radius:8px;cursor:pointer}
   .plug-item:hover{background:var(--hover)}
-  .plug-item .pic{width:38px;height:38px;border-radius:9px;flex:0 0 38px;display:flex;align-items:center;justify-content:center;
-    font-size:19px;color:#fff}
+  .plug-item .pic{width:40px;height:40px;border-radius:8px;flex:0 0 40px;display:flex;align-items:center;justify-content:center;
+    font-size:16px;color:#fff}
   .plug-item .pm{flex:1;min-width:0}
-  .plug-item .pn{font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .plug-item .pn{font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .plug-item .pd{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
   .plug-item .pmeta{font-size:11px;color:var(--muted);margin-top:3px}
-  .plug-item .pbtn{align-self:center;font-size:11.5px;padding:4px 10px;border-radius:7px;border:1px solid var(--border2);color:var(--ink2);flex:0 0 auto}
+  .plug-item .pbtn{align-self:center;font-size:12px;padding:4px 10px;border-radius:8px;border:1px solid var(--border2);color:var(--ink2);flex:0 0 auto}
   .plug-item .pbtn.installed{color:var(--aqua);border-color:var(--aqua)}
   .plug-item .pbtn:hover{background:var(--hover)}
   .brand{display:flex;align-items:center;gap:9px;height:var(--header-h);box-sizing:border-box;
     margin:0 -10px;padding:0 14px;border-bottom:1px solid var(--border)}
   .brand
   .brand .uname{font-weight:700;font-size:14px} .brand .v{color:var(--muted);font-size:11px;margin-left:auto;font-weight:400}
-  .newbtn{display:flex;align-items:center;gap:9px;width:100%;padding:11px 12px;border-radius:10px;
+  .newbtn{display:flex;align-items:center;gap:9px;width:100%;padding:11px 12px;border-radius:8px;
     background:var(--surface);border:1px solid var(--border2);font-weight:600;font-size:14px;margin:12px 0 8px}
-  .newbtn:hover{background:var(--hover)} .newbtn .plus{font-size:17px;color:var(--aqua)}
+  .newbtn:hover{background:var(--hover)} .newbtn .plus{font-size:16px;color:var(--aqua)}
   nav{display:flex;flex-direction:column;gap:1px}
   .navitem{display:flex;align-items:center;gap:11px;padding:9px 12px;border-radius:8px;color:var(--ink2);font-size:14px}
   .navitem:hover{background:var(--hover);color:var(--ink)} .navitem .i{width:17px;text-align:center;opacity:.85}
@@ -106,20 +107,20 @@
   .tl-head.section{color:var(--ink2);font-size:14px;padding:14px 12px 6px}
   .tl-head.section:hover{background:none;color:var(--ink2)}
   .tl-head.section .tl-chev{margin-left:4px}
-  .tl-ico{font-size:12.5px}
+  .tl-ico{font-size:12px}
   .tl-name{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .tl-more{opacity:0;color:var(--muted);font-size:14px;padding:0 3px;cursor:pointer}
   .tl-head:hover .tl-more{opacity:.85} .tl-more:hover{color:var(--ink);opacity:1}
-  .tl-chev{opacity:0;font-size:10px;color:var(--muted);transition:transform .15s}
+  .tl-chev{opacity:0;font-size:11px;color:var(--muted);transition:transform .15s}
   .tl-head:hover .tl-chev{opacity:.9}
   .tl-group.folded .tl-chev{opacity:.9;transform:rotate(-90deg)}
   .tl-group.folded .tl-items{display:none}
   .tl-items{display:flex;flex-direction:column}
   .tl-items .task{padding-left:26px}
   /* tl-wsmenu 定位/层级由 dropdown.css 的 .floating-menu 基类（fixed + z-index:1200）与 .tl-wsmenu 紧凑覆盖统一管理 */
-  .task{display:flex;align-items:center;gap:8px;padding:9px 12px;border-radius:8px;color:var(--ink2);font-size:13.5px}
+  .task{display:flex;align-items:center;gap:8px;padding:9px 12px;border-radius:8px;color:var(--ink2);font-size:14px}
   .task:hover{background:var(--hover);color:var(--ink)} .task.active{background:var(--surface);color:var(--ink)}
   .task .tt{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .task .tm{font-size:11px;color:var(--muted);flex:0 0 auto}
   .task .del{opacity:0;color:var(--muted);font-size:14px;padding:0 2px} .task:hover .del{opacity:.7} .task .del:hover{color:var(--red);opacity:1}
-  .empty-tasks{color:var(--muted);font-size:12.5px;padding:10px 12px;line-height:1.7}
+  .empty-tasks{color:var(--muted);font-size:12px;padding:10px 12px;line-height:1.7}

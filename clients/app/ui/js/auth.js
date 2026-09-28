@@ -15,6 +15,26 @@ function showLockView() {
   document.getElementById("main-view").style.display = "none";
   document.getElementById("login-view").style.display = "none";
   document.getElementById("lock-view").style.display = "flex";
+  seedLockSky();
+}
+
+function seedLockSky() {
+  const far = document.getElementById("lock-stars-far");
+  if (!far || far.childElementCount || typeof seedSpaceStars !== "function") return;
+  seedSpaceStars(far, 78, 1, 1.5);
+  seedSpaceStars(document.getElementById("lock-stars-mid"), 34, 1.5, 2.6);
+  seedSpaceStars(document.getElementById("lock-band-stars"), 110, 0.7, 1.7);
+  const host = document.getElementById("lock-shooters");
+  for (let i = 0; host && i < 5; i++) {
+    const el = document.createElement("span");
+    el.className = "space-shooter";
+    el.style.setProperty("--shoot-angle", (-32 + Math.random() * 18) + "deg");
+    el.style.top = (4 + Math.random() * 84) + "%";
+    el.style.left = "-6%";
+    el.style.animationDuration = (5.2 + Math.random() * 3.4) + "s";
+    el.style.animationDelay = (-Math.random() * 14) + "s";
+    host.appendChild(el);
+  }
 }
 
 function renderLock(mode) {

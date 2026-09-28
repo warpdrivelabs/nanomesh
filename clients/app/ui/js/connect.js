@@ -104,7 +104,7 @@ function renderServiceOptions(selId) {
   const cur = selId || sel.value;
   const list = NodeSvc.list();
   if (!list.length) {
-    sel.innerHTML = '<option value="" disabled selected>（还没有节点服务，点右侧「导入」或去「🖧 节点服务」面板新增）</option>';
+    sel.innerHTML = '<option value="" disabled selected>（还没有节点服务，点右侧「导入」或去「节点服务」面板新增）</option>';
     return;
   }
   sel.innerHTML = list.map((s) => `<option value="${s.id}">${escapeHtml(svcLabel(s))}</option>`).join("");
@@ -142,11 +142,11 @@ async function submitConnect(e) {
   const btn = document.getElementById("c-submit");
   errBox.textContent = "";
   if (!user) { errBox.textContent = "请先选择或「新建」一个用户身份"; return; }
-  if (!svc) { errBox.textContent = "请先「导入」或在「🖧 节点服务」面板新增一个节点服务"; return; }
+  if (!svc) { errBox.textContent = "请先「导入」或在「节点服务」面板新增一个节点服务"; return; }
   btn.disabled = true; btn.textContent = "连接中…";
   try { await connectAs(user, svc, Identity.nameOf(user)); }
   catch (err) { errBox.textContent = "连接失败：" + (err && err.message ? err.message : String(err)); }
-  finally { btn.disabled = false; btn.textContent = "连 接"; }
+  finally { btn.disabled = false; btn.textContent = "连接"; }
 }
 
 function shortNode(n) { if (!n) return ""; return n.length <= 24 ? n : n.slice(0, 12) + "…" + n.slice(-8); }

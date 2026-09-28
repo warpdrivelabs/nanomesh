@@ -5,12 +5,12 @@ function toggleSidebar() {
   document.body.classList.toggle("sidebar-collapsed");
   const on = document.body.classList.contains("sidebar-collapsed");
   const ico = document.getElementById("tb-side-ico");
-  if (ico) ico.textContent = on ? "⇥" : "⇤";
+  if (ico) ico.innerHTML = nmIcon(on ? "sidebar-open" : "sidebar-close");
 }
 function applyTheme(t) {
   document.documentElement.setAttribute("data-theme", t);
   const ico = document.getElementById("tb-theme-ico");
-  if (ico) ico.textContent = t === "light" ? "☾" : "☀";
+  if (ico) ico.innerHTML = nmIcon(t === "light" ? "moon" : "sun");
   try { localStorage.setItem("nm-theme", t); } catch (e) {}
 }
 function toggleTheme() {

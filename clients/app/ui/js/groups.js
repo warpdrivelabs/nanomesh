@@ -21,7 +21,7 @@
   function groupAv(g, size) {
     const s = size || 40;
     if (window.Profile && Profile.isImg(g.avatar)) return `<img src="${g.avatar}" alt="" style="width:${s}px;height:${s}px;border-radius:50%;object-fit:cover;display:block">`;
-    return `<span class="av" style="width:${s}px;height:${s}px;background:${avatarColor(g.id)}">👥</span>`;
+    return `<span class="av" style="width:${s}px;height:${s}px;background:${avatarColor(g.id)}">${nmIcon("groups")}</span>`;
   }
 
   async function renderGroupsList() {
@@ -32,7 +32,7 @@
   function paintGroupsList() {
     const box = document.getElementById("groups-list");
     if (!box) return;
-    if (!GROUPS.length) { box.innerHTML = '<div class="ns-empty">还没有群组。点上方「＋」新建。</div>'; return; }
+    if (!GROUPS.length) { box.innerHTML = '<div class="ns-empty">还没有群组。点上方加号新建。</div>'; return; }
     box.innerHTML = GROUPS.map((g) => `
       <div class="im-item" data-gid="${g.id}" title="${escapeHtml(g.id)}">
         ${groupAv(g)}
@@ -42,6 +42,21 @@
         </span>
       </div>`).join("");
     box.querySelectorAll(".im-item").forEach((el) => el.addEventListener("click", () => openDetail(el.dataset.gid)));
+    syncSelection();
+  }
+
+  function currentGroupId() {
+    const key = window.Tabs && Tabs.active ? Tabs.active() : "";
+    if (!key) return "";
+    if (key.startsWith("g:")) return key.slice(2);
+    if (key.startsWith("c:")) { const id = key.slice(2); return byId(id) ? id : ""; }
+    return "";
+  }
+  function syncSelection() {
+    const box = document.getElementById("groups-list");
+    if (!box) return;
+    const sel = currentGroupId();
+    box.querySelectorAll(".im-item").forEach((el) => el.classList.toggle("on", !!sel && el.dataset.gid === sel));
   }
 
   // ── 主区：群详情 + 管理 ──
@@ -49,7 +64,7 @@
   function openDetail(gid) {
     const g = byId(gid);
     const title = g ? (g.name || "群") : (gid || "").slice(0, 8) + "…";
-    if (window.Tabs) Tabs.open({ key: "g:" + gid, kind: "group", title, ico: "👥", render: () => renderGroupDetail(gid) });
+    if (window.Tabs) Tabs.open({ key: "g:" + gid, kind: "group", title, ico: "groups", render: () => renderGroupDetail(gid) });
     else renderGroupDetail(gid);
   }
   function renderGroupDetail(gid) {
@@ -75,7 +90,7 @@
       <div class="ent-detail">
         <div class="ed-avatar ed-avatar-slot" style="background:${avatarColor(gid)}">${groupAv(g, 72)}</div>
         <div class="ed-name">${escapeHtml(g.name || "(未命名群)")}</div>
-        <div class="ed-type">👥 群组 · ${(g.members || []).length} 人</div>
+        <div class="ed-type">${nmIcon("groups")} 群组 · ${(g.members || []).length} 人</div>
         ${g.topic ? `<div style="margin:4px 0;color:var(--text)">${escapeHtml(g.topic)}</div>` : ""}
         <div class="ed-actions">
           <button class="ns-btn ns-primary" id="grp-open-chat">进入群聊</button>
@@ -110,7 +125,7 @@
     try { await NM.inv(cmd, args); await refresh(); if (window.toast && okMsg) toast(okMsg); return true; }
     catch (e) { if (window.toast) toast("操作失败：" + (e && e.message ? e.message : e)); return false; }
   }
-  function backToList() { const conv = document.getElementById("conv"); if (conv) conv.innerHTML = '<div class="im-center"><div class="ico">👥</div><div class="txt">选择或新建一个群</div></div>'; renderGroupsList(); }
+  function backToList() { const conv = document.getElementById("conv"); if (conv) conv.innerHTML = '<div class="im-center"><div class="ico">' + nmIcon("groups") + '</div><div class="txt">选择或新建一个群</div></div>'; renderGroupsList(); }
 
   async function createGroup() {
     const name = await textPrompt("新建群", "群名称", "");
@@ -133,7 +148,7 @@
       onSave: async ({ name, bio, avatar }) => {
         await NM.inv("group_set_meta", { groupId: gid, name: name || (g.name || ""), topic: bio, avatar });
         await refresh();
-        if (window.Tabs) { Tabs.retitle("g:" + gid, name || g.name || "群", "👥"); Tabs.retitle("c:" + gid, name || g.name || "群", "👥"); }
+        if (window.Tabs) { Tabs.retitle("g:" + gid, name || g.name || "群", "groups"); Tabs.retitle("c:" + gid, name || g.name || "群", "groups"); }
         renderGroupsList();
         const conv = document.getElementById("conv");
         if (conv && conv.querySelector(".ed-avatar-slot")) renderGroupDetail(gid); // 详情页在看 → 重绘
@@ -169,7 +184,7 @@
     closeModal(document.getElementById("grp-modal"));
     const m = document.createElement("div");
     m.className = "sec-overlay on"; m.id = "grp-modal";
-    m.innerHTML = `<div class="sec-box"><div class="sec-head">${title}<button class="sec-x" id="grp-modal-x">✕</button></div><div class="sec-body"><div class="sec-sec">${bodyHtml}</div></div></div>`;
+    m.innerHTML = `<div class="sec-box"><div class="sec-head">${title}<button class="sec-x" id="grp-modal-x">${nmIcon("close")}</button></div><div class="sec-body"><div class="sec-sec">${bodyHtml}</div></div></div>`;
     document.body.appendChild(m);
     m.addEventListener("click", (e) => { if (e.target === m) closeModal(m); });
     m.querySelector("#grp-modal-x").addEventListener("click", () => closeModal(m));
@@ -202,17 +217,17 @@
     if (!g) { box.innerHTML = '<div class="ns-empty">群不存在或已解散</div>'; return; }
     const role = myRole(g), isOwner = role === "owner", isAdmin = isOwner || role === "admin";
     const top = [];
-    if (isAdmin) top.push(`<button class="ns-btn grp-p-add" title="添加成员">＋ 加人</button>`);
+    if (isAdmin) top.push(`<button class="ns-btn grp-p-add" title="添加成员">${nmIcon("plus")} 加人</button>`);
     if (isAdmin) top.push(`<button class="ns-btn grp-p-edit" title="编辑群信息">群信息</button>`);
     if (isOwner) top.push(`<button class="ns-btn grp-p-dissolve" title="解散群">解散</button>`);
     else top.push(`<button class="ns-btn grp-p-leave" title="退出群">退群</button>`);
     const rows = (g.members || []).map((id) => {
       const r = roleOf(g, id), acts = [];
-      if (id !== MYID) acts.push(`<button class="ns-btn grp-p-msg" data-id="${id}" title="私聊">💬</button>`);
+      if (id !== MYID) acts.push(`<button class="ns-btn grp-p-msg" data-id="${id}" title="私聊">${nmIcon("chat")}</button>`);
       if (isOwner && id !== g.owner) acts.push(r === "admin"
         ? `<button class="ns-btn grp-p-demote" data-id="${id}" title="取消管理员">取消管理</button>`
         : `<button class="ns-btn grp-p-promote" data-id="${id}" title="设为管理员">设管理</button>`);
-      if (isAdmin && id !== g.owner && id !== MYID && !(r === "admin" && !isOwner)) acts.push(`<button class="ns-btn grp-p-kick" data-id="${id}" title="移出群">✕</button>`);
+      if (isAdmin && id !== g.owner && id !== MYID && !(r === "admin" && !isOwner)) acts.push(`<button class="ns-btn grp-p-kick" data-id="${id}" title="移出群">${nmIcon("close")}</button>`);
       return `<div class="grp-m"><span class="av" style="background:${avatarColor(id)}">${escapeHtml(nameOf(id).slice(0, 1))}</span>
         <span class="grp-m-meta"><b>${escapeHtml(nameOf(id))}</b><small>${roleLabel(r)}</small></span>
         <span class="grp-m-acts">${acts.join("")}</span></div>`;
@@ -234,7 +249,7 @@
   }
   function refreshHeaderCount(gid) { const g = byId(gid); const el = document.getElementById("conv-grp-count"); if (el && g) el.textContent = (g.members || []).length; }
 
-  window.Groups = { refresh, byId, myRole, nameOf, roleLabel, list: () => GROUPS, renderMembersPanel };
+  window.Groups = { refresh, byId, myRole, nameOf, roleLabel, list: () => GROUPS, renderMembersPanel, syncSelection };
   window.renderGroupsList = renderGroupsList;
   window.openGroupDetail = openDetail;
 })();

@@ -6,11 +6,12 @@
     --ink:#f2f1ec; --ink2:#b8b7ae; --muted:#7d7c76; --border:#2a2a28; --border2:#333330;
     --blue:#3987e5; --aqua:#1fb182; --violet:#9085e9; --magenta:#d55181; --orange:#eb6834;
     --green:#22c55e; --green2:#4ade80; --red:#e5605f; --red-soft:#d08b85; --accent:#1fb182; --gold:#e5b95f;
-    --accent-soft:#17362b;
+    --accent-soft:#17362b; --on-accent:#05221a;
     /* 代码 / 终端 / diff 块专用（双主题各一份；业务 css 禁止硬编码色值，一律引令牌） */
     --bg2:#0d1420; --code-ink:#c8d3e0;
-    --header-h:36px;
+    --header-h:32px;
     --aside-w:270px;
+    --r-ctrl:8px; --r-float:12px; --r-bubble:14px;
   }
   /* 浅色主题（dataviz light 令牌）——由标题栏主题开关切换 html[data-theme] */
   html[data-theme="light"]{
@@ -18,7 +19,7 @@
     --bg:#f4f4f2; --panel:#ffffff; --panel2:#f7f7f5; --surface:#ffffff; --hover:#ececea;
     --ink:#0b0b0b; --ink2:#52514e; --muted:#898781; --border:#e4e3dc; --border2:#d6d5ce;
     --blue:#2a78d6; --aqua:#1baf7a; --violet:#4a3aa7; --magenta:#e87ba4; --orange:#eb6834;
-    --green:#0ca30c; --green2:#0ca30c; --red:#e34948; --red-soft:#a8564e; --accent:#1baf7a; --accent-soft:#e3f5ee; --gold:#a2761c;
+    --green:#0ca30c; --green2:#0ca30c; --red:#e34948; --red-soft:#a8564e; --accent:#1baf7a; --accent-soft:#e3f5ee; --on-accent:#05221a; --gold:#a2761c;
     /* 亮色下的代码块：浅底深字（令牌名与暗色一致，随主题切换） */
     --bg2:#efefea; --code-ink:#33332e;
   }
@@ -33,14 +34,14 @@
   .workspace{flex:1;display:flex;min-height:0}
 
   /* ── 最左活动栏（VSCode 式）：Agent / 即时通讯 / 插件管理 ── */
-  .activitybar{width:52px;flex:0 0 52px;background:var(--panel);border-right:1px solid var(--border);
-    display:flex;flex-direction:column;align-items:center;padding:8px 0;gap:4px}
-  .act{width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;cursor:pointer;
-    font-size:20px;color:var(--muted);position:relative;background:transparent}
+  .activitybar{width:48px;flex:0 0 48px;background:var(--panel);border-right:1px solid var(--border);
+    display:flex;flex-direction:column;align-items:center;padding:12px 0 16px;gap:4px}
+  .act{width:32px;height:32px;border-radius:var(--r-ctrl);display:flex;align-items:center;justify-content:center;cursor:pointer;
+    color:var(--muted);position:relative;background:transparent}
   .act:hover{background:var(--hover);color:var(--ink)}
-  .act.active{color:var(--aqua);background:var(--accent-soft);font-weight:600}
-  .act .badge{position:absolute;top:5px;right:5px;min-width:15px;height:15px;padding:0 3px;border-radius:8px;
-    background:var(--red);color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .act.active{color:var(--aqua);background:var(--accent-soft)}
+  .act .badge{position:absolute;top:2px;right:2px;min-width:16px;height:16px;padding:0 3px;border-radius:999px;
+    background:var(--red);color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center}
   .act-sp{flex:1}
   /* 活动栏底部 cmx 按钮（图片） */
   .cmx-act{padding:0;overflow:hidden}
@@ -65,3 +66,11 @@ html[data-theme="light"] select{
   }
   /* 全局交互元素统一小手 */
   button,[data-act],.act,.cat,.navitem,.tab,.mi,.newbtn,.selbtn,.cmx-act,.user-act,.tool-ic,.send,.model,.back,.win-btn,.tb-btn,.tab-overflow,.tab-dd-item,.pg-actbtn,.conn .tchip,.qa,.task,.um-danger,.um-head,.pl-item,.ddx,.quick button,.badge{cursor:pointer}
+  .nm-ico{width:16px;height:16px;display:block;flex:0 0 auto}
+  .ico,.tab-ico,.im-search-ico{display:inline-flex;align-items:center;justify-content:center;line-height:0}
+  .act .nm-ico{width:20px;height:20px}
+  .im-center .ico .nm-ico{width:22px;height:22px}
+  .ed-avatar .nm-ico{width:28px;height:28px}
+  :focus{outline:none}
+  :focus-visible{outline:2px solid var(--aqua);outline-offset:2px}
+  *{scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--border2) 65%,var(--ink)) transparent}
