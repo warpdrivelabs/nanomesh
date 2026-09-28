@@ -154,9 +154,10 @@ async function loadNodeUsers(s) {
       relayUrls: s.relayUrls || [], pkarrUrl: s.pkarrUrl || null, dnsOrigin: s.dnsOrigin || null,
     });
     if (!users.length) { box.innerHTML = '<div class="ns-empty">该节点暂无已注册用户</div>'; return; }
+    if (window.Profile) await new Promise((r) => Profile.resolveList(users, r));
     box.innerHTML = users.map((u) => `
       <div class="nsu-item">
-        <span class="av" style="background:${avatarColor(u.id)}">${escapeHtml((u.name || "?").slice(0, 1))}</span>
+        ${window.Profile ? Profile.faceHtml(u.id, u.name || "?", 32, "", u.avatar) : `<span class="av" style="background:${avatarColor(u.id)}">${escapeHtml((u.name || "?").slice(0, 1))}</span>`}
         <span class="nsu-meta"><b>${escapeHtml(u.name || shortId(u.id))}</b><small>${escapeHtml(u.kind || "")} · ${escapeHtml(shortNode(u.id))}</small></span>
         <button class="ns-btn nsu-add" data-id="${u.id}" data-kind="${escapeHtml(u.kind || "")}" data-name="${escapeHtml(u.name || "")}">添加</button>
       </div>`).join("");

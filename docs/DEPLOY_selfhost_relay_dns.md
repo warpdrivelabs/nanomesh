@@ -416,6 +416,19 @@ id = "<对方 NM_NODE_ID（64 位 hex）>"
 urls = ["https://relay1.example.com", "https://relay2.example.com"]
 ```
 
+### 8.4 桌面客户端（NANO MESH）
+
+连接页或「节点服务」里新建一条服务，连接模式选 **selfhost · 自建 relay + pkarr**，三项与 `nmd.toml` 一一对应：
+
+| 表单字段 | 填什么 | 对应 nmd |
+|---|---|---|
+| 节点公钥 / 地址 | 要连的那台 `nmd` 的 64 位公钥 hex | `NM_NODE_ID` |
+| 中继 relay（逗号分隔） | `https://relay.example.com` | `[relay] url` / `urls` |
+| pkarr 端点 | `https://dns.example.com/pkarr` | `[dns] url` |
+| DNS origin（可选） | 只在启用路径 B 时填 `dns.example.com.` | `[dns] origin` |
+
+客户端与 `nmd` 必须指向**同一套**中继和 pkarr。pkarr 留空时连接会被拒绝；中继留空时只能直连，过不了 NAT。
+
 ---
 
 <a id="9"></a>

@@ -36,6 +36,7 @@ function mergedEntities() {
   return Object.values(map);
 }
 function entityById(id) { return mergedEntities().find((c) => c.id === id); }
+window.entityById = entityById;
 // 供 groups.js 等解析显示名：本人→"我"；目录/本地有名→名；否则短 id。
 window.entityName = function (id) { if (id === MY_ID) return "我"; const c = entityById(id); return (c && c.name) ? c.name : shortId(id); };
 // 打开某群的群聊（作为一个 tab）。
@@ -177,8 +178,10 @@ function renderGroup(key, icon, label, items) {
 }
 
 function itemHtml(c, sub, unread, sel) {
+  const dot = (window.Profile && c.presence) ? Profile.presenceDot(c.presence, 11) : "";
+  const face = window.Profile ? Profile.faceHtml(c.id, c.name || "?", 40, dot, c.avatar) : `<span class="av" style="background:${avatarColor(c.id)}">${escapeHtml((c.name || "?").slice(0, 1))}</span>`;
   return `<div class="im-item ${c.id === sel ? "on" : ""}" data-id="${c.id}" title="${escapeHtml(c.id)}">
-    <span class="av" style="background:${avatarColor(c.id)}">${(window.Profile && Profile.isImg(c.avatar)) ? `<img src="${c.avatar}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:50%">` : escapeHtml((c.name || "?").slice(0, 1))}${(window.Profile && c.presence) ? Profile.presenceDot(c.presence, 11) : ""}</span>
+    ${face}
     <span class="mid">
       <span class="r1"><span class="nm">${escapeHtml(c.name || shortId(c.id))}</span></span>
       <span class="r2"><span class="msg">${sub || ""}</span>${unread ? `<span class="unread">${unread}</span>` : ""}</span>
@@ -209,7 +212,7 @@ function renderEntityDetail(id) {
       <span class="conv-kind">${nmIcon(tm.icon)} ${escapeHtml(tm.label)}</span>
     </div>
     <div class="ent-detail">
-      <div class="ed-avatar" style="background:${avatarColor(id)}">${(window.Profile && Profile.isImg(c.avatar)) ? `<img src="${c.avatar}" alt="" style="width:100%;height:100%;object-fit:cover">` : escapeHtml((c.name || "?").slice(0, 1))}${(window.Profile && c.presence) ? Profile.presenceDot(c.presence, 12) : ""}</div>
+      <div class="ed-avatar" style="background:${avatarColor(id)}">${(window.Profile && Profile.displayAvatar(id, c.avatar)) ? `<img src="${Profile.displayAvatar(id, c.avatar)}" alt="" style="width:100%;height:100%;object-fit:cover">` : escapeHtml((c.name || "?").slice(0, 1))}${(window.Profile && c.presence) ? Profile.presenceDot(c.presence, 12) : ""}</div>
       <div class="ed-name">${escapeHtml(c.name || "(未命名)")}</div>
       ${(window.Profile && c.presence) ? `<div style="margin:1px 0 4px;font-size:12px;color:${Profile.presenceColor(c.presence)}">● ${Profile.presenceLabel(c.presence)}</div>` : ""}
       <div class="ed-type">${nmIcon(tm.icon)} ${escapeHtml(tm.label)}${c.kind ? ` · <code>${escapeHtml(c.kind)}</code>` : ""}</div>
@@ -307,7 +310,7 @@ function renderConversation() {
     ? `<span class="av av-sm" id="conv-hav" style="background:${avatarColor(ACTIVE)};padding:0;overflow:hidden"><img src="${c.avatar}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit"></span>`
     : (grp || chn)
     ? `<span class="av av-sm" id="conv-hav" style="background:${avatarColor(ACTIVE)}">${nmIcon(grp ? "groups" : "channels")}</span>`
-    : `<span class="av av-sm" id="conv-hav" style="background:${avatarColor(ACTIVE)}">${escapeHtml((c.name || "?").slice(0, 1))}</span>`;
+    : (window.Profile ? Profile.faceHtml(ACTIVE, c.name || "?", 26, "", c.avatar, "conv-hav") : `<span class="av av-sm" id="conv-hav" style="background:${avatarColor(ACTIVE)}">${escapeHtml((c.name || "?").slice(0, 1))}</span>`);
   const headMeta = grp
     ? `<span class="conv-kind">群 · <b id="conv-grp-count">${(grp.members || []).length}</b> 人</span>`
     : chn ? `<span class="conv-kind">${nmIcon("channels")} 频道${chn.topic ? " · " + escapeHtml(chn.topic) : ""}</span>`
@@ -355,13 +358,27 @@ function renderConversation() {
   scrollLog();
 }
 
+function msgClock(ts) {
+  const d = new Date(ts || 0);
+  if (!ts || Number.isNaN(d.getTime())) return "";
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
 function msgHtml(m, showSender) {
   const mine = m.from === MY_ID;
   const who = mine ? "我" : (window.entityName ? entityName(m.from) : (m.from || "").slice(0, 6) + "…");
-  return `<div class="im-msg ${mine ? "me" : ""}">
-    ${(showSender && !mine) ? `<span class="im-sender">${escapeHtml(who)}</span>` : ""}
-    <span class="im-bubble">${escapeHtml(m.body)}</span>
-    <span class="im-from">${escapeHtml(who)}</span>
+  const time = msgClock(m.ts);
+  const sender = (showSender && !mine)
+    ? `<span class="im-sender">${escapeHtml(who)}${time ? `<span class="im-time">${time}</span>` : ""}</span>`
+    : "";
+  const stamp = (!sender && time) ? `<span class="im-time">${time}</span>` : "";
+  const face = window.Profile ? Profile.faceHtml(m.from, who, 28) : "";
+  return `<div class="im-msg ${mine ? "me" : ""} with-av">
+    ${face}
+    <span class="im-stack">
+      ${sender}
+      <span class="im-bubble">${escapeHtml(m.body)}</span>
+      ${stamp}
+    </span>
   </div>`;
 }
 
@@ -400,7 +417,7 @@ function pushMsg(peer, m) {
   (CONVOS[peer] = CONVOS[peer] || []).push(m);
   if (peer === ACTIVE) {
     const log = document.getElementById("conv-log");
-    if (log) { if (log.querySelector(".im-empty")) log.innerHTML = ""; log.insertAdjacentHTML("beforeend", msgHtml(m)); scrollLog(); }
+    if (log) { if (log.querySelector(".im-empty")) log.innerHTML = ""; log.insertAdjacentHTML("beforeend", msgHtml(m, !!(m.group || m.channel))); scrollLog(); }
   }
   renderPanels();
 }

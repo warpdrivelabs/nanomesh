@@ -77,10 +77,10 @@
       const r = roleOf(g, id);
       const acts = [];
       // 踢人：owner/admin，不能踢 owner；admin 不能踢 admin。
-      if (isAdmin && id !== g.owner && id !== MYID && !((r === "admin") && !isOwner)) acts.push(`<button class="ns-btn grp-kick" data-id="${id}">移除</button>`);
+      if (isAdmin && id !== g.owner && id !== MYID && !((r === "admin") && !isOwner)) acts.push(`<button class="ns-btn grp-danger grp-kick" data-id="${id}">移除</button>`);
       if (isOwner && id !== g.owner) acts.push(r === "admin" ? `<button class="ns-btn grp-demote" data-id="${id}">取消管理</button>` : `<button class="ns-btn grp-promote" data-id="${id}">设为管理</button>`);
       return `<div class="nsu-item">
-        <span class="av" style="background:${avatarColor(id)}">${escapeHtml(nameOf(id).slice(0, 1))}</span>
+        ${window.Profile ? Profile.faceHtml(id, nameOf(id), 32) : `<span class="av" style="background:${avatarColor(id)}">${escapeHtml(nameOf(id).slice(0, 1))}</span>`}
         <span class="nsu-meta"><b>${escapeHtml(nameOf(id))}</b><small>${roleLabel(r)} · ${escapeHtml(shortNode(id))}</small></span>
         ${acts.join("")}
       </div>`;
@@ -96,7 +96,7 @@
           <button class="ns-btn ns-primary" id="grp-open-chat">进入群聊</button>
           ${isAdmin ? `<button class="ns-btn" id="grp-edit">编辑群信息</button>` : ""}
           ${isAdmin ? `<button class="ns-btn" id="grp-add">添加成员</button>` : ""}
-          ${isOwner ? `<button class="ns-btn" id="grp-dissolve">解散群</button>` : `<button class="ns-btn" id="grp-leave">退出群</button>`}
+          ${isOwner ? `<button class="ns-btn grp-danger" id="grp-dissolve">解散群</button>` : `<button class="ns-btn grp-danger" id="grp-leave">退出群</button>`}
         </div>
         <div class="ed-users">
           <div class="ed-users-head"><span>成员（${(g.members || []).length}）</span></div>
@@ -119,6 +119,8 @@
     conv.querySelectorAll(".grp-kick").forEach((b) => b.addEventListener("click", async () => { await act("group_kick", { groupId: gid, target: b.dataset.id }, "已移除"); openDetail(gid); }));
     conv.querySelectorAll(".grp-promote").forEach((b) => b.addEventListener("click", async () => { await act("group_promote", { groupId: gid, target: b.dataset.id }, "已设为管理员"); openDetail(gid); }));
     conv.querySelectorAll(".grp-demote").forEach((b) => b.addEventListener("click", async () => { await act("group_demote", { groupId: gid, target: b.dataset.id }, "已取消管理员"); openDetail(gid); }));
+    const pending = (g.members || []).map((id) => (typeof entityById === "function" ? entityById(id) : null)).filter((c) => c && window.Profile && Profile.isRef(c.avatar));
+    if (pending.length) Profile.resolveList(pending, () => { if (document.querySelector("#conv .ed-avatar-slot")) renderGroupDetail(gid); });
   }
 
   async function act(cmd, args, okMsg) {
@@ -165,7 +167,8 @@
     try { contacts = (await NM.inv("directory_query", { kindPrefix: "" })) || []; } catch (_) {}
     const inGroup = new Set((g.members || []));
     const pick = contacts.filter((c) => !inGroup.has(c.id));
-    const rows = pick.map((c) => `<div class="nsu-item"><span class="av" style="background:${avatarColor(c.id)}">${escapeHtml((c.name || "?").slice(0, 1))}</span><span class="nsu-meta"><b>${escapeHtml(c.name || shortNode(c.id))}</b><small>${escapeHtml(shortNode(c.id))}</small></span><button class="ns-btn grp-addone" data-id="${c.id}">添加</button></div>`).join("") || '<div class="ns-empty">目录里没有可添加的联系人</div>';
+    if (window.Profile) await new Promise((r) => Profile.resolveList(pick, r));
+    const rows = pick.map((c) => `<div class="nsu-item">${window.Profile ? Profile.faceHtml(c.id, c.name || "?", 32, "", c.avatar) : `<span class="av" style="background:${avatarColor(c.id)}">${escapeHtml((c.name || "?").slice(0, 1))}</span>`}<span class="nsu-meta"><b>${escapeHtml(c.name || shortNode(c.id))}</b><small>${escapeHtml(shortNode(c.id))}</small></span><button class="ns-btn grp-addone" data-id="${c.id}">添加</button></div>`).join("") || '<div class="ns-empty">目录里没有可添加的联系人</div>';
     const m = modal(`添加成员到「${escapeHtml(g.name || "群")}」`, `
       <div class="nsu-list" style="max-height:46vh;overflow:auto">${rows}</div>
       <div class="sec-row" style="margin-top:8px"><label>或公钥</label><input id="grp-add-pk" class="sec-input" placeholder="粘贴 64 位公钥 hex"></div>
@@ -219,17 +222,17 @@
     const top = [];
     if (isAdmin) top.push(`<button class="ns-btn grp-p-add" title="添加成员">${nmIcon("plus")} 加人</button>`);
     if (isAdmin) top.push(`<button class="ns-btn grp-p-edit" title="编辑群信息">群信息</button>`);
-    if (isOwner) top.push(`<button class="ns-btn grp-p-dissolve" title="解散群">解散</button>`);
-    else top.push(`<button class="ns-btn grp-p-leave" title="退出群">退群</button>`);
+    if (isOwner) top.push(`<button class="ns-btn grp-danger grp-p-dissolve" title="解散群">解散</button>`);
+    else top.push(`<button class="ns-btn grp-danger grp-p-leave" title="退出群">退群</button>`);
     const rows = (g.members || []).map((id) => {
       const r = roleOf(g, id), acts = [];
       if (id !== MYID) acts.push(`<button class="ns-btn grp-p-msg" data-id="${id}" title="私聊">${nmIcon("chat")}</button>`);
       if (isOwner && id !== g.owner) acts.push(r === "admin"
         ? `<button class="ns-btn grp-p-demote" data-id="${id}" title="取消管理员">取消管理</button>`
         : `<button class="ns-btn grp-p-promote" data-id="${id}" title="设为管理员">设管理</button>`);
-      if (isAdmin && id !== g.owner && id !== MYID && !(r === "admin" && !isOwner)) acts.push(`<button class="ns-btn grp-p-kick" data-id="${id}" title="移出群">${nmIcon("close")}</button>`);
-      return `<div class="grp-m"><span class="av" style="background:${avatarColor(id)}">${escapeHtml(nameOf(id).slice(0, 1))}</span>
-        <span class="grp-m-meta"><b>${escapeHtml(nameOf(id))}</b><small>${roleLabel(r)}</small></span>
+      if (isAdmin && id !== g.owner && id !== MYID && !(r === "admin" && !isOwner)) acts.push(`<button class="ns-btn grp-danger grp-p-kick" data-id="${id}" title="移出群">${nmIcon("close")}</button>`);
+      return `<div class="grp-m">${window.Profile ? Profile.faceHtml(id, nameOf(id), 32) : `<span class="av" style="background:${avatarColor(id)}">${escapeHtml(nameOf(id).slice(0, 1))}</span>`}
+        <span class="grp-m-meta"><b>${escapeHtml(nameOf(id))}</b><small class="grp-role grp-role--${r || "member"}">${roleLabel(r)}</small></span>
         <span class="grp-m-acts">${acts.join("")}</span></div>`;
     }).join("");
     box.innerHTML = `
@@ -246,6 +249,8 @@
     each(".grp-p-kick", async (id) => { await act("group_kick", { groupId: gid, target: id }, "已移除"); redraw(); refreshHeaderCount(gid); });
     each(".grp-p-promote", async (id) => { await act("group_promote", { groupId: gid, target: id }, "已设为管理员"); redraw(); });
     each(".grp-p-demote", async (id) => { await act("group_demote", { groupId: gid, target: id }, "已取消管理员"); redraw(); });
+    const pending = (g.members || []).map((id) => (typeof entityById === "function" ? entityById(id) : null)).filter((c) => c && window.Profile && Profile.isRef(c.avatar));
+    if (pending.length) Profile.resolveList(pending, () => { if (box.isConnected) renderMembersPanel(gid, box); });
   }
   function refreshHeaderCount(gid) { const g = byId(gid); const el = document.getElementById("conv-grp-count"); if (el && g) el.textContent = (g.members || []).length; }
 

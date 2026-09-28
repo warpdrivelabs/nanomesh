@@ -15,6 +15,34 @@
   function isImg(a) { return typeof a === "string" && /^data:image\//.test(a); }
   function isRef(a) { return typeof a === "string" && /^b3:[0-9a-fA-F]{64}$/.test(a); }
 
+  // 某个用户当前能直接显示的头像：本人优先本地原图，其次目录里已解析的 data:URI。
+  function displayAvatar(id, hint) {
+    if (id && window.Identity && Identity.current && id === Identity.current()) {
+      const own = ownAvatar(id);
+      if (isImg(own)) return own;
+    }
+    if (isImg(hint)) return hint;
+    if (id && typeof window.entityById === "function") {
+      const c = entityById(id);
+      if (c && isImg(c.avatar)) return c.avatar;
+    }
+    return "";
+  }
+
+  // 用户头像圆：有图就显示图，否则首字。extra 可塞在线状态点。
+  function faceHtml(id, name, size, extra, hint, domId) {
+    const s = size || 32;
+    const avatar = displayAvatar(id, hint);
+    const bg = (typeof avatarColor === "function" && id) ? avatarColor(id) : "#3987e5";
+    const ch = (typeof escapeHtml === "function" ? escapeHtml : (x) => x)(String(name || "?").slice(0, 1) || "?");
+    const idAttr = domId ? ` id="${domId}"` : "";
+    const cls = s <= 28 ? "av av-sm" : "av";
+    if (isImg(avatar)) {
+      return `<span class="${cls} av-img"${idAttr} style="width:${s}px;height:${s}px;flex:0 0 ${s}px;padding:0;overflow:hidden;background:${bg}"><img src="${avatar}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:50%;display:block">${extra || ""}</span>`;
+    }
+    return `<span class="${cls}"${idAttr} style="width:${s}px;height:${s}px;flex:0 0 ${s}px;background:${bg}">${ch}${extra || ""}</span>`;
+  }
+
   // 头像渲染：传入的应是可直接用的 data:URI（已解析）；否则回退首字母底色块。
   function avatarHtml(avatar, fallbackChar, size, bg) {
     const s = size || 40;
@@ -254,7 +282,7 @@
     m.classList.add("on");
   }
 
-  window.Profile = { get, save, publish, open, statusLabel, avatarHtml, isImg, isRef, resolveAvatar, resolveList, ownAvatar, presenceColor, presenceLabel, presenceDot, applyPresence, metaEditor };
+  window.Profile = { get, save, publish, open, statusLabel, avatarHtml, faceHtml, displayAvatar, isImg, isRef, resolveAvatar, resolveList, ownAvatar, presenceColor, presenceLabel, presenceDot, applyPresence, metaEditor };
   window.openProfileModal = open;
 
   // ── P2 在线状态 ──
