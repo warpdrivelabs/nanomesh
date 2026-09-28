@@ -109,6 +109,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/kick", post(|s: State<AppState>, h: HeaderMap, b: Json<serde_json::Value>| proxy_post(s, h, "/kick", b)))
         .route("/api/add-peer", post(|s: State<AppState>, h: HeaderMap, b: Json<serde_json::Value>| proxy_post(s, h, "/add-peer", b)))
         .route("/api/remove-peer", post(|s: State<AppState>, h: HeaderMap, b: Json<serde_json::Value>| proxy_post(s, h, "/remove-peer", b)))
+        .route("/api/names/domains", get(|s: State<AppState>, h: HeaderMap| proxy_get(s, h, "/names/domains")))
+        .route("/api/names/list", get(|s: State<AppState>, h: HeaderMap| proxy_get(s, h, "/names/list")))
+        .route("/api/names/domain-add", post(|s: State<AppState>, h: HeaderMap, b: Json<serde_json::Value>| proxy_post(s, h, "/names/domain-add", b)))
+        .route("/api/names/set", post(|s: State<AppState>, h: HeaderMap, b: Json<serde_json::Value>| proxy_post(s, h, "/names/set", b)))
+        .route("/api/names/del", post(|s: State<AppState>, h: HeaderMap, b: Json<serde_json::Value>| proxy_post(s, h, "/names/del", b)))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;

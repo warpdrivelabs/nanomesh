@@ -34,6 +34,7 @@ const shortId = (h) => (h && h.length > 16 ? `${h.slice(0, 10)}…${h.slice(-4)}
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
 const ICONS = {
+  names: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg>',
   overview: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>',
   connections: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M9 7 4 12l5 5M15 7l5 5-5 5"/></svg>',
   users: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="3.2"/><path d="M5 20a7 7 0 0 1 14 0" stroke-linecap="round"/></svg>',
@@ -49,6 +50,7 @@ const TABS = [
   { k: "connections", label: "连接监控" },
   { k: "users", label: "用户管理" },
   { k: "peers", label: "对等节点" },
+  { k: "names", label: "域名管理" },
   { k: "storage", label: "存储管理" },
   { k: "traffic", label: "流量监控" },
   { k: "system", label: "系统资源" },
@@ -56,7 +58,7 @@ const TABS = [
   { k: "password", label: "修改密码" },
 ];
 // 无需轮询的静态面板（表单/稳定信息）——渲染一次即可，避免定时重渲染打断输入。
-const STATIC_TABS = new Set(["identity", "password"]);
+const STATIC_TABS = new Set(["identity", "password", "names"]);
 
 /* ---------------- 根：鉴权路由 ---------------- */
 class AdminApp extends HTMLElement {
@@ -185,6 +187,16 @@ class AdminShell extends HTMLElement {
     if (this.tab === "password") {
       meta.textContent = "";
       renderPassword(host);
+      return;
+    }
+    if (this.tab === "names") {
+      try {
+        const [dom, names] = await Promise.all([api("/api/names/domains"), api("/api/names/list")]);
+        meta.textContent = "刷新于 " + new Date().toLocaleTimeString();
+        renderNames(host, dom, names, () => this.refresh());
+      } catch (ex) {
+        host.innerHTML = `<div class="err">${esc(ex.message)}</div>`;
+      }
       return;
     }
     try {
@@ -415,6 +427,80 @@ function renderPassword(host) {
       form.reset(); ok.hidden = false;
     } catch (ex) { err.textContent = ex.message; err.hidden = false; }
   });
+}
+
+/* ---------------- 域名管理面板 ---------------- */
+function renderNames(host, dom, names, refresh) {
+  const domains = (dom && dom.domains) || [];
+  const list = (names && names.names) || [];
+  const domChips = domains.length
+    ? domains.map((d) => `<span style="display:inline-block;padding:4px 10px;margin:3px;border-radius:14px;background:var(--accent-soft,#17362b);color:var(--aqua,#1fb182);font-family:monospace;font-size:12.5px">${esc(d)}</span>`).join("")
+    : '<span class="muted">本节点暂无域名。在下方申请一个（形如 example.nm）。</span>';
+  const domOpts = domains.map((d) => `<option value="${esc(d)}">${esc(d)}</option>`).join("");
+  const rows = list.length
+    ? list.map((r) => `<tr>
+        <td><b>${esc(r.local_part)}</b></td>
+        <td>${esc(r.domain)}</td>
+        <td style="font-family:monospace;font-size:11.5px;word-break:break-all">${esc(r.pubkey)}</td>
+        <td><button class="btn btn--ghost nm-del" data-d="${esc(r.domain)}" data-l="${esc(r.local_part)}">删除</button></td>
+      </tr>`).join("")
+    : '<tr><td colspan="4" class="muted center">该节点尚未登记任何命名</td></tr>';
+  host.innerHTML = `
+    <div class="card">
+      <div class="card__title">本节点域名（此去中心网格中申请/持有）</div>
+      <div>${domChips}</div>
+      <form class="domform" style="margin-top:12px;display:flex;gap:8px">
+        <input name="domain" placeholder="申请域名，如 example.nm" style="flex:1" autocomplete="off">
+        <button class="btn btn--primary" type="submit">申请域名</button>
+      </form>
+      <div class="err" hidden style="margin-top:8px"></div>
+      <div class="muted" style="margin-top:6px">N1 为 TOFU 先到先得；全局唯一与冲突消解见 N2（见证注册表）。一个节点可持有多个域名。</div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="card__title">域内命名登记（local-part → 公钥）</div>
+      <form class="nameform" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+        <select name="domain" ${domains.length ? "" : "disabled"}>${domOpts}</select>
+        <input name="local_part" placeholder="local-part（@ 前）" autocomplete="off">
+        <input name="pubkey" placeholder="公钥 64 位 hex" style="flex:1;min-width:300px" autocomplete="off">
+        <button class="btn btn--primary" type="submit" ${domains.length ? "" : "disabled"}>登记 / 更新</button>
+      </form>
+      <div class="err2" hidden style="margin-bottom:8px"></div>
+      <table class="tbl"><thead><tr><th>local-part</th><th>域名</th><th>公钥</th><th></th></tr></thead>
+      <tbody>${rows}</tbody></table>
+      <div class="muted" style="margin-top:8px">一个公钥可登记多个名字；一个名字只指向一个公钥。登记/删除即经联邦 gossip 广播，各节点收敛。</div>
+    </div>`;
+  const err = host.querySelector(".err"), err2 = host.querySelector(".err2");
+  host.querySelector(".domform").addEventListener("submit", async (e) => {
+    e.preventDefault(); err.hidden = true;
+    const domain = e.target.domain.value.trim();
+    if (!domain) return;
+    try {
+      const r = await api("/api/names/domain-add", { method: "POST", body: { domain } });
+      if (r && r.ok === false) throw new Error(r.error || "申请失败");
+      refresh();
+    } catch (ex) { err.textContent = ex.message; err.hidden = false; }
+  });
+  host.querySelector(".nameform").addEventListener("submit", async (e) => {
+    e.preventDefault(); err2.hidden = true;
+    const domain = e.target.domain.value;
+    const local_part = e.target.local_part.value.trim();
+    const pubkey = e.target.pubkey.value.trim();
+    if (!local_part || !pubkey) { err2.textContent = "请填写 local-part 与公钥"; err2.hidden = false; return; }
+    try {
+      const r = await api("/api/names/set", { method: "POST", body: { domain, local_part, pubkey } });
+      if (r && r.ok === false) throw new Error(r.error || "登记失败");
+      e.target.local_part.value = ""; e.target.pubkey.value = "";
+      refresh();
+    } catch (ex) { err2.textContent = ex.message; err2.hidden = false; }
+  });
+  host.querySelectorAll(".nm-del").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm(`删除命名 ${b.dataset.l}@${b.dataset.d}？此操作将广播给联邦。`)) return;
+    try {
+      const r = await api("/api/names/del", { method: "POST", body: { domain: b.dataset.d, local_part: b.dataset.l } });
+      if (r && r.ok === false) throw new Error(r.error || "删除失败");
+      refresh();
+    } catch (ex) { err2.textContent = ex.message; err2.hidden = false; }
+  }));
 }
 
 function drawChart(cv) {

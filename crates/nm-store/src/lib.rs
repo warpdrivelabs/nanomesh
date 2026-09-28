@@ -21,6 +21,8 @@ const PEERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("peers");
 const BLOBS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("blobs");
 // 命名记录（N1）：key = 完整名 "local@domain" 的字节，value = NameRecord 编码。
 const NAMES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("names");
+// 本节点拥有的域名（N1，TOFU）：key = 域名字节，value = 占位（申请时间戳字符串）。
+const DOMAINS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("domains");
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -55,6 +57,7 @@ impl RedbStore {
             wtx.open_table(PEERS).map_err(db_err)?;
             wtx.open_table(BLOBS).map_err(db_err)?;
             wtx.open_table(NAMES).map_err(db_err)?;
+            wtx.open_table(DOMAINS).map_err(db_err)?;
         }
         wtx.commit().map_err(db_err)?;
         Ok(Self { db })
@@ -242,6 +245,44 @@ impl RedbStore {
         for item in t.iter().map_err(db_err)? {
             let (_k, v) = item.map_err(db_err)?;
             out.push(NameRecord::decode(v.value()).map_err(|e| StoreError::Decode(e.to_string()))?);
+        }
+        Ok(out)
+    }
+    pub fn del_name(&self, full: &str) -> Result<()> {
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        {
+            let mut t = wtx.open_table(NAMES).map_err(db_err)?;
+            t.remove(full.as_bytes()).map_err(db_err)?;
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+    // 本节点拥有的域名（N1）。
+    pub fn put_domain(&self, domain: &str) -> Result<()> {
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        {
+            let mut t = wtx.open_table(DOMAINS).map_err(db_err)?;
+            t.insert(domain.as_bytes(), b"1".as_slice()).map_err(db_err)?;
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+    pub fn del_domain(&self, domain: &str) -> Result<()> {
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        {
+            let mut t = wtx.open_table(DOMAINS).map_err(db_err)?;
+            t.remove(domain.as_bytes()).map_err(db_err)?;
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+    pub fn all_domains(&self) -> Result<Vec<String>> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(DOMAINS).map_err(db_err)?;
+        let mut out = Vec::new();
+        for item in t.iter().map_err(db_err)? {
+            let (k, _v) = item.map_err(db_err)?;
+            out.push(String::from_utf8_lossy(k.value()).to_string());
         }
         Ok(out)
     }

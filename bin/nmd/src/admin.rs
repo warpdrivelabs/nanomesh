@@ -81,6 +81,11 @@ pub async fn serve(
         .route("/kick", post(kick))
         .route("/add-peer", post(add_peer))
         .route("/remove-peer", post(remove_peer))
+        .route("/names/domains", get(names_domains))
+        .route("/names/domain-add", post(names_domain_add))
+        .route("/names/list", get(names_list))
+        .route("/names/set", post(names_set))
+        .route("/names/del", post(names_del))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth))
         .with_state(state);
 
@@ -305,6 +310,70 @@ async fn remove_peer(
     let id = parse_id(&r.id).ok_or(StatusCode::BAD_REQUEST)?;
     let existed = st.node.remove_peer(id);
     Ok(Json(json!({ "ok": true, "existed": existed, "peers": st.node.peer_count() })))
+}
+
+// ── 去中心命名：本节点域名 + 域内命名 CRUD（注册商）──
+async fn names_domains(State(st): State<AppState>) -> Json<Value> {
+    Json(json!({ "domains": st.node.owned_domains() }))
+}
+
+#[derive(serde::Deserialize)]
+struct DomainReq {
+    domain: String,
+}
+async fn names_domain_add(State(st): State<AppState>, Json(r): Json<DomainReq>) -> Json<Value> {
+    match st.node.add_domain(&r.domain) {
+        Ok(added) => Json(json!({ "ok": true, "added": added, "domains": st.node.owned_domains() })),
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+/// 列出本节点签发的命名（local_part → pubkey），按域名分组由前端处理。
+async fn names_list(State(st): State<AppState>) -> Json<Value> {
+    let recs: Vec<Value> = st
+        .node
+        .names_owned(None)
+        .into_iter()
+        .map(|r| {
+            json!({
+                "local_part": r.local_part,
+                "domain": r.domain,
+                "name": format!("{}@{}", r.local_part, r.domain),
+                "pubkey": hex(&r.client_pubkey),
+                "serial": r.serial,
+            })
+        })
+        .collect();
+    Json(json!({ "names": recs }))
+}
+
+#[derive(serde::Deserialize)]
+struct NameSetReq {
+    domain: String,
+    local_part: String,
+    pubkey: String,
+}
+async fn names_set(State(st): State<AppState>, Json(r): Json<NameSetReq>) -> Json<Value> {
+    let pk = match parse_id(&r.pubkey) {
+        Some(x) => x,
+        None => return Json(json!({ "ok": false, "error": "非法公钥（需 64 位 hex）" })),
+    };
+    match st.node.admin_set_name(&r.domain, &r.local_part, pk) {
+        Ok(rec) => Json(json!({ "ok": true, "name": format!("{}@{}", rec.local_part, rec.domain) })),
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct NameDelReq {
+    domain: String,
+    local_part: String,
+}
+async fn names_del(State(st): State<AppState>, Json(r): Json<NameDelReq>) -> Json<Value> {
+    match st.node.admin_del_name(&r.domain, &r.local_part) {
+        Ok(()) => Json(json!({ "ok": true })),
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
 }
 
 /// 后台每 2s 采样本进程 CPU%/RSS。

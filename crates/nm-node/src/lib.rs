@@ -206,7 +206,7 @@ struct Ctx {
     channels: Arc<Channels>,          // P4 频道运行态（gossip pub/sub）
     gossip: Gossip,                   // 频道动态 join 需要
     group_pub: tokio::sync::mpsc::UnboundedSender<Vec<u8>>, // 群消息/群公告 → 联邦 gossip 广播队列
-    domain: Arc<std::sync::RwLock<String>>,   // 本节点自声明域名（命名 N1）
+    domains: Arc<std::sync::RwLock<Vec<String>>>, // 本节点自声明域名集合（命名 N1）
     names: Arc<DashMap<String, NameRecord>>,  // 命名缓存 local@domain → NameRecord
 }
 
@@ -303,8 +303,8 @@ pub struct Node {
     // 群联邦 gossip：fanout 把待广播的 GroupGossip 字节丢进 group_pub，由 spawn_group_sync 统一发布。
     group_pub: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     group_pub_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>>,
-    // 去中心命名（N1）：本节点自声明域名 + 命名缓存（local@domain → NameRecord，含 gossip 学到的）。
-    domain: Arc<std::sync::RwLock<String>>,
+    // 去中心命名（N1）：本节点自声明的域名集合（可多个）+ 命名缓存（local@domain → NameRecord，含 gossip 学到的）。
+    domains: Arc<std::sync::RwLock<Vec<String>>>,
     names: Arc<DashMap<String, NameRecord>>,
 }
 
@@ -433,10 +433,12 @@ impl Node {
         let (group_pub, group_pub_rx) = tokio::sync::mpsc::unbounded_channel();
         // 命名缓存：回填本节点持久化的命名记录（重启恢复）。
         let names: Arc<DashMap<String, NameRecord>> = Arc::new(DashMap::new());
+        let mut owned_domains: Vec<String> = Vec::new();
         if let Some(s) = &store {
             for r in s.all_names().unwrap_or_default() {
                 names.insert(format!("{}@{}", r.local_part, r.domain), r);
             }
+            owned_domains = s.all_domains().unwrap_or_default();
         }
         Ok(Self {
             ep,
@@ -454,7 +456,7 @@ impl Node {
             channels: Arc::new(Channels::new()),
             group_pub,
             group_pub_rx: std::sync::Mutex::new(Some(group_pub_rx)),
-            domain: Arc::new(std::sync::RwLock::new(String::new())),
+            domains: Arc::new(std::sync::RwLock::new(owned_domains)),
             names,
         })
     }
@@ -716,7 +718,7 @@ impl Node {
                 channels: self.channels.clone(),
                 gossip: self.gossip.clone(),
                 group_pub: self.group_pub.clone(),
-                domain: self.domain.clone(),
+                domains: self.domains.clone(),
                 names: self.names.clone(),
             },
         };
@@ -956,13 +958,117 @@ impl Node {
         }
     }
 
-    /// 设置本节点自声明域名（命名 N1）；nmd 启动时按配置调用。
-    pub fn set_domain(&self, d: String) {
-        let d = d.trim().to_lowercase();
-        if !d.is_empty() {
-            tracing::info!(domain = %d, "node domain set");
+    /// 从配置设置本节点域名（逗号分隔多个）；持久化并去重。nmd 启动时调用。
+    pub fn set_domain(&self, csv: String) {
+        let list: Vec<String> = csv.split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
+        if list.is_empty() {
+            return;
         }
-        *self.domain.write().unwrap() = d;
+        let mut g = self.domains.write().unwrap();
+        for d in list {
+            if !g.contains(&d) {
+                g.push(d.clone());
+            }
+            if let Some(s) = &self.store {
+                let _ = s.put_domain(&d);
+            }
+        }
+        tracing::info!(domains = ?*g, "node domains set");
+    }
+
+    /// 本节点拥有的域名列表（去中心命名 N1）。
+    pub fn owned_domains(&self) -> Vec<String> {
+        self.domains.read().unwrap().clone()
+    }
+
+    /// 申请（TOFU 认领）一个域名到本节点：校验语法、去重、持久化；返回是否新增。
+    /// N1 无全局唯一约束——若命名缓存里已见其它节点为该域签发过记录，软性拒绝（全局唯一见 N2）。
+    pub fn add_domain(&self, domain: &str) -> Result<bool, String> {
+        let d = domain.trim().to_lowercase();
+        if d.is_empty() || d.len() > 253 || !d.contains('.')
+            || !d.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-')
+        {
+            return Err("非法域名（形如 example.nm）".into());
+        }
+        if self.domains.read().unwrap().contains(&d) {
+            return Ok(false);
+        }
+        let me = self.ep.id_bytes();
+        if self.names.iter().any(|r| r.domain == d && r.home_node.as_slice() != me.as_slice()) {
+            return Err(format!("域名 {d} 似乎已被联邦中其它节点占用（N1=TOFU；全局唯一见 N2）"));
+        }
+        self.domains.write().unwrap().push(d.clone());
+        if let Some(s) = &self.store {
+            let _ = s.put_domain(&d);
+        }
+        tracing::info!(domain = %d, "domain claimed (TOFU)");
+        Ok(true)
+    }
+
+    /// 本节点签发的命名记录（可按域名过滤；不含墓碑）。
+    pub fn names_owned(&self, domain: Option<&str>) -> Vec<NameRecord> {
+        let me = self.ep.id_bytes();
+        self.names
+            .iter()
+            .filter(|r| r.home_node.as_slice() == me.as_slice() && !r.client_pubkey.is_empty())
+            .filter(|r| domain.map(|d| r.domain == d).unwrap_or(true))
+            .map(|r| r.clone())
+            .collect()
+    }
+
+    /// 管理端：在本节点某域名下绑定 local_part → pubkey（注册商权威）。签名 + 持久 + 广播。
+    pub fn admin_set_name(&self, domain: &str, local_part: &str, pubkey: [u8; 32]) -> Result<NameRecord, String> {
+        let d = domain.trim().to_lowercase();
+        let lp = local_part.trim().to_lowercase();
+        if !self.domains.read().unwrap().contains(&d) {
+            return Err(format!("本节点未拥有域名 {d}"));
+        }
+        if !valid_local_part(&lp) {
+            return Err("非法 local-part（仅 a-z 0-9 . - _，≤63）".into());
+        }
+        let full = format!("{lp}@{d}");
+        let serial = self.names.get(&full).map(|r| r.serial + 1).unwrap_or(1);
+        let mut rec = NameRecord {
+            local_part: lp, domain: d, client_pubkey: pubkey.to_vec(), serial,
+            issued_at: now_ms() as i64, ttl: 3600, home_node: self.ep.id_bytes().to_vec(), home_sig: Vec::new(),
+        };
+        rec.home_sig = nm_crypto::sign_bytes(self.ep.secret_key(), &name_canonical(&rec)).to_vec();
+        if let Some(s) = &self.store {
+            let _ = s.put_name(&rec);
+        }
+        self.names.insert(full, rec.clone());
+        self.broadcast_name(&rec);
+        Ok(rec)
+    }
+
+    /// 管理端：删除某域名下的 local_part（墓碑：空公钥 + 更高 serial，经 gossip 扩散移除）。
+    pub fn admin_del_name(&self, domain: &str, local_part: &str) -> Result<(), String> {
+        let d = domain.trim().to_lowercase();
+        let lp = local_part.trim().to_lowercase();
+        if !self.domains.read().unwrap().contains(&d) {
+            return Err(format!("本节点未拥有域名 {d}"));
+        }
+        let full = format!("{lp}@{d}");
+        let serial = self.names.get(&full).map(|r| r.serial + 1).ok_or("该名字不存在")?;
+        let mut rec = NameRecord {
+            local_part: lp, domain: d, client_pubkey: Vec::new(), serial, // 空公钥 = 墓碑
+            issued_at: now_ms() as i64, ttl: 0, home_node: self.ep.id_bytes().to_vec(), home_sig: Vec::new(),
+        };
+        rec.home_sig = nm_crypto::sign_bytes(self.ep.secret_key(), &name_canonical(&rec)).to_vec();
+        if let Some(s) = &self.store {
+            let _ = s.del_name(&full);
+        }
+        self.names.remove(&full);
+        self.broadcast_name(&rec);
+        Ok(())
+    }
+
+    fn broadcast_name(&self, rec: &NameRecord) {
+        let gg = GroupGossip {
+            origin: self.ep.id_bytes().to_vec(),
+            body: Some(nm_proto::pb::group_gossip::Body::Name(rec.clone())),
+        };
+        let _ = self.group_pub.send(gg.encode_to_vec());
     }
 
     /// 合并命名记录到缓存（gossip 学到的他域记录仅入内存；验签通过 + serial 更新才收）。
@@ -972,6 +1078,19 @@ impl Node {
             return;
         }
         let key = format!("{}@{}", rec.local_part, rec.domain);
+        // 墓碑（空公钥）：serial 不更旧则移除缓存/持久。
+        if rec.client_pubkey.is_empty() {
+            if let Some(e) = self.names.get(&key) {
+                if rec.serial < e.serial {
+                    return;
+                }
+            }
+            self.names.remove(&key);
+            if let Some(s) = &self.store {
+                let _ = s.del_name(&key);
+            }
+            return;
+        }
         use dashmap::mapref::entry::Entry;
         match self.names.entry(key) {
             Entry::Occupied(mut o) => {
@@ -1932,7 +2051,7 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
         // ── 去中心命名（N1：home node 委派 local@domain）──
         "name.claim" => match cmd.params.as_ref().and_then(|p| NameOp::decode(p.value.as_slice()).ok()) {
             Some(op) => {
-                let domain = ctx.domain.read().unwrap().clone();
+                let domain = ctx.domains.read().unwrap().first().cloned().unwrap_or_default();
                 let local = op.local_part.trim().to_lowercase();
                 if domain.is_empty() {
                     (false, None, "本节点未配置域名（无法签发命名）".into())
