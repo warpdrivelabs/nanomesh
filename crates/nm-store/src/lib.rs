@@ -6,7 +6,7 @@
 //!   前缀 range 扫描即可取某实体的全部离线消息，`gram_id` 单调保证 FIFO。
 //! - `ENTITIES`：key = `entity_id(32)`，value = prost 编码的 `Entity`（目录持久化）。
 
-use nm_proto::{BlobData, Entity, Gram, Group};
+use nm_proto::{BlobData, Entity, Gram, Group, NameRecord};
 use prost::Message;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
@@ -19,6 +19,8 @@ const BLACKLIST: TableDefinition<&[u8], &[u8]> = TableDefinition::new("blacklist
 const PEERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("peers");
 /// 内容寻址 blob（P1 头像等）：key = blake3 hash(32)，value = prost 编码的 `BlobData`。内容寻址=天然去重/无冲突。
 const BLOBS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("blobs");
+// 命名记录（N1）：key = 完整名 "local@domain" 的字节，value = NameRecord 编码。
+const NAMES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("names");
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -52,6 +54,7 @@ impl RedbStore {
             wtx.open_table(BLACKLIST).map_err(db_err)?;
             wtx.open_table(PEERS).map_err(db_err)?;
             wtx.open_table(BLOBS).map_err(db_err)?;
+            wtx.open_table(NAMES).map_err(db_err)?;
         }
         wtx.commit().map_err(db_err)?;
         Ok(Self { db })
@@ -216,6 +219,29 @@ impl RedbStore {
         for item in t.iter().map_err(db_err)? {
             let (_k, v) = item.map_err(db_err)?;
             out.push(Group::decode(v.value()).map_err(|e| StoreError::Decode(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
+    // ---- 命名记录持久化（N1）----
+    pub fn put_name(&self, r: &NameRecord) -> Result<()> {
+        let key = format!("{}@{}", r.local_part, r.domain);
+        let val = r.encode_to_vec();
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        {
+            let mut t = wtx.open_table(NAMES).map_err(db_err)?;
+            t.insert(key.as_bytes(), val.as_slice()).map_err(db_err)?;
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+    pub fn all_names(&self) -> Result<Vec<NameRecord>> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(NAMES).map_err(db_err)?;
+        let mut out = Vec::new();
+        for item in t.iter().map_err(db_err)? {
+            let (_k, v) = item.map_err(db_err)?;
+            out.push(NameRecord::decode(v.value()).map_err(|e| StoreError::Decode(e.to_string()))?);
         }
         Ok(out)
     }

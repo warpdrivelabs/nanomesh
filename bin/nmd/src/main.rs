@@ -83,6 +83,9 @@ struct Config {
     /// 联邦成员自动发现（gossip 成员频道）。缺省启用；[[peers]] 降级为「种子」。
     #[serde(default)]
     membership: MembershipCfg,
+    /// 本节点自声明域名（去中心命名 N1）：如 jeff.nm。空=不签发命名（仍可解析他人）。
+    #[serde(default)]
+    domain: String,
 }
 
 /// 联邦成员自动发现配置。每台只需配少量种子([[peers]])，其余成员经 gossip 自动发现自维护。
@@ -404,6 +407,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 始终启动联邦同步：即使当前无对等，也便于运行时经管理台动态加对等后立即生效（无需重启）。
     node.clone().spawn_federation_sync(Duration::from_secs(15));
+    node.set_domain(cfg.domain.clone()); // 去中心命名 N1：本节点自声明域名（空=不签发）
     tracing::info!(peers = node.peer_count(), "federation sync started");
 
     // 联邦成员自动发现（gossip 成员频道）：每台只配少量种子([[peers]])，其余成员自动发现自维护。

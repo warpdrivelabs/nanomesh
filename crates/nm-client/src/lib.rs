@@ -15,7 +15,7 @@ use nm_entity::{pack_profile, EntityKind};
 use nm_proto::{
     now_ms, Any, BlobData, BlobPut, BlobRef, Channel, ChannelBackfillReq, ChannelList, ChannelLog,
     ChannelMsg, ChannelOp, ChannelPub, Command, CommandResult, DirectoryQuery, Entity, EntityList,
-    Gram, GramKind, Group, GroupList, GroupOp, PROTOCOL_VERSION,
+    Gram, GramKind, Group, GroupList, GroupOp, NameList, NameOp, NameQuery, NameRecord, PROTOCOL_VERSION,
 };
 use nm_transport::{read_gram, write_gram, Addr, IrohConnection, NodeEndpoint};
 use prost::Message;
@@ -443,6 +443,32 @@ impl Session {
         if !res.ok { return Err(ClientError::Other(res.error)); }
         let p = res.result.ok_or_else(|| ClientError::Other("no payload".into()))?;
         Ok(ChannelLog::decode(p.value.as_slice()).map_err(err)?.msgs)
+    }
+
+    // ---- 去中心命名（N1）----
+    /// 在 home node 认领本地名 local-part（→ 本客户端公钥）；返回签发的 NameRecord。
+    pub async fn name_claim(&self, local_part: &str) -> Result<NameRecord, ClientError> {
+        let params = Any { type_url: "nmspace.v1.NameOp".to_string(), value: NameOp { local_part: local_part.to_string() }.encode_to_vec() };
+        let res = rpc_over(&self.conn, self.my_id, "name.claim", Some(params)).await?;
+        if !res.ok { return Err(ClientError::Other(res.error)); }
+        let p = res.result.ok_or_else(|| ClientError::Other("no payload".into()))?;
+        NameRecord::decode(p.value.as_slice()).map_err(err)
+    }
+    /// 解析 name（local@domain 或域名）→ NameRecord（含目标公钥）；无则 None。
+    pub async fn name_resolve(&self, name: &str) -> Result<Option<NameRecord>, ClientError> {
+        let params = Any { type_url: "nmspace.v1.NameQuery".to_string(), value: NameQuery { name: name.to_string(), pubkey: Vec::new() }.encode_to_vec() };
+        let res = rpc_over(&self.conn, self.my_id, "name.resolve", Some(params)).await?;
+        if !res.ok { return Err(ClientError::Other(res.error)); }
+        let p = res.result.ok_or_else(|| ClientError::Other("no payload".into()))?;
+        Ok(NameList::decode(p.value.as_slice()).map_err(err)?.records.into_iter().next())
+    }
+    /// 反向解析 公钥 → NameRecord（规范名）；无则 None。
+    pub async fn name_reverse(&self, pubkey: [u8; 32]) -> Result<Option<NameRecord>, ClientError> {
+        let params = Any { type_url: "nmspace.v1.NameQuery".to_string(), value: NameQuery { name: String::new(), pubkey: pubkey.to_vec() }.encode_to_vec() };
+        let res = rpc_over(&self.conn, self.my_id, "name.reverse", Some(params)).await?;
+        if !res.ok { return Err(ClientError::Other(res.error)); }
+        let p = res.result.ok_or_else(|| ClientError::Other("no payload".into()))?;
+        Ok(NameList::decode(p.value.as_slice()).map_err(err)?.records.into_iter().next())
     }
 
     /// 向群发消息（节点扇出到各成员，在线路由/离线入库）。返回节点 ack。

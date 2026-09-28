@@ -55,6 +55,7 @@ fn person_entity_json(e: &nm_proto::pb::Entity) -> Value {
         "name": e.display_name,
         "status": e.attributes.get("status").cloned().unwrap_or_default(),
         "presence": e.attributes.get("presence").cloned().unwrap_or_default(),
+        "handle": e.attributes.get("name").cloned().unwrap_or_default(), // 去中心命名 local@domain（N1）
         "bio": pp.as_ref().map(|p| p.bio.clone()).unwrap_or_default(),
         "statusText": pp.as_ref().map(|p| p.status_text.clone()).unwrap_or_default(),
         "avatar": pp.as_ref().map(|p| p.avatar_url.clone()).unwrap_or_default(),
@@ -720,6 +721,29 @@ async fn my_id(state: State<'_, AppState>) -> Result<String, String> {
     Ok(hex(&g.as_ref().ok_or("尚未连接")?.my_id))
 }
 
+// ── 去中心命名（N1）──
+/// 在 home node 认领本地名 → 返回完整名 local@domain。
+#[tauri::command]
+async fn name_claim(state: State<'_, AppState>, local_part: String) -> Result<String, String> {
+    let session = session_of(&state).await?;
+    let rec = session.name_claim(local_part.trim()).await.map_err(|e| e.to_string())?;
+    Ok(format!("{}@{}", rec.local_part, rec.domain))
+}
+/// 解析 name → 目标公钥 hex（无则 None）。
+#[tauri::command]
+async fn name_resolve(state: State<'_, AppState>, name: String) -> Result<Option<String>, String> {
+    let session = session_of(&state).await?;
+    let rec = session.name_resolve(name.trim()).await.map_err(|e| e.to_string())?;
+    Ok(rec.map(|r| hex(&r.client_pubkey)))
+}
+/// 反向解析 公钥 hex → 规范名（无则 None）。
+#[tauri::command]
+async fn name_reverse(state: State<'_, AppState>, pubkey: String) -> Result<Option<String>, String> {
+    let session = session_of(&state).await?;
+    let rec = session.name_reverse(parse_id(&pubkey)?).await.map_err(|e| e.to_string())?;
+    Ok(rec.map(|r| format!("{}@{}", r.local_part, r.domain)))
+}
+
 /// 断开当前连接（清空会话，便于切换节点/模式）。
 #[tauri::command]
 async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
@@ -772,6 +796,9 @@ pub fn run() {
             channel_publish,
             channel_set_meta,
             channel_backfill,
+            name_claim,
+            name_resolve,
+            name_reverse,
             node_users,
             my_id,
             disconnect,

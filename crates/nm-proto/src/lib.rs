@@ -16,7 +16,7 @@ pub use pb::{
     Any, BlobData, BlobPut, BlobRef, Capability, Channel, ChannelBackfillReq, ChannelGram,
     ChannelList, ChannelLog, ChannelMsg, ChannelOp, ChannelPub, Command, CommandResult,
     DirectoryQuery, Entity, EntityList, Grant, Gram, FedSyncReq, FedSyncResp, GramKind, Group,
-    GroupGossip, GroupList, GroupOp, JobSpec,
+    GroupGossip, GroupList, GroupOp, JobSpec, NameList, NameOp, NameQuery, NameRecord,
 };
 
 /// 协议主版本；握手时协商，拒绝不兼容主版本。

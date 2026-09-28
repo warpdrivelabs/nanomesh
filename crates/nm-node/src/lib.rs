@@ -12,7 +12,8 @@ use nm_core::Directory;
 use nm_proto::{
     now_ms, Any, BlobData, BlobPut, BlobRef, Channel, ChannelBackfillReq, ChannelGram, ChannelList,
     ChannelLog, ChannelMsg, ChannelOp, ChannelPub, Command, CommandResult, DirectoryQuery, Entity,
-    EntityList, FedSyncResp, Gram, GramKind, Group, GroupGossip, GroupList, GroupOp, PROTOCOL_VERSION,
+    EntityList, FedSyncResp, Gram, GramKind, Group, GroupGossip, GroupList, GroupOp, NameList,
+    NameOp, NameQuery, NameRecord, PROTOCOL_VERSION,
 };
 use nm_store::RedbStore;
 use nm_transport::{read_gram, write_gram, IrohConnection, NodeEndpoint};
@@ -205,6 +206,8 @@ struct Ctx {
     channels: Arc<Channels>,          // P4 频道运行态（gossip pub/sub）
     gossip: Gossip,                   // 频道动态 join 需要
     group_pub: tokio::sync::mpsc::UnboundedSender<Vec<u8>>, // 群消息/群公告 → 联邦 gossip 广播队列
+    domain: Arc<std::sync::RwLock<String>>,   // 本节点自声明域名（命名 N1）
+    names: Arc<DashMap<String, NameRecord>>,  // 命名缓存 local@domain → NameRecord
 }
 
 /// 内存实体目录：`entity_id → Entity`，支持 kind 前缀 / 能力 / 属性过滤。
@@ -300,6 +303,9 @@ pub struct Node {
     // 群联邦 gossip：fanout 把待广播的 GroupGossip 字节丢进 group_pub，由 spawn_group_sync 统一发布。
     group_pub: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     group_pub_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>>,
+    // 去中心命名（N1）：本节点自声明域名 + 命名缓存（local@domain → NameRecord，含 gossip 学到的）。
+    domain: Arc<std::sync::RwLock<String>>,
+    names: Arc<DashMap<String, NameRecord>>,
 }
 
 impl Node {
@@ -425,6 +431,13 @@ impl Node {
         // 频道 pub/sub：与单播共用同一 iroh endpoint（accept 侧由 serve() 的 Router 分流）。
         let gossip = Gossip::builder().spawn(ep.iroh().clone());
         let (group_pub, group_pub_rx) = tokio::sync::mpsc::unbounded_channel();
+        // 命名缓存：回填本节点持久化的命名记录（重启恢复）。
+        let names: Arc<DashMap<String, NameRecord>> = Arc::new(DashMap::new());
+        if let Some(s) = &store {
+            for r in s.all_names().unwrap_or_default() {
+                names.insert(format!("{}@{}", r.local_part, r.domain), r);
+            }
+        }
         Ok(Self {
             ep,
             dir,
@@ -441,6 +454,8 @@ impl Node {
             channels: Arc::new(Channels::new()),
             group_pub,
             group_pub_rx: std::sync::Mutex::new(Some(group_pub_rx)),
+            domain: Arc::new(std::sync::RwLock::new(String::new())),
+            names,
         })
     }
 
@@ -701,6 +716,8 @@ impl Node {
                 channels: self.channels.clone(),
                 gossip: self.gossip.clone(),
                 group_pub: self.group_pub.clone(),
+                domain: self.domain.clone(),
+                names: self.names.clone(),
             },
         };
         let gossip_gate = GossipGate {
@@ -939,6 +956,35 @@ impl Node {
         }
     }
 
+    /// 设置本节点自声明域名（命名 N1）；nmd 启动时按配置调用。
+    pub fn set_domain(&self, d: String) {
+        let d = d.trim().to_lowercase();
+        if !d.is_empty() {
+            tracing::info!(domain = %d, "node domain set");
+        }
+        *self.domain.write().unwrap() = d;
+    }
+
+    /// 合并命名记录到缓存（gossip 学到的他域记录仅入内存；验签通过 + serial 更新才收）。
+    fn merge_name_lww(&self, rec: NameRecord) {
+        if !verify_name(&rec) {
+            tracing::debug!("name: bad signature, dropped");
+            return;
+        }
+        let key = format!("{}@{}", rec.local_part, rec.domain);
+        use dashmap::mapref::entry::Entry;
+        match self.names.entry(key) {
+            Entry::Occupied(mut o) => {
+                if rec.serial >= o.get().serial {
+                    o.insert(rec);
+                }
+            }
+            Entry::Vacant(v) => {
+                v.insert(rec);
+            }
+        }
+    }
+
     /// 处理群 gossip：announce→合并群状态；msg→投递本地成员。
     async fn on_group_gossip(&self, bytes: &[u8]) {
         let Ok(gg) = GroupGossip::decode(bytes) else {
@@ -977,6 +1023,10 @@ impl Node {
                         }
                     }
                 }
+            }
+            Some(nm_proto::pb::group_gossip::Body::Name(rec)) => {
+                // 命名记录复制：验签后并入命名缓存（各节点据此解析 local@domain）。
+                self.merge_name_lww(rec);
             }
             None => {}
         }
@@ -1024,6 +1074,20 @@ impl Node {
                         let gg = GroupGossip {
                             origin: me.to_vec(),
                             body: Some(nm_proto::pb::group_gossip::Body::Announce(g)),
+                        };
+                        let _ = topic.publish(gg.encode_to_vec()).await;
+                    }
+                    // 周期重播本节点签发的命名记录（home_node==自身），令晚加入节点补全命名缓存。
+                    let my_names: Vec<NameRecord> = self
+                        .names
+                        .iter()
+                        .filter(|r| r.home_node.as_slice() == me.as_slice())
+                        .map(|r| r.clone())
+                        .collect();
+                    for r in my_names {
+                        let gg = GroupGossip {
+                            origin: me.to_vec(),
+                            body: Some(nm_proto::pb::group_gossip::Body::Name(r)),
                         };
                         let _ = topic.publish(gg.encode_to_vec()).await;
                     }
@@ -1603,6 +1667,25 @@ fn announce_group(ctx: &Ctx, gid: &[u8]) {
     }
 }
 
+/// 命名记录规范字节（清空 home_sig 后编码，用于签名/验签的确定性输入）。
+fn name_canonical(rec: &NameRecord) -> Vec<u8> {
+    let mut r = rec.clone();
+    r.home_sig = Vec::new();
+    r.encode_to_vec()
+}
+/// 校验命名记录：home_sig 必须由 home_node 私钥对规范字节签名（自证明委派）。
+fn verify_name(rec: &NameRecord) -> bool {
+    let Ok(home) = <[u8; 32]>::try_from(rec.home_node.as_slice()) else { return false };
+    let Ok(sig) = <[u8; 64]>::try_from(rec.home_sig.as_slice()) else { return false };
+    nm_crypto::verify_bytes(&home, &name_canonical(rec), &sig).is_ok()
+}
+/// local-part 合法性：非空、≤63、仅 [a-z0-9._-]。
+fn valid_local_part(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 63
+        && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-' || c == '_')
+}
+
 /// 私聊单播投递（不依赖 s2s 中继）：
 /// 1) 本地在线 → 直投；2) 已知且 home==本节点(离线) → 本地离线库；
 /// 3) 已知远端 → 仅联邦 gossip 广播（对端节点投递/入库）；
@@ -1735,9 +1818,18 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
                 .unwrap_or_default();
             let mut list = dir.query(&q).await.unwrap_or_default();
             // P2：给每个实体盖上实时 presence（本地会话/gossip 缓存 + TTL）到 attributes["presence"]。
+            // N1：反向盖上命名 name=local@domain（命名缓存里 client_pubkey 命中者）。
+            let name_by_pk: std::collections::HashMap<Vec<u8>, String> = ctx
+                .names
+                .iter()
+                .map(|r| (r.client_pubkey.clone(), format!("{}@{}", r.local_part, r.domain)))
+                .collect();
             for e in list.iter_mut() {
                 let p = presence_status(&ctx.sessions, &ctx.presence, &ctx.status_intent, &e.entity_id);
                 e.attributes.insert("presence".to_string(), p);
+                if let Some(n) = name_by_pk.get(&e.entity_id) {
+                    e.attributes.insert("name".to_string(), n.clone());
+                }
             }
             let el = EntityList { entities: list };
             (
@@ -1837,6 +1929,63 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
         "group.rename" => group_mutate(&cmd, groups, store, caller, GroupMut::Rename),
         "group.set_meta" => group_mutate(&cmd, groups, store, caller, GroupMut::SetMeta),
         "group.dissolve" => group_dissolve(&cmd, groups, store, caller),
+        // ── 去中心命名（N1：home node 委派 local@domain）──
+        "name.claim" => match cmd.params.as_ref().and_then(|p| NameOp::decode(p.value.as_slice()).ok()) {
+            Some(op) => {
+                let domain = ctx.domain.read().unwrap().clone();
+                let local = op.local_part.trim().to_lowercase();
+                if domain.is_empty() {
+                    (false, None, "本节点未配置域名（无法签发命名）".into())
+                } else if !valid_local_part(&local) {
+                    (false, None, "非法 local-part（仅 a-z 0-9 . - _，≤63）".into())
+                } else {
+                    let full = format!("{local}@{domain}");
+                    let taken_by_other = ctx.names.get(&full).map(|r| r.client_pubkey != caller).unwrap_or(false);
+                    if taken_by_other {
+                        (false, None, "该名字已被占用".into())
+                    } else {
+                        let serial = ctx.names.get(&full).map(|r| r.serial + 1).unwrap_or(1);
+                        let mut rec = NameRecord {
+                            local_part: local, domain, client_pubkey: caller.to_vec(), serial,
+                            issued_at: now_ms() as i64, ttl: 3600, home_node: ctx.node_id.to_vec(),
+                            home_sig: Vec::new(),
+                        };
+                        rec.home_sig = nm_crypto::sign_bytes(ctx.ep.secret_key(), &name_canonical(&rec)).to_vec();
+                        if let Some(s) = &ctx.store {
+                            let _ = s.put_name(&rec);
+                        }
+                        ctx.names.insert(full, rec.clone());
+                        // 立即经联邦 gossip 广播，各节点填充命名缓存 → 全网可解析。
+                        let gg = GroupGossip {
+                            origin: ctx.node_id.to_vec(),
+                            body: Some(nm_proto::pb::group_gossip::Body::Name(rec.clone())),
+                        };
+                        let _ = ctx.group_pub.send(gg.encode_to_vec());
+                        (true, Some(Any { type_url: "nmspace.v1.NameRecord".into(), value: rec.encode_to_vec() }), String::new())
+                    }
+                }
+            }
+            None => (false, None, "invalid name op".into()),
+        },
+        "name.resolve" => match cmd.params.as_ref().and_then(|p| NameQuery::decode(p.value.as_slice()).ok()) {
+            Some(q) => {
+                let name = q.name.trim().to_lowercase();
+                let records: Vec<NameRecord> = ctx.names.get(&name).map(|r| r.clone()).into_iter().collect();
+                (true, Some(Any { type_url: "nmspace.v1.NameList".into(), value: NameList { records }.encode_to_vec() }), String::new())
+            }
+            None => (false, None, "invalid name query".into()),
+        },
+        "name.reverse" => match cmd.params.as_ref().and_then(|p| NameQuery::decode(p.value.as_slice()).ok()) {
+            Some(q) => {
+                let records: Vec<NameRecord> = ctx.names.iter().find(|r| r.client_pubkey == q.pubkey).map(|r| r.clone()).into_iter().collect();
+                (true, Some(Any { type_url: "nmspace.v1.NameList".into(), value: NameList { records }.encode_to_vec() }), String::new())
+            }
+            None => (false, None, "invalid name query".into()),
+        },
+        "name.list" => {
+            let records: Vec<NameRecord> = ctx.names.iter().map(|r| r.clone()).collect();
+            (true, Some(Any { type_url: "nmspace.v1.NameList".into(), value: NameList { records }.encode_to_vec() }), String::new())
+        }
         // ── 频道 / 主题（P4）──
         "channel.create" => match cmd.params.as_ref().and_then(|p| ChannelOp::decode(p.value.as_slice()).ok()) {
             Some(op) if op.channel_id.len() == 32 => {

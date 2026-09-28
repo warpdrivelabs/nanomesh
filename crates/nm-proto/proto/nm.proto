@@ -147,9 +147,26 @@ message GroupOp {
 }
 message GroupList { repeated Group groups = 1; }
 
-// 群/私聊联邦 gossip 信封（联邦级主题 nmspace-groups:<fed>，所有节点加入）：
-// 既做群状态发现(announce → 各节点据此填充群目录/成员表)、群消息扇出(msg)，
-// 也做私聊单播的跨节点投递(direct)——统一取代跨节点 s2s 中继（NAT 下常不通）；origin 防自回环。
+// ── 去中心命名（N1：home node 委派 local@domain）──────────────────────────
+// 域属主节点对「local-part → 客户端公钥」签名背书；经联邦 gossip 复制，任一节点可解析。
+// 域内唯一由 home node 权威保证；域全局唯一留待 N2（见证注册表）。详见 docs/MESH_DNS_NAMING_DESIGN.md。
+message NameRecord {
+  string local_part    = 1;           // 归一化本地部，如 nanomesh.215
+  string domain        = 2;           // home node 自声明域名，如 jeff.nm（N1 为 TOFU）
+  bytes  client_pubkey = 3;           // 目标客户端实体公钥（= name 指向）
+  uint64 serial        = 4;           // 单调递增；同名新签覆盖旧
+  int64  issued_at     = 5;
+  uint32 ttl           = 6;           // 解析缓存秒数
+  bytes  home_node     = 7;           // 签发者（域属主）节点公钥
+  bytes  home_sig      = 8;           // Sign(home_node 私钥, 规范字节)；自证明委派
+}
+message NameOp   { string local_part = 1; }              // name.claim 参数
+message NameQuery { string name = 1; bytes pubkey = 2; } // name.resolve(name) / name.reverse(pubkey)
+message NameList { repeated NameRecord records = 1; }     // name.list / 解析结果
+
+// 群/私聊/命名 联邦 gossip 信封（联邦级主题 nmspace-groups:<fed>，所有节点加入）：
+// 群状态发现(announce)、群消息扇出(msg)、私聊单播跨节点投递(direct)、命名记录复制(name)——
+// 统一取代跨节点 s2s 中继（NAT 下常不通）；origin 防自回环。
 // TODO：签名 + 每群独立主题 + 端到端加密（当前明文广播到联邦各节点）。
 message GroupGossip {
   bytes origin = 1;                   // 广播源节点 id（收到 origin==自身则忽略）
@@ -157,6 +174,7 @@ message GroupGossip {
     Group announce = 2;               // 群状态广播（发现 + 成员表，home 节点周期/变更时发）
     Gram msg = 3;                     // 群消息扇出（kind=GroupMessage，receiver=group_id）
     Gram direct = 4;                  // 私聊单播（kind=Message，receiver=对端 EntityId）；仅在本地投递不了时才广播
+    NameRecord name = 5;              // 命名记录复制（home 节点签发/周期重播，各节点据此填充命名缓存）
   }
 }
 

@@ -183,7 +183,7 @@ function itemHtml(c, sub, unread, sel) {
   return `<div class="im-item ${c.id === sel ? "on" : ""}" data-id="${c.id}" title="${escapeHtml(c.id)}">
     ${face}
     <span class="mid">
-      <span class="r1"><span class="nm">${escapeHtml(c.name || shortId(c.id))}</span></span>
+      <span class="r1"><span class="nm">${escapeHtml(c.name || shortId(c.id))}</span>${c.handle ? `<span class="nm-handle" style="font-size:11px;color:var(--aqua);margin-left:6px;font-family:ui-monospace,Menlo,monospace">${escapeHtml(c.handle)}</span>` : ""}</span>
       <span class="r2"><span class="msg">${sub || ""}</span>${unread ? `<span class="unread">${unread}</span>` : ""}</span>
     </span></div>`;
 }
