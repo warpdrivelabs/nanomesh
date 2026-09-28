@@ -12,6 +12,7 @@ members = [
     "crates/nm-node",
     "crates/nm-client",
     "crates/nm-gateway",
+    "crates/nm-domain",
     "bin/nmd",
     "bin/nm-gatewayd",
     "bin/nm-agent",

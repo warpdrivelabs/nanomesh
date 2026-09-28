@@ -2593,6 +2593,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "nm-domain"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "axum",
+ "clap",
+ "redb 4.3.0",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "nm-echo"
 version = "0.1.0"
 dependencies = [

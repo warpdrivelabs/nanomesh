@@ -32,6 +32,45 @@ const fmtDur = (s) => {
 const sinceMs = (ms) => (ms ? fmtDur((Date.now() - ms) / 1000) : "—");
 const shortId = (h) => (h && h.length > 16 ? `${h.slice(0, 10)}…${h.slice(-4)}` : h || "");
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+async function copyToClipboard(text) {
+  const value = String(text ?? "");
+  if (!value) throw new Error("没有可复制的内容");
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const ta = document.createElement("textarea");
+  ta.value = value;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.top = "0";
+  ta.style.left = "0";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  const ok = document.execCommand("copy");
+  ta.remove();
+  if (!ok) throw new Error("浏览器拒绝写入剪贴板");
+}
+const COPY_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
+function copyIconBtn(attr) {
+  return `<button class="btn btn--icon" type="button" title="复制" aria-label="复制" ${attr}>${COPY_ICON}</button>`;
+}
+function bindCopy(button, text) {
+  button.onclick = async () => {
+    try {
+      await copyToClipboard(text);
+      button.classList.add("is-copied");
+      button.title = "已复制";
+      setTimeout(() => {
+        if (!button.isConnected) return;
+        button.classList.remove("is-copied");
+        button.title = "复制";
+      }, 1200);
+    } catch (e) { alert("复制失败：" + (e && e.message ? e.message : e)); }
+  };
+}
 
 const ICONS = {
   names: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg>',
@@ -214,6 +253,8 @@ const metric = (label, val, sub) =>
   `<div class="metric"><div class="metric__label">${label}</div><div class="metric__val">${val ?? "—"}</div>${sub ? `<div class="metric__sub">${sub}</div>` : ""}</div>`;
 
 let TRAF = []; // 流量历史采样
+let USER_PAGE = 1;
+const USER_PAGE_SIZE = 20;
 
 function renderPanel(tab, host, d, refresh) {
   if (tab === "overview") {
@@ -233,7 +274,7 @@ function renderPanel(tab, host, d, refresh) {
     </div>`;
   } else if (tab === "connections") {
     const rows = (d.connections || []).map((c) => `<tr>
-      <td><code class="mono">${shortId(c.id)}</code></td>
+      <td class="nowrap"><span class="copyline"><code class="mono">${shortId(c.id)}</code>${copyIconBtn(`data-copy="${esc(c.id)}"`)}</span></td>
       <td>${sinceMs(c.since_unix_ms)}</td>
       <td>${fmtBytes(c.bytes_rx)}</td>
       <td>${fmtBytes(c.bytes_tx)}</td>
@@ -243,15 +284,21 @@ function renderPanel(tab, host, d, refresh) {
     host.innerHTML = `<div class="card"><table class="tbl">
       <thead><tr><th>公钥</th><th>接入时长</th><th>接收</th><th>发送</th><th>协议</th><th></th></tr></thead>
       <tbody>${rows || '<tr><td colspan="6" class="muted center">暂无活动连接</td></tr>'}</tbody></table></div>`;
+    host.querySelectorAll("[data-copy]").forEach((b) => bindCopy(b, b.dataset.copy));
     host.querySelectorAll("[data-kick]").forEach((b) => (b.onclick = async () => {
       b.disabled = true;
       try { await api("/api/kick", { method: "POST", body: { id: b.dataset.kick } }); refresh(); } catch (e) { alert(e.message); b.disabled = false; }
     }));
   } else if (tab === "users") {
-    const rows = (d.users || []).map((u) => `<tr>
+    const all = d.users || [];
+    const pages = Math.max(1, Math.ceil(all.length / USER_PAGE_SIZE));
+    if (USER_PAGE > pages) USER_PAGE = pages;
+    if (USER_PAGE < 1) USER_PAGE = 1;
+    const start = (USER_PAGE - 1) * USER_PAGE_SIZE;
+    const rows = all.slice(start, start + USER_PAGE_SIZE).map((u) => `<tr>
       <td><b>${esc(u.name) || "(无名)"}</b></td>
       <td><span class="badge">${esc(u.kind)}</span></td>
-      <td><code class="mono">${shortId(u.id)}</code></td>
+      <td class="nowrap"><span class="copyline"><code class="mono">${shortId(u.id)}</code>${copyIconBtn(`data-copy="${esc(u.id)}"`)}</span></td>
       <td>${u.banned ? '<span class="badge badge--danger">已封禁</span>' : '<span class="badge badge--ok">正常</span>'}</td>
       <td class="right">${u.banned
         ? `<button class="btn btn--sm" data-unban="${u.id}">解封</button>`
@@ -259,13 +306,24 @@ function renderPanel(tab, host, d, refresh) {
     </tr>`).join("");
     host.innerHTML = `<div class="card"><table class="tbl">
       <thead><tr><th>名称</th><th>类型</th><th>公钥</th><th>状态</th><th></th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="5" class="muted center">暂无实体，点连接后刷新</td></tr>'}</tbody></table></div>`;
+      <tbody>${rows || '<tr><td colspan="5" class="muted center">暂无实体，点连接后刷新</td></tr>'}</tbody></table>
+      <div class="pager">
+        <span class="muted">共 ${all.length} 条 · 每页 ${USER_PAGE_SIZE} 条 · 第 ${USER_PAGE} / ${pages} 页</span>
+        <span>
+          <button class="btn btn--sm" type="button" data-page="prev" ${USER_PAGE <= 1 ? "disabled" : ""}>上一页</button>
+          <button class="btn btn--sm" type="button" data-page="next" ${USER_PAGE >= pages ? "disabled" : ""}>下一页</button>
+        </span>
+      </div></div>`;
     const act = (sel, url) => host.querySelectorAll(sel).forEach((b) => (b.onclick = async () => {
       b.disabled = true;
       try { await api(url, { method: "POST", body: { id: b.dataset[url.includes("unban") ? "unban" : "ban"] } }); refresh(); } catch (e) { alert(e.message); b.disabled = false; }
     }));
     act("[data-ban]", "/api/ban");
     act("[data-unban]", "/api/unban");
+    host.querySelectorAll("[data-copy]").forEach((b) => bindCopy(b, b.dataset.copy));
+    const go = (delta) => { const n = USER_PAGE + delta; if (n < 1 || n > pages) return; USER_PAGE = n; refresh(); };
+    host.querySelector("[data-page=prev]").onclick = () => go(-1);
+    host.querySelector("[data-page=next]").onclick = () => go(1);
   } else if (tab === "storage") {
     host.innerHTML = `<div class="grid">
       ${metric("实体", d.entities)}
@@ -301,21 +359,19 @@ function renderPanel(tab, host, d, refresh) {
       <div class="card idcard">
         <div class="idcard__head"><span class="badge badge--node">Node ID · 节点公钥</span></div>
         <img class="qr" src="/api/qr?kind=node&t=${Date.now()}" alt="node id QR" />
-        <div class="idcard__val"><code class="mono wrap">${esc(d.node_id)}</code></div>
-        <button class="btn btn--sm btn--block" data-copy="${esc(d.node_id)}">复制 Node ID</button>
+        <div class="idcard__val copyline"><code class="mono wrap">${esc(d.node_id)}</code>${copyIconBtn('data-copy="node"')}</div>
       </div>
       <div class="card idcard">
         <div class="idcard__head"><span class="badge badge--addr">完整地址 · NM_NODE_ADDR</span></div>
         <img class="qr" src="/api/qr?kind=addr&t=${Date.now()}" alt="addr QR" />
-        <div class="idcard__val"><code class="mono wrap">${esc(d.addr)}</code></div>
-        <button class="btn btn--sm btn--block" data-copy="${esc(d.addr)}">复制完整地址</button>
+        <div class="idcard__val copyline"><code class="mono wrap">${esc(d.addr)}</code>${copyIconBtn('data-copy="addr"')}</div>
       </div>
     </div>
     <p class="muted">二维码按类型着色（<b style="color:var(--accent)">靛蓝=Node ID</b> / <b style="color:var(--sky)">天蓝=完整地址</b>），载荷带类型前缀 <code>nmspace:node:</code> / <code>nmspace:addr:</code> 以区分类型。</p>`;
-    host.querySelectorAll("[data-copy]").forEach((b) => (b.onclick = () => {
-      navigator.clipboard?.writeText(b.dataset.copy);
-      const t = b.textContent; b.textContent = "已复制 ✓"; setTimeout(() => (b.textContent = t), 1200);
-    }));
+    const copyNode = host.querySelector('[data-copy="node"]');
+    const copyAddr = host.querySelector('[data-copy="addr"]');
+    if (copyNode) bindCopy(copyNode, d.node_id || "");
+    if (copyAddr) bindCopy(copyAddr, d.addr || "");
   } else if (tab === "peers") {
     const peers = d.peers || [];
     const fed = d.federation || "nmspace";
@@ -341,7 +397,7 @@ function renderPanel(tab, host, d, refresh) {
       <td><b>${esc(p.name) || '<span class="muted">—</span>'}</b></td>
       <td class="nowrap">${badge}</td>
       <td class="nowrap"><span class="badge badge--fed">${esc(p.federation || fed)}</span></td>
-      <td><code class="mono">${shortId(p.id)}</code></td>
+      <td class="nowrap"><span class="copyline"><code class="mono">${shortId(p.id)}</code>${copyIconBtn(`data-copy="${esc(p.id)}"`)}</span></td>
       <td>${esc(p.address) || '<span class="muted">—</span>'}</td>
       <td>${esc(p.email) || '<span class="muted">—</span>'}</td>
       <td>${esc(p.mobile) || '<span class="muted">—</span>'}</td>
@@ -393,6 +449,7 @@ function renderPanel(tab, host, d, refresh) {
       try { await api("/api/remove-peer", { method: "POST", body: { id: b.dataset.del } }); refresh(); }
       catch (ex) { alert(ex.message); b.disabled = false; }
     }));
+    host.querySelectorAll("[data-copy]").forEach((b) => bindCopy(b, b.dataset.copy));
     host.querySelectorAll("[data-ban]").forEach((b) => (b.onclick = async () => {
       if (!confirm("封禁该节点？将断开其连接，并不再被自动发现学回（永久排除）。")) return;
       b.disabled = true;
@@ -458,9 +515,11 @@ function renderNames(host, dom, names, refresh) {
     </div>
     <div class="card" style="margin-top:16px">
       <div class="card__title">域内命名登记（local-part → 公钥）</div>
-      <form class="nameform" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
-        <select name="domain" ${domains.length ? "" : "disabled"}>${domOpts}</select>
+      <form class="nameform" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
         <input name="local_part" placeholder="local-part（@ 前）" autocomplete="off">
+        <span class="muted">@</span>
+        <select name="domain" ${domains.length ? "" : "disabled"}>${domOpts}</select>
+        <span class="muted" aria-hidden="true">→</span>
         <input name="pubkey" placeholder="公钥 64 位 hex" style="flex:1;min-width:300px" autocomplete="off">
         <button class="btn btn--primary" type="submit" ${domains.length ? "" : "disabled"}>登记 / 更新</button>
       </form>

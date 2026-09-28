@@ -174,3 +174,11 @@ strong { font-weight: 700; }
 .nowrap { white-space: nowrap; }
 .peerbtns { display: flex; gap: 9px; }
 .tbl .btn--sm + .btn--sm { margin-left: 6px; }
+.copyline { display: inline-flex; align-items: flex-start; gap: 6px; max-width: 100%; }
+.copyline .mono { min-width: 0; }
+.idcard__val.copyline { width: 100%; }
+.btn--icon { width: 28px; height: 28px; padding: 0; flex: 0 0 28px; border: 1px solid var(--border); background: transparent; color: var(--muted); }
+.btn--icon:hover { color: var(--text); background: var(--surface-2); }
+.btn--icon.is-copied { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); }
+.pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
+.pager .btn--sm + .btn--sm { margin-left: 6px; }

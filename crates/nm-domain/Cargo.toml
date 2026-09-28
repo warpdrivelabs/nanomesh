@@ -1,0 +1,23 @@
+[package]
+name = "nm-domain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Nano Mesh 全球域名注册中心：域名登记、停用、查询与解析为节点公钥"
+
+[[bin]]
+name = "nm-domain"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+clap = { workspace = true }
+argon2 = { workspace = true }
+redb = { workspace = true }
