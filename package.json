@@ -1,0 +1,11 @@
+{
+	"name": "nm-domain-cloudflare",
+	"private": true,
+	"type": "module",
+	"dependencies": {
+		"@cloudflare/containers": "^0.1.0"
+	},
+	"devDependencies": {
+		"wrangler": "^4.40.0"
+	}
+}

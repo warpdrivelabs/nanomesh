@@ -36,3 +36,5 @@ docs/cmx-md-view/
 /dist/
 # 桌面安装包产物（tauri build：dmg/app.zip 等）
 /dist-app/
+# Cloudflare 容器用的 linux 静态二进制
+/deploy/linux/

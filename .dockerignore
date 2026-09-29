@@ -1,0 +1,16 @@
+target
+**/target
+.git
+.github
+clients
+docs
+old_space
+node_modules
+dist
+dist-app
+run
+logs
+*.redb
+*.log
+*.png
+.DS_Store
