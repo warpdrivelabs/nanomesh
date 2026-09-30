@@ -65,9 +65,8 @@ strong { font-weight: 700; }
   border: 1px solid color-mix(in srgb, var(--danger) 24%, transparent);
   padding: 9px 12px; border-radius: var(--r-sm); font-size: 13px; word-break: break-word; }
 
-.logo { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; flex: none;
-  background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; font-weight: 800; font-size: 16px;
-  box-shadow: 0 8px 20px -8px color-mix(in srgb, var(--accent) 70%, transparent); }
+.logo { width: 40px; height: 40px; border-radius: 12px; flex: none; display: block; object-fit: contain;
+  background: #fff; }
 
 /* ---------- 登录 / 改密 ---------- */
 .screen { height: 100%; display: grid; place-items: center; padding: 24px; }

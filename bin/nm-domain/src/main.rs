@@ -7,11 +7,13 @@
 mod auth;
 mod store;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
-    extract::{Query, State},
+    extract::{Query, Request, State},
     http::{header, HeaderMap, StatusCode},
+    middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -26,21 +28,39 @@ use store::{normalize_domain, RegisterOutcome, Registry, StoreError};
 #[derive(Parser)]
 #[command(name = "nm-domain", about = "Nano Mesh 全球域名注册中心")]
 struct Args {
-    /// 监听地址。
-    #[arg(long, default_value = "0.0.0.0:9620")]
+    /// HTTP 监听地址。
+    #[arg(long, default_value = "0.0.0.0:80")]
     listen: String,
+    /// HTTPS 监听地址。需要同时提供 `--tls-cert` 和 `--tls-key`。
+    #[arg(long, default_value = "0.0.0.0:443")]
+    https: String,
+    /// TLS 证书（PEM）。
+    #[arg(long)]
+    tls_cert: Option<String>,
+    /// TLS 私钥（PEM）。
+    #[arg(long)]
+    tls_key: Option<String>,
     /// redb 数据库文件。
     #[arg(long, default_value = "nm-domain.redb")]
     db: String,
     /// 管理员凭据文件。
     #[arg(long, default_value = "domaind.state.json")]
     state: String,
+    /// 本机 nmd 控制 API。审批结果经它发到网格。
+    #[arg(long, default_value = "http://127.0.0.1:9611")]
+    nmd_api: String,
+    /// nmd 控制 API 令牌。为空则只记账，不发网格通知。
+    #[arg(long, default_value = "")]
+    nmd_token: String,
 }
 
 #[derive(Clone)]
 struct AppState {
     auth: Arc<Auth>,
     reg: Arc<Registry>,
+    http: reqwest::Client,
+    nmd_api: String,
+    nmd_token: String,
 }
 
 const INDEX: &str = include_str!("../web/index.html");
@@ -64,9 +84,18 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     let reg = Registry::open(&args.db)?;
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let http = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let state = AppState {
         auth: Arc::new(auth),
         reg: Arc::new(reg),
+        http,
+        nmd_api: args.nmd_api.trim_end_matches('/').to_string(),
+        nmd_token: args.nmd_token,
     };
 
     let app = Router::new()
@@ -78,44 +107,117 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/logout", post(logout))
         .route("/api/change-password", post(change_password))
         .route("/api/resolve", get(resolve))
+        .route("/api/catalog", get(catalog))
         .route("/api/domains", get(list_domains).post(register_domain))
         .route("/api/domains/disable", post(disable_domain))
         .route("/api/domains/enable", post(enable_domain))
+        .route("/api/signup", get(signup))
+        .route("/api/signup/list", get(signup_list))
+        .route("/api/applications", get(list_applications))
+        .route("/api/applications/approve", post(approve_application))
+        .route("/api/applications/reject", post(reject_application))
         .with_state(state);
+
+    let https_addr: Option<SocketAddr> = match (&args.tls_cert, &args.tls_key) {
+        (Some(cert), Some(key)) => {
+            let addr = args.https.parse()?;
+            let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key).await?;
+            let https_app = app.clone().layer(middleware::from_fn(mark_tls));
+            tokio::spawn(async move {
+                if let Err(e) = axum_server::bind_rustls(addr, config)
+                    .serve(https_app.into_make_service())
+                    .await
+                {
+                    tracing::error!(%e, "HTTPS 服务退出");
+                }
+            });
+            Some(addr)
+        }
+        (None, None) => None,
+        _ => anyhow::bail!("HTTPS 需要同时提供 --tls-cert 和 --tls-key"),
+    };
 
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;
     let access = args.listen.replace("0.0.0.0", "127.0.0.1");
     println!("nm-domain 全球域名注册中心已启动");
-    println!("  监听      {}", args.listen);
+    println!("  HTTP      {}", args.listen);
     println!("  管理地址  http://{access}/");
     println!("  解析接口  http://{access}/api/resolve?domain=acme.mesh");
+    if let Some(addr) = https_addr {
+        let host = addr.ip().to_string().replace("0.0.0.0", "127.0.0.1");
+        println!("  HTTPS     {}", args.https);
+        println!("  管理地址  https://{host}:{}/", addr.port());
+    }
     println!("  数据库    {}", args.db);
-    tracing::info!(listen = %args.listen, db = %args.db, "nm-domain 已启动");
+    tracing::info!(http = %args.listen, https = https_addr.map(|a| a.to_string()).unwrap_or_default(), db = %args.db, "nm-domain 已启动");
     axum::serve(listener, app).await?;
     Ok(())
 }
 
-async fn index() -> Html<&'static str> {
-    Html(INDEX)
+fn asset(content_type: &'static str, body: &'static str) -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+}
+async fn index() -> impl IntoResponse {
+    asset("text/html; charset=utf-8", INDEX)
 }
 async fn appjs() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], APPJS)
+    asset("text/javascript; charset=utf-8", APPJS)
 }
 async fn css() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], CSS)
+    asset("text/css; charset=utf-8", CSS)
 }
 
-fn cookie_token(headers: &HeaderMap) -> Option<String> {
-    let c = headers.get(header::COOKIE)?.to_str().ok()?;
+#[derive(Clone, Copy)]
+struct ViaTls;
+
+async fn mark_tls(mut req: Request, next: Next) -> Response {
+    req.extensions_mut().insert(ViaTls);
+    next.run(req).await
+}
+
+fn session_cookie(token: &str, secure: bool) -> String {
+    let secure = if secure { "; Secure" } else { "" };
+    format!("nmdomain={token}; HttpOnly; Path=/; SameSite=Lax{secure}; Max-Age=28800")
+}
+
+fn clear_cookie(secure: bool) -> String {
+    let secure = if secure { "; Secure" } else { "" };
+    format!("nmdomain=; HttpOnly; Path=/; SameSite=Lax{secure}; Max-Age=0")
+}
+
+fn cookie_tokens(headers: &HeaderMap) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(c) = headers.get(header::COOKIE).and_then(|v| v.to_str().ok()) else {
+        return out;
+    };
     for part in c.split(';') {
         if let Some(v) = part.trim().strip_prefix("nmdomain=") {
-            return Some(v.to_string());
+            if !v.is_empty() {
+                out.push(v.to_string());
+            }
         }
     }
-    None
+    out
 }
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    let v = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let t = v.strip_prefix("Bearer ")?.trim();
+    if t.is_empty() { None } else { Some(t.to_string()) }
+}
+
 fn session_ok(s: &AppState, headers: &HeaderMap) -> bool {
-    cookie_token(headers).map(|t| s.auth.valid(&t)).unwrap_or(false)
+    if let Some(t) = bearer_token(headers) {
+        if s.auth.valid(&t) {
+            return true;
+        }
+    }
+    cookie_tokens(headers).iter().any(|t| s.auth.valid(t))
 }
 fn require_session(s: &AppState, headers: &HeaderMap) -> Result<(), Response> {
     if !session_ok(s, headers) {
@@ -143,13 +245,26 @@ struct LoginReq {
     username: String,
     password: String,
 }
-async fn login(State(s): State<AppState>, Json(b): Json<LoginReq>) -> Response {
+async fn login(State(s): State<AppState>, req: Request) -> Response {
+    let secure = req.extensions().get::<ViaTls>().is_some();
+    let bytes = axum::body::to_bytes(req.into_body(), 64 * 1024)
+        .await
+        .unwrap_or_default();
+    let b: LoginReq = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "ok": false, "error": "请求格式不正确" })),
+            )
+                .into_response();
+        }
+    };
     match s.auth.login(&b.username, &b.password) {
         Some((token, must_change)) => {
-            let cookie = format!("nmdomain={token}; HttpOnly; Path=/; SameSite=Strict; Max-Age=28800");
             (
-                [(header::SET_COOKIE, cookie)],
-                Json(json!({ "ok": true, "mustChange": must_change })),
+                [(header::SET_COOKIE, session_cookie(&token, secure))],
+                Json(json!({ "ok": true, "mustChange": must_change, "token": token })),
             )
                 .into_response()
         }
@@ -161,12 +276,14 @@ async fn login(State(s): State<AppState>, Json(b): Json<LoginReq>) -> Response {
     }
 }
 
-async fn logout(State(s): State<AppState>, headers: HeaderMap) -> Response {
-    if let Some(t) = cookie_token(&headers) {
+async fn logout(State(s): State<AppState>, req: Request) -> Response {
+    let secure = req.extensions().get::<ViaTls>().is_some();
+    let headers = req.headers().clone();
+    for t in cookie_tokens(&headers) {
         s.auth.logout(&t);
     }
     (
-        [(header::SET_COOKIE, "nmdomain=; Path=/; Max-Age=0")],
+        [(header::SET_COOKIE, clear_cookie(secure))],
         Json(json!({ "ok": true })),
     )
         .into_response()
@@ -215,6 +332,56 @@ async fn resolve(State(s): State<AppState>, Query(q): Query<ResolveQuery>) -> Re
             Json(json!({ "ok": false, "error": "域名未登记" })),
         )
             .into_response(),
+        Err(e) => store_response(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct CatalogQuery {
+    q: Option<String>,
+}
+
+/// 越小越靠前：完全相同、前缀、子串、字符按顺序出现。
+fn domain_match_rank(domain: &str, q: &str) -> Option<u8> {
+    if q.is_empty() {
+        return Some(4);
+    }
+    if domain == q {
+        return Some(0);
+    }
+    if domain.starts_with(q) {
+        return Some(1);
+    }
+    if domain.contains(q) {
+        return Some(2);
+    }
+    let mut rest = domain.chars();
+    if q.chars().all(|c| rest.any(|d| d == c)) {
+        Some(3)
+    } else {
+        None
+    }
+}
+
+/// 公开目录：已登记且未停用的域名及其节点公钥。不含登记邮箱。
+/// `q` 做模糊过滤，供登录框在输入「.」后下拉点选。
+async fn catalog(State(s): State<AppState>, Query(q): Query<CatalogQuery>) -> Response {
+    match s.reg.list() {
+        Ok(all) => {
+            let needle = q.q.unwrap_or_default().trim().to_lowercase();
+            let mut ranked: Vec<_> = all
+                .into_iter()
+                .filter(|r| !r.disabled)
+                .filter_map(|r| domain_match_rank(&r.domain, &needle).map(|rank| (rank, r)))
+                .collect();
+            ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.domain.cmp(&b.1.domain)));
+            let items: Vec<_> = ranked
+                .into_iter()
+                .take(12)
+                .map(|(_, r)| json!({ "domain": r.domain, "pubkey": r.pubkey }))
+                .collect();
+            Json(json!({ "ok": true, "items": items })).into_response()
+        }
         Err(e) => store_response(e),
     }
 }
@@ -309,6 +476,92 @@ fn set_domain_disabled(s: AppState, headers: HeaderMap, domain: &str, disabled: 
         )
             .into_response(),
         Err(e) => store_response(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct SignupQuery {
+    nodeid: String,
+    domain: String,
+    email: String,
+}
+/// 公开申请。不登录。写入待审列表。
+async fn signup(State(s): State<AppState>, Query(q): Query<SignupQuery>) -> Response {
+    match s.reg.apply(&q.domain, &q.nodeid, &q.email) {
+        Ok(app) => Json(json!({
+            "ok": true,
+            "domain": app.domain,
+            "nodeId": app.node_id,
+            "status": app.status,
+        }))
+        .into_response(),
+        Err(e) => store_response(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct SignupListQuery {
+    nodeid: String,
+}
+/// 公开查询某节点的申请。供 nm-admind 展示待审列表。
+async fn signup_list(State(s): State<AppState>, Query(q): Query<SignupListQuery>) -> Response {
+    match s.reg.list_for_node(&q.nodeid) {
+        Ok(items) => Json(json!({ "ok": true, "items": items })).into_response(),
+        Err(e) => store_response(e),
+    }
+}
+
+async fn list_applications(State(s): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(resp) = require_session(&s, &headers) {
+        return resp;
+    }
+    match s.reg.list_applications() {
+        Ok(items) => Json(json!({ "ok": true, "items": items })).into_response(),
+        Err(e) => store_response(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct DecideBody {
+    domain: String,
+}
+async fn approve_application(State(s): State<AppState>, headers: HeaderMap, Json(b): Json<DecideBody>) -> Response {
+    decide(&s, &headers, &b.domain, true).await
+}
+async fn reject_application(State(s): State<AppState>, headers: HeaderMap, Json(b): Json<DecideBody>) -> Response {
+    decide(&s, &headers, &b.domain, false).await
+}
+async fn decide(s: &AppState, headers: &HeaderMap, domain: &str, approved: bool) -> Response {
+    if let Err(resp) = require_session(s, headers) {
+        return resp;
+    }
+    let app = match s.reg.decide(domain, approved) {
+        Ok(app) => app,
+        Err(e) => return store_response(e),
+    };
+    notify_node(s, &app.node_id, &app.domain, approved).await;
+    Json(json!({ "ok": true, "domain": app.domain, "status": app.status })).into_response()
+}
+
+async fn notify_node(s: &AppState, node_id: &str, domain: &str, approved: bool) {
+    if s.nmd_token.is_empty() {
+        tracing::warn!("未配置 --nmd-token，审批结果未发到网格");
+        return;
+    }
+    let url = format!("{}/names/domain-decision", s.nmd_api);
+    let res = s
+        .http
+        .post(url)
+        .header("x-admin-token", &s.nmd_token)
+        .json(&json!({ "node_id": node_id, "domain": domain, "approved": approved }))
+        .send()
+        .await;
+    match res {
+        Ok(resp) if resp.status().is_success() => {
+            tracing::info!(domain, node_id, approved, "已请求 nmd 通知对端");
+        }
+        Ok(resp) => tracing::warn!(status = %resp.status(), "nmd 未接受域名通知"),
+        Err(e) => tracing::warn!(%e, "通知 nmd 失败"),
     }
 }
 

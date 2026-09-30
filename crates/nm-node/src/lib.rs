@@ -208,6 +208,8 @@ struct Ctx {
     group_pub: tokio::sync::mpsc::UnboundedSender<Vec<u8>>, // 群消息/群公告 → 联邦 gossip 广播队列
     domains: Arc<std::sync::RwLock<Vec<String>>>, // 本节点自声明域名集合（命名 N1）
     names: Arc<DashMap<String, NameRecord>>,  // 命名缓存 local@domain → NameRecord
+    /// 注册中心审批结果：域名 → (是否通过, 时间)。
+    domain_notices: Arc<DashMap<String, (bool, u64)>>,
 }
 
 /// 内存实体目录：`entity_id → Entity`，支持 kind 前缀 / 能力 / 属性过滤。
@@ -306,6 +308,7 @@ pub struct Node {
     // 去中心命名（N1）：本节点自声明的域名集合（可多个）+ 命名缓存（local@domain → NameRecord，含 gossip 学到的）。
     domains: Arc<std::sync::RwLock<Vec<String>>>,
     names: Arc<DashMap<String, NameRecord>>,
+    domain_notices: Arc<DashMap<String, (bool, u64)>>,
 }
 
 impl Node {
@@ -458,6 +461,7 @@ impl Node {
             group_pub_rx: std::sync::Mutex::new(Some(group_pub_rx)),
             domains: Arc::new(std::sync::RwLock::new(owned_domains)),
             names,
+            domain_notices: Arc::new(DashMap::new()),
         })
     }
 
@@ -720,6 +724,7 @@ impl Node {
                 group_pub: self.group_pub.clone(),
                 domains: self.domains.clone(),
                 names: self.names.clone(),
+                domain_notices: self.domain_notices.clone(),
             },
         };
         let gossip_gate = GossipGate {
@@ -976,6 +981,47 @@ impl Node {
         tracing::info!(domains = ?*g, "node domains set");
     }
 
+    /// 把域名审批结果发给目标节点，并在目标就是自己时立即入账。
+    pub fn publish_domain_decision(&self, node_id: [u8; 32], domain: &str, approved: bool) {
+        let text = serde_json::json!({ "domain": domain, "approved": approved }).to_string();
+        let cmd = Command {
+            method: "domain.decision".into(),
+            params: Some(Any { type_url: "text/plain".into(), value: text.into_bytes() }),
+            correlation_id: 0,
+            timeout_ms: 0,
+            grant: None,
+        };
+        let gram = Gram {
+            version: PROTOCOL_VERSION,
+            kind: GramKind::Command as i32,
+            gram_id: now_ms(),
+            ref_gram_id: None,
+            sender: self.ep.id_bytes().to_vec(),
+            receiver: node_id.to_vec(),
+            timestamp_ms: now_ms(),
+            payload: Some(Any {
+                type_url: "nmspace.v1.Command".into(),
+                value: cmd.encode_to_vec(),
+            }),
+            crc: Vec::new(),
+        };
+        if node_id == self.ep.id_bytes() {
+            apply_domain_decision(&gram, &self.domains, &self.store, &self.domain_notices);
+        }
+        let gg = GroupGossip {
+            origin: self.ep.id_bytes().to_vec(),
+            body: Some(nm_proto::pb::group_gossip::Body::Direct(gram)),
+        };
+        let _ = self.group_pub.send(gg.encode_to_vec());
+    }
+
+    pub fn domain_notices(&self) -> Vec<(String, bool, u64)> {
+        self.domain_notices
+            .iter()
+            .map(|e| (e.key().clone(), e.value().0, e.value().1))
+            .collect()
+    }
+
     /// 本节点拥有的域名列表（去中心命名 N1）。
     pub fn owned_domains(&self) -> Vec<String> {
         self.domains.read().unwrap().clone()
@@ -1131,8 +1177,12 @@ impl Node {
                 }
             }
             Some(nm_proto::pb::group_gossip::Body::Direct(gram)) => {
-                // 私聊单播：仅当本节点负责该收件人时投递（在线直投 / 本节点为其 home 则离线入库）。
                 let to = &gram.receiver;
+                if to.as_slice() == self.ep.id_bytes().as_slice() {
+                    apply_domain_decision(&gram, &self.domains, &self.store, &self.domain_notices);
+                    return;
+                }
+                // 私聊单播：仅当本节点负责该收件人时投递（在线直投 / 本节点为其 home 则离线入库）。
                 if self.sessions.contains_key(to.as_slice()) {
                     try_push(to, &gram, &self.sessions).await;
                 } else if let Ok(Some(e)) = self.dir.get(to).await {
@@ -1799,10 +1849,284 @@ fn verify_name(rec: &NameRecord) -> bool {
     nm_crypto::verify_bytes(&home, &name_canonical(rec), &sig).is_ok()
 }
 /// local-part 合法性：非空、≤63、仅 [a-z0-9._-]。
+fn hash_account_password(pw: &str) -> Result<String, String> {
+    use argon2::password_hash::PasswordHasher;
+    use argon2::Argon2;
+    Argon2::default()
+        .hash_password(pw.as_bytes())
+        .map(|h| h.to_string())
+        .map_err(|e| e.to_string())
+}
+
+fn verify_account_password(phc: &str, pw: &str) -> bool {
+    use argon2::password_hash::phc::PasswordHash;
+    use argon2::password_hash::PasswordVerifier;
+    use argon2::Argon2;
+    match PasswordHash::new(phc) {
+        Ok(parsed) => Argon2::default().verify_password(pw.as_bytes(), &parsed).is_ok(),
+        Err(_) => false,
+    }
+}
+
+fn account_params(cmd: &Command) -> serde_json::Value {
+    let text = cmd
+        .params
+        .as_ref()
+        .map(|p| String::from_utf8_lossy(&p.value).into_owned())
+        .unwrap_or_default();
+    serde_json::from_str(&text).unwrap_or_default()
+}
+
+struct AcctReq {
+    domain: String,
+    full: String,
+    password: String,
+    old: String,
+}
+
+fn parse_acct(cmd: &Command) -> Result<AcctReq, &'static str> {
+    let v = account_params(cmd);
+    let local = v.get("local").and_then(|x| x.as_str()).unwrap_or("").trim().to_lowercase();
+    let domain = v.get("domain").and_then(|x| x.as_str()).unwrap_or("").trim().to_lowercase();
+    if !valid_local_part(&local) || domain.is_empty() || domain.len() > 253 {
+        return Err("invalid_name");
+    }
+    Ok(AcctReq {
+        full: format!("{local}@{domain}"),
+        domain,
+        password: v.get("password").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        old: v.get("old").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+    })
+}
+
+fn acct_fail(code: &'static str) -> (bool, Option<Any>, String) {
+    (false, None, code.into())
+}
+
+fn acct_text(text: &str) -> (bool, Option<Any>, String) {
+    (true, Some(Any { type_url: "text/plain".into(), value: text.as_bytes().to_vec() }), String::new())
+}
+
+fn owns_domain(ctx: &Ctx, domain: &str) -> bool {
+    ctx.domains.read().unwrap().iter().any(|d| d == domain)
+}
+
+/// 在本节点登记 local@domain。口令只存 Argon2 PHC，明文不落盘。
+fn register_name_account(ctx: &Ctx, caller: &[u8], cmd: &Command) -> (bool, Option<Any>, String) {
+    let v = account_params(cmd);
+    let local = v.get("local").and_then(|x| x.as_str()).unwrap_or("").trim().to_lowercase();
+    let domain = v.get("domain").and_then(|x| x.as_str()).unwrap_or("").trim().to_lowercase();
+    let password = v.get("password").and_then(|x| x.as_str()).unwrap_or("");
+    if !owns_domain(ctx, &domain) {
+        return acct_fail("domain_not_owned");
+    }
+    if !valid_local_part(&local) {
+        return acct_fail("invalid_name");
+    }
+    if password.chars().count() < 8 {
+        return acct_fail("password_short");
+    }
+    let full = format!("{local}@{domain}");
+    if let Some(r) = ctx.names.get(&full) {
+        if r.client_pubkey.as_slice() != caller {
+            return acct_fail("name_taken");
+        }
+        return acct_fail("name_taken");
+    }
+    let phc = match hash_account_password(password) {
+        Ok(h) => h,
+        Err(e) => return (false, None, format!("口令无法保存: {e}")),
+    };
+    let Some(store) = ctx.store.as_ref() else {
+        return (false, None, "节点未打开数据库，无法保存口令".into());
+    };
+    if let Err(e) = store.put_name_secret(&full, &phc) {
+        return (false, None, format!("口令无法保存: {e}"));
+    }
+    let mut rec = NameRecord {
+        local_part: local,
+        domain,
+        client_pubkey: caller.to_vec(),
+        serial: 1,
+        issued_at: now_ms() as i64,
+        ttl: 3600,
+        home_node: ctx.node_id.to_vec(),
+        home_sig: Vec::new(),
+    };
+    rec.home_sig = nm_crypto::sign_bytes(ctx.ep.secret_key(), &name_canonical(&rec)).to_vec();
+    if let Err(e) = store.put_name(&rec) {
+        return (false, None, format!("名字无法保存: {e}"));
+    }
+    ctx.names.insert(full, rec.clone());
+    let gg = GroupGossip {
+        origin: ctx.node_id.to_vec(),
+        body: Some(nm_proto::pb::group_gossip::Body::Name(rec.clone())),
+    };
+    let _ = ctx.group_pub.send(gg.encode_to_vec());
+    (
+        true,
+        Some(Any {
+            type_url: "text/plain".into(),
+            value: hex_encode(caller).into_bytes(),
+        }),
+        String::new(),
+    )
+}
+
+/// 在家节点比对口令。成功时返回该名字登记的客户端公钥 hex。
+fn login_name_account(ctx: &Ctx, _caller: &[u8], cmd: &Command) -> (bool, Option<Any>, String) {
+    let v = account_params(cmd);
+    let local = v.get("local").and_then(|x| x.as_str()).unwrap_or("").trim().to_lowercase();
+    let domain = v.get("domain").and_then(|x| x.as_str()).unwrap_or("").trim().to_lowercase();
+    let password = v.get("password").and_then(|x| x.as_str()).unwrap_or("");
+    if !valid_local_part(&local) || domain.is_empty() {
+        return acct_fail("invalid_name");
+    }
+    let full = format!("{local}@{domain}");
+    let Some(rec) = ctx.names.get(&full) else {
+        return acct_fail("no_such_user");
+    };
+    let Some(store) = ctx.store.as_ref() else {
+        return acct_fail("no_store");
+    };
+    let phc = match store.name_secret(&full) {
+        Ok(Some(h)) => h,
+        Ok(None) => return acct_fail("no_password"),
+        Err(_) => return acct_fail("no_store"),
+    };
+    if !verify_account_password(&phc, password) {
+        return acct_fail("bad_password");
+    }
+    (
+        true,
+        Some(Any {
+            type_url: "text/plain".into(),
+            value: hex_encode(&rec.client_pubkey).into_bytes(),
+        }),
+        String::new(),
+    )
+}
+
+/// 注册前询问名字是否已存在。不比对口令，也不返回私钥。
+fn lookup_name_account(ctx: &Ctx, cmd: &Command) -> (bool, Option<Any>, String) {
+    let req = match parse_acct(cmd) {
+        Ok(r) => r,
+        Err(code) => return acct_fail(code),
+    };
+    if !owns_domain(ctx, &req.domain) {
+        return acct_fail("domain_not_owned");
+    }
+    let exists = if ctx.names.contains_key(&req.full) { "1" } else { "0" };
+    acct_text(exists)
+}
+
+/// 已登录且公钥匹配时，用旧密码换成新的 Argon2 哈希。
+fn passwd_name_account(ctx: &Ctx, caller: &[u8], cmd: &Command) -> (bool, Option<Any>, String) {
+    let req = match parse_acct(cmd) {
+        Ok(r) => r,
+        Err(code) => return acct_fail(code),
+    };
+    if req.password.chars().count() < 8 {
+        return acct_fail("password_short");
+    }
+    if req.password == req.old {
+        return acct_fail("same_password");
+    }
+    let owner = match ctx.names.get(&req.full) {
+        Some(rec) => rec.client_pubkey.clone(),
+        None => return acct_fail("no_such_user"),
+    };
+    if owner.as_slice() != caller {
+        return acct_fail("not_key_owner");
+    }
+    let Some(store) = ctx.store.as_ref() else {
+        return acct_fail("no_store");
+    };
+    let phc = match store.name_secret(&req.full) {
+        Ok(Some(h)) => h,
+        Ok(None) => return acct_fail("no_password"),
+        Err(_) => return acct_fail("no_store"),
+    };
+    if !verify_account_password(&phc, &req.old) {
+        return acct_fail("bad_password");
+    }
+    match hash_account_password(&req.password) {
+        Ok(h) => match store.put_name_secret(&req.full, &h) {
+            Ok(()) => acct_text("ok"),
+            Err(_) => acct_fail("no_store"),
+        },
+        Err(_) => acct_fail("no_store"),
+    }
+}
+
+/// 本机私钥与登记公钥一致时，不需要旧密码即可设置新密码。
+fn reset_name_account(ctx: &Ctx, caller: &[u8], cmd: &Command) -> (bool, Option<Any>, String) {
+    let req = match parse_acct(cmd) {
+        Ok(r) => r,
+        Err(code) => return acct_fail(code),
+    };
+    if req.password.chars().count() < 8 {
+        return acct_fail("password_short");
+    }
+    let owner = match ctx.names.get(&req.full) {
+        Some(rec) => rec.client_pubkey.clone(),
+        None => return acct_fail("no_such_user"),
+    };
+    if owner.as_slice() != caller {
+        return acct_fail("not_key_owner");
+    }
+    let Some(store) = ctx.store.as_ref() else {
+        return acct_fail("no_store");
+    };
+    match hash_account_password(&req.password) {
+        Ok(h) => match store.put_name_secret(&req.full, &h) {
+            Ok(()) => acct_text("ok"),
+            Err(_) => acct_fail("no_store"),
+        },
+        Err(_) => acct_fail("no_store"),
+    }
+}
+
 fn valid_local_part(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 63
         && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-' || c == '_')
+}
+
+/// 收件人是本节点时，把注册中心的通过/驳回写入本地域名或通知列表。
+fn apply_domain_decision(
+    gram: &Gram,
+    domains: &std::sync::RwLock<Vec<String>>,
+    store: &Option<Arc<RedbStore>>,
+    notices: &DashMap<String, (bool, u64)>,
+) {
+    if gram.kind() != GramKind::Command {
+        return;
+    }
+    let Some(payload) = gram.payload.as_ref() else { return };
+    let Ok(cmd) = Command::decode(payload.value.as_slice()) else { return };
+    if cmd.method != "domain.decision" {
+        return;
+    }
+    let text = cmd
+        .params
+        .as_ref()
+        .map(|p| String::from_utf8_lossy(&p.value).into_owned())
+        .unwrap_or_default();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+    let Some(domain) = v.get("domain").and_then(|d| d.as_str()) else { return };
+    let approved = v.get("approved").and_then(|d| d.as_bool()).unwrap_or(false);
+    let d = domain.trim().to_lowercase();
+    if d.is_empty() {
+        return;
+    }
+    if approved && !domains.read().unwrap().iter().any(|x| x == &d) {
+        domains.write().unwrap().push(d.clone());
+        if let Some(s) = store {
+            let _ = s.put_domain(&d);
+        }
+    }
+    notices.insert(d, (approved, now_ms()));
 }
 
 /// 私聊单播投递（不依赖 s2s 中继）：
@@ -1902,6 +2226,10 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
     let store = &ctx.store;
     let cmd = Command::decode(gram.payload.as_ref()?.value.as_slice()).ok()?;
     let (ok, result, error) = match cmd.method.as_str() {
+        "domain.decision" => {
+            apply_domain_decision(gram, &ctx.domains, &ctx.store, &ctx.domain_notices);
+            (true, None, String::new())
+        }
         "directory.register" | "profile.update" => match cmd
             .params
             .as_ref()
@@ -2105,6 +2433,11 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
             let records: Vec<NameRecord> = ctx.names.iter().map(|r| r.clone()).collect();
             (true, Some(Any { type_url: "nmspace.v1.NameList".into(), value: NameList { records }.encode_to_vec() }), String::new())
         }
+        "name.register" => register_name_account(ctx, caller, &cmd),
+        "name.login" => login_name_account(ctx, caller, &cmd),
+        "name.lookup" => lookup_name_account(ctx, &cmd),
+        "name.passwd" => passwd_name_account(ctx, caller, &cmd),
+        "name.reset" => reset_name_account(ctx, caller, &cmd),
         // ── 频道 / 主题（P4）──
         "channel.create" => match cmd.params.as_ref().and_then(|p| ChannelOp::decode(p.value.as_slice()).ok()) {
             Some(op) if op.channel_id.len() == 32 => {

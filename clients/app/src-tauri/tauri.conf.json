@@ -7,6 +7,7 @@
     "frontendDist": "../ui"
   },
   "app": {
+    "macOSPrivateApi": true,
     "withGlobalTauri": true,
     "windows": [
       {
@@ -18,8 +19,12 @@
         "minHeight": 640,
         "resizable": true,
         "center": true,
+        "decorations": false,
         "titleBarStyle": "Overlay",
-        "hiddenTitle": true
+        "hiddenTitle": true,
+        "transparent": true,
+        "shadow": true,
+        "backgroundColor": "#00000000"
       }
     ],
     "security": {

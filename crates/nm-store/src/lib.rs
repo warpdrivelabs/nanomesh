@@ -21,6 +21,8 @@ const PEERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("peers");
 const BLOBS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("blobs");
 // 命名记录（N1）：key = 完整名 "local@domain" 的字节，value = NameRecord 编码。
 const NAMES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("names");
+/// 账号口令校验器：key = "local@domain"，value = Argon2 PHC 字符串。只存哈希，不明文。
+const NAME_SECRETS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("name_secrets");
 // 本节点拥有的域名（N1，TOFU）：key = 域名字节，value = 占位（申请时间戳字符串）。
 const DOMAINS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("domains");
 
@@ -57,6 +59,7 @@ impl RedbStore {
             wtx.open_table(PEERS).map_err(db_err)?;
             wtx.open_table(BLOBS).map_err(db_err)?;
             wtx.open_table(NAMES).map_err(db_err)?;
+            wtx.open_table(NAME_SECRETS).map_err(db_err)?;
             wtx.open_table(DOMAINS).map_err(db_err)?;
         }
         wtx.commit().map_err(db_err)?;
@@ -247,6 +250,23 @@ impl RedbStore {
             out.push(NameRecord::decode(v.value()).map_err(|e| StoreError::Decode(e.to_string()))?);
         }
         Ok(out)
+    }
+    pub fn put_name_secret(&self, full: &str, phc: &str) -> Result<()> {
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        {
+            let mut t = wtx.open_table(NAME_SECRETS).map_err(db_err)?;
+            t.insert(full.as_bytes(), phc.as_bytes()).map_err(db_err)?;
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+    pub fn name_secret(&self, full: &str) -> Result<Option<String>> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(NAME_SECRETS).map_err(db_err)?;
+        match t.get(full.as_bytes()).map_err(db_err)? {
+            Some(v) => Ok(Some(String::from_utf8_lossy(v.value()).into_owned())),
+            None => Ok(None),
+        }
     }
     pub fn del_name(&self, full: &str) -> Result<()> {
         let wtx = self.db.begin_write().map_err(db_err)?;

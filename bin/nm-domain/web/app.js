@@ -1,13 +1,21 @@
 const COPY_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
 
+const TOKEN_KEY = "nmdomain-token";
+function authHeaders(extra) {
+  const headers = { ...(extra || {}) };
+  const token = sessionStorage.getItem(TOKEN_KEY);
+  if (token) headers.Authorization = "Bearer " + token;
+  return headers;
+}
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     method: opts.method || "GET",
-    headers: opts.body ? { "Content-Type": "application/json" } : {},
+    headers: authHeaders(opts.body ? { "Content-Type": "application/json" } : {}),
     body: opts.body ? JSON.stringify(opts.body) : undefined,
     credentials: "same-origin",
   });
   if (res.status === 401) {
+    sessionStorage.removeItem(TOKEN_KEY);
     window.dispatchEvent(new CustomEvent("domain:logout"));
     throw new Error("会话已失效，请重新登录");
   }
@@ -62,7 +70,7 @@ class DomainApp extends HTMLElement {
     this._onLogout = () => this.show("login");
     window.addEventListener("domain:logout", this._onLogout);
     try {
-      const s = await fetch("/api/session", { credentials: "same-origin" }).then((r) => r.json());
+      const s = await api("/api/session");
       this.show(!s.authed ? "login" : s.mustChange ? "change" : "shell");
     } catch { this.show("login"); }
   }
@@ -94,6 +102,7 @@ class DomainLogin extends HTMLElement {
       e.preventDefault(); err.hidden = true;
       try {
         const r = await api("/api/login", { method: "POST", body: { username: form.u.value.trim(), password: form.p.value } });
+        if (r.token) sessionStorage.setItem(TOKEN_KEY, r.token);
         this.dispatchEvent(new CustomEvent("domain:navigate", { detail: r.mustChange ? "change" : "shell", bubbles: true }));
       } catch (ex) { err.textContent = ex.message; err.hidden = false; }
     });
@@ -137,6 +146,7 @@ class DomainShell extends HTMLElement {
     </div>`;
     this.querySelector("#logout").onclick = async () => {
       try { await api("/api/logout", { method: "POST" }); } catch {}
+      sessionStorage.removeItem(TOKEN_KEY);
       this.dispatchEvent(new CustomEvent("domain:navigate", { detail: "login", bubbles: true }));
     };
     this.refresh();
@@ -144,9 +154,25 @@ class DomainShell extends HTMLElement {
   async refresh() {
     const host = this.querySelector(".host");
     const q = new URLSearchParams({ page: String(this.page), q: this.q });
-    let data;
-    try { data = await api("/api/domains?" + q.toString()); }
+    let data, apps;
+    try {
+      [data, apps] = await Promise.all([
+        api("/api/domains?" + q.toString()),
+        api("/api/applications"),
+      ]);
+    }
     catch (ex) { host.innerHTML = `<div class="err">${esc(ex.message)}</div>`; return; }
+    const appRows = (apps.items || []).map((a) => `<tr>
+      <td><b>${esc(a.domain)}</b></td>
+      <td>${esc(a.email || "—")}</td>
+      <td><code class="mono">${shortId(a.node_id)}</code></td>
+      <td>${a.status === "pending" ? "待审" : a.status === "approved" ? "已通过" : "已驳回"}</td>
+      <td>${esc(fmtTime(a.created_ms))}</td>
+      <td class="right">${a.status === "pending"
+        ? `<button class="btn btn--primary" type="button" data-approve="${esc(a.domain)}">通过</button>
+           <button class="btn btn--danger" type="button" data-reject="${esc(a.domain)}">驳回</button>`
+        : ""}</td>
+    </tr>`).join("");
     const rows = (data.items || []).map((r) => `<tr>
       <td><b>${esc(r.domain)}</b></td>
       <td>${esc(r.email)}</td>
@@ -170,6 +196,14 @@ class DomainShell extends HTMLElement {
         <div class="err" hidden></div>
       </form>
       <p class="hint">公开解析：<code>/api/resolve?domain=acme.mesh</code>，无需登录。停用后不再返回公钥，登记记录仍保留。这里不登记 name@domain。</p>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <b>域名申请</b>
+      <p class="hint">节点通过 <code>/api/signup?nodeid=&amp;domain=</code> 提交。通过或驳回都会经本机 nmd 通知该节点。</p>
+      <table class="tbl">
+        <thead><tr><th>域名</th><th>邮箱</th><th>节点</th><th>状态</th><th>申请时间</th><th></th></tr></thead>
+        <tbody>${appRows || '<tr><td colspan="6" style="color:var(--muted)">没有申请</td></tr>'}</tbody>
+      </table>
     </div>
     <div class="card" style="margin-top:14px">
       <form class="find row">
@@ -210,6 +244,13 @@ class DomainShell extends HTMLElement {
       try { await api("/api/domains/disable", { method: "POST", body: { domain: b.dataset.disable } }); this.refresh(); }
       catch (ex) { alert(ex.message); }
     }));
+    const decide = (sel, path) => host.querySelectorAll(sel).forEach((b) => (b.onclick = async () => {
+      b.disabled = true;
+      try { await api(path, { method: "POST", body: { domain: b.dataset.approve || b.dataset.reject } }); this.refresh(); }
+      catch (ex) { alert(ex.message); b.disabled = false; }
+    }));
+    decide("[data-approve]", "/api/applications/approve");
+    decide("[data-reject]", "/api/applications/reject");
     host.querySelectorAll("[data-enable]").forEach((b) => (b.onclick = async () => {
       try { await api("/api/domains/enable", { method: "POST", body: { domain: b.dataset.enable } }); this.refresh(); }
       catch (ex) { alert(ex.message); }

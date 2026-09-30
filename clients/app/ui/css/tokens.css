@@ -12,6 +12,8 @@
     --header-h:32px;
     --aside-w:270px;
     --r-ctrl:8px; --r-float:12px; --r-bubble:14px;
+    /* Apple 图标圆角：边长的约 22%，随头像尺寸缩放 */
+    --avatar-radius:22%;
   }
   /* 浅色主题（dataviz light 令牌）——由标题栏主题开关切换 html[data-theme] */
   html[data-theme="light"]{
@@ -29,7 +31,10 @@
   input[type=password]::-ms-reveal,
   input[type=password]::-ms-clear{display:none}
   html,body{height:100%;margin:0}
-  body{font-family:-apple-system,'PingFang SC','Hiragino Sans GB',system-ui,sans-serif;background:var(--bg);color:var(--ink);margin:0;overflow:hidden}
+  html,body{background:transparent;height:100%;overflow:hidden}
+  body{font-family:-apple-system,'PingFang SC','Hiragino Sans GB',system-ui,sans-serif;color:var(--ink);margin:0}
+  #main-view{border-radius:16px}
+  #login-view{border-radius:0;background:var(--bg)}
   /* 顶部工作区（活动栏 + 侧栏 + 主区）在原生标题条之下 */
   .workspace{flex:1;display:flex;min-height:0}
 

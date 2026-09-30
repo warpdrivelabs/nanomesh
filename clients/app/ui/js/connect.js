@@ -158,11 +158,12 @@ function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&a
   NodeSvc.migrate();
   renderServiceOptions();
   renderUserOptions();
-  document.getElementById("c-newuser").addEventListener("click", openNewUser);
-  document.getElementById("newuser-ok").addEventListener("click", confirmNewUser);
-  document.getElementById("newuser-cancel").addEventListener("click", () => { document.getElementById("newuser-box").style.display = "none"; });
-  document.getElementById("newuser-name").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); confirmNewUser(); } });
-  document.getElementById("c-newsvc").addEventListener("click", openNewSvc);
-  document.getElementById("connect-form").addEventListener("submit", submitConnect);
+  const bind = (id, ev, fn) => { const el = document.getElementById(id); if (el) el.addEventListener(ev, fn); };
+  bind("c-newuser", "click", openNewUser);
+  bind("newuser-ok", "click", confirmNewUser);
+  bind("newuser-cancel", "click", () => { document.getElementById("newuser-box").style.display = "none"; });
+  bind("newuser-name", "keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); confirmNewUser(); } });
+  bind("c-newsvc", "click", openNewSvc);
+  bind("connect-form", "submit", submitConnect);
   // 启动视图由 auth.js 的 routeStart 决定（先过锁屏），此处不直接 showLoginView。
 })();

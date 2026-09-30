@@ -22,6 +22,7 @@ const NM_ICON_PATHS = {
   search: '<circle cx="11" cy="11" r="6"/><path d="m20 20-3.5-3.5"/>',
   send: '<path d="M12 19V6M6 11l6-6 6 6"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/>',
+  ticker: '<path d="M4 8h16M4 12h16M4 16h16"/><circle cx="8" cy="8" r="1.7" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.7" fill="currentColor" stroke="none"/><circle cx="11" cy="16" r="1.7" fill="currentColor" stroke="none"/>',
   shield: '<path d="M12 3 19 6v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/>',
   person: '<circle cx="12" cy="8" r="3.5"/><path d="M5 19.5c1.2-3.2 3.5-4.8 7-4.8s5.8 1.6 7 4.8"/>',
   robot: '<rect x="5" y="8" width="14" height="10" rx="2"/><path d="M12 8V4.5M9 4.5h6M9 13h.01M15 13h.01M8 18v2M16 18v2"/>',

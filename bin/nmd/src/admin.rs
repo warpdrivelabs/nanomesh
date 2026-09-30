@@ -83,6 +83,8 @@ pub async fn serve(
         .route("/remove-peer", post(remove_peer))
         .route("/names/domains", get(names_domains))
         .route("/names/domain-add", post(names_domain_add))
+        .route("/names/domain-decision", post(names_domain_decision))
+        .route("/names/domain-notices", get(names_domain_notices))
         .route("/names/list", get(names_list))
         .route("/names/set", post(names_set))
         .route("/names/del", post(names_del))
@@ -320,6 +322,29 @@ async fn names_domains(State(st): State<AppState>) -> Json<Value> {
 #[derive(serde::Deserialize)]
 struct DomainReq {
     domain: String,
+}
+#[derive(serde::Deserialize)]
+struct DecisionReq {
+    node_id: String,
+    domain: String,
+    approved: bool,
+}
+async fn names_domain_decision(State(st): State<AppState>, Json(r): Json<DecisionReq>) -> Json<Value> {
+    let Some(id) = parse_id(&r.node_id) else {
+        return Json(json!({ "ok": false, "error": "node id 须为 64 位十六进制" }));
+    };
+    st.node.publish_domain_decision(id, &r.domain, r.approved);
+    Json(json!({ "ok": true }))
+}
+async fn names_domain_notices(State(st): State<AppState>) -> Json<Value> {
+    let mut notices: Vec<Value> = st
+        .node
+        .domain_notices()
+        .into_iter()
+        .map(|(domain, approved, at_ms)| json!({ "domain": domain, "approved": approved, "at_ms": at_ms }))
+        .collect();
+    notices.sort_by(|a, b| b["at_ms"].as_u64().cmp(&a["at_ms"].as_u64()));
+    Json(json!({ "notices": notices }))
 }
 async fn names_domain_add(State(st): State<AppState>, Json(r): Json<DomainReq>) -> Json<Value> {
     match st.node.add_domain(&r.domain) {

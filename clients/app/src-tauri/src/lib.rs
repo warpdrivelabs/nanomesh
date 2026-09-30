@@ -721,7 +721,352 @@ async fn my_id(state: State<'_, AppState>) -> Result<String, String> {
     Ok(hex(&g.as_ref().ok_or("尚未连接")?.my_id))
 }
 
-// ── 去中心命名（N1）──
+fn write_device_key(dir: &std::path::Path, pw: &str) -> Result<(), String> {
+    let key_path = dir.join("device.key");
+    std::fs::write(&key_path, pw).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+fn open_device_vault(app: &AppHandle, state: &State<'_, AppState>) -> Result<(), String> {
+    if state.vault.lock().unwrap().is_some() {
+        return Ok(());
+    }
+    let dir = data_dir(app)?;
+    let key_path = dir.join("device.key");
+    if auth::vault_exists(&dir) {
+        if let Ok(pw) = std::fs::read_to_string(&key_path) {
+            if let Ok(vk) = auth::unlock(&dir, pw.trim()) {
+                *state.vault.lock().unwrap() = Some(vk);
+                return Ok(());
+            }
+        }
+        // 旧主口令库无法在无界面下打开。挪走后改由本机设备密钥建库，不再弹出解锁页。
+        let legacy = dir.join(format!("vault.json.legacy-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)));
+        std::fs::rename(dir.join("vault.json"), legacy).map_err(|e| e.to_string())?;
+    }
+    let mut raw = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut raw);
+    let pw = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, raw);
+    let vk = auth::setup(&dir, &pw)?;
+    write_device_key(&dir, &pw)?;
+    *state.vault.lock().unwrap() = Some(vk);
+    Ok(())
+}
+
+fn registry_base(raw: &str) -> String {
+    let s = raw.trim().trim_end_matches('/');
+    if s.is_empty() { "https://robot.link".into() } else { s.to_string() }
+}
+
+fn norm_account(local: &str, domain: &str) -> Result<(String, String), String> {
+    let local = local.trim().to_lowercase();
+    let domain = domain.trim().to_lowercase();
+    let ok = !local.is_empty()
+        && local.len() <= 63
+        && local.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '-' | '_'))
+        && !domain.is_empty()
+        && domain.len() <= 253
+        && domain.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '-'));
+    if !ok {
+        return Err("用户名或域名不合法".into());
+    }
+    Ok((local, domain))
+}
+
+/// 用 OpenSSL 发 HTTPS GET。系统 TLS 和 rustls 连 robot.link 会在 ClientHello 后被重置。
+fn https_get_json(url: &str) -> Result<Value, String> {
+    let rest = url.strip_prefix("https://").ok_or("注册中心地址必须是 https")?;
+    let (hostport, pathq) = rest.split_once('/').unwrap_or((rest, ""));
+    let path = format!("/{pathq}");
+    let (host, port) = match hostport.split_once(':') {
+        Some((h, p)) => (h, p.parse::<u16>().map_err(|_| "注册中心端口无效".to_string())?),
+        None => (hostport, 443u16),
+    };
+    if host.is_empty() {
+        return Err("注册中心地址无效".into());
+    }
+    let tcp = std::net::TcpStream::connect((host, port)).map_err(|e| format!("连接注册中心失败: {e}"))?;
+    let _ = tcp.set_read_timeout(Some(std::time::Duration::from_secs(20)));
+    let _ = tcp.set_write_timeout(Some(std::time::Duration::from_secs(20)));
+    let mut builder = openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls())
+        .map_err(|e| format!("TLS 初始化失败: {e}"))?;
+    if std::path::Path::new("/etc/ssl/cert.pem").exists() {
+        builder.set_ca_file("/etc/ssl/cert.pem").map_err(|e| format!("无法加载系统证书: {e}"))?;
+    }
+    let connector = builder.build();
+    let mut stream = connector.connect(host, tcp).map_err(|e| format!("注册中心 TLS 失败: {e}"))?;
+    let req = format!(
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nAccept: application/json\r\nAccept-Encoding: identity\r\n\r\n"
+    );
+    std::io::Write::write_all(&mut stream, req.as_bytes()).map_err(|e| format!("请求注册中心失败: {e}"))?;
+    let mut raw = Vec::new();
+    std::io::Read::read_to_end(&mut stream, &mut raw).map_err(|e| format!("读取注册中心响应失败: {e}"))?;
+    let text = String::from_utf8_lossy(&raw);
+    let (head, body) = text.split_once("\r\n\r\n").ok_or("注册中心响应不完整")?;
+    let code: u16 = head
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    let v: Value = serde_json::from_str(body.trim()).map_err(|e| format!("注册中心响应无法解析: {e}"))?;
+    if !(200..300).contains(&code) {
+        let err = v.get("error").and_then(|x| x.as_str()).unwrap_or("注册中心拒绝了请求");
+        return Err(err.to_string());
+    }
+    Ok(v)
+}
+
+async fn http_get_json(url: &str) -> Result<Value, String> {
+    let url = url.to_string();
+    tokio::task::spawn_blocking(move || https_get_json(&url))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 打开应用时准备本机钥匙库，不再向用户要主口令。
+#[tauri::command]
+fn ensure_device(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    open_device_vault(&app, &state)
+}
+
+/// 注册中心里未停用的域名，供登录页下拉。不含邮箱。
+#[tauri::command]
+async fn account_domains(registry: String) -> Result<Value, String> {
+    let url = format!("{}/api/catalog", registry_base(&registry));
+    http_get_json(&url).await
+}
+
+fn query_escape(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn registry_phrase(err: &str) -> String {
+    if err.contains("域名未登记") {
+        "这个域名还没有在注册中心登记，不能用来注册或登录。".into()
+    } else if err.contains("域名已停用") {
+        "这个域名已停用。".into()
+    } else if err == "domain_not_owned" {
+        "域名已登记，家节点尚未同步，请稍后再试。".into()
+    } else {
+        err.to_string()
+    }
+}
+
+async fn resolve_home_node(registry: &str, domain: &str) -> Result<String, String> {
+    let url = format!("{}/api/resolve?domain={}", registry_base(registry), query_escape(domain));
+    let v = http_get_json(&url).await.map_err(|e| registry_phrase(&e))?;
+    v.get("pubkey")
+        .and_then(|x| x.as_str())
+        .filter(|s| s.len() == 64)
+        .map(|s| s.to_string())
+        .ok_or_else(|| "注册中心没有返回该域名的节点公钥".into())
+}
+
+async fn node_account(node: &str, seed: [u8; 32], method: &str, body: &str) -> Result<String, String> {
+    let (_client, session) = dial(seed, "nat", node, Vec::new(), None, None).await?;
+    let out = session.name_account(method, body).await.map_err(|e| registry_phrase(&e.to_string()))?;
+    drop(session);
+    Ok(out)
+}
+
+/// 在家节点注册。口令只发到家节点做 Argon2 哈希，本机不保存口令。
+#[tauri::command]
+async fn account_register(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    local: String,
+    domain: String,
+    nickname: String,
+    password: String,
+    registry: String,
+) -> Result<Value, String> {
+    open_device_vault(&app, &state)?;
+    if password.chars().count() < 8 {
+        return Err("密码至少 8 位".into());
+    }
+    let (local, domain) = norm_account(&local, &domain)?;
+    let node = resolve_home_node(&registry, &domain).await?;
+    let probe = nm_transport::SecretKey::generate().to_bytes();
+    let body = json!({ "local": local, "domain": domain }).to_string();
+    match node_account(&node, probe, "name.lookup", &body).await {
+        Ok(exists) if exists.trim() == "1" => return Err("name_taken".into()),
+        Ok(_) => {}
+        Err(e) if e.contains("unknown method") => {}
+        Err(e) => return Err(e),
+    }
+    let user = create_identity(app.clone(), state.clone())?;
+    let nick = if nickname.trim().is_empty() { format!("{local}@{domain}") } else { nickname.trim().to_string() };
+    connect(app, state.clone(), user.clone(), "nat".into(), node.clone(), nick, Vec::new(), None, None).await?;
+    let session = session_of(&state).await?;
+    let body = json!({ "local": local, "domain": domain, "password": password }).to_string();
+    session.name_account("name.register", &body).await.map_err(|e| registry_phrase(&e.to_string()))?;
+    Ok(json!({ "user": user, "name": format!("{local}@{domain}"), "node": node }))
+}
+
+/// 在家节点比对口令，再核对本机私钥是否就是该名字登记的公钥。
+#[tauri::command]
+async fn account_login(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    local: String,
+    domain: String,
+    password: String,
+    user: String,
+    nickname: String,
+    registry: String,
+) -> Result<Value, String> {
+    open_device_vault(&app, &state)?;
+    let (local, domain) = norm_account(&local, &domain)?;
+    let node = resolve_home_node(&registry, &domain).await?;
+    let user = user.trim().to_string();
+    let seed = if user.is_empty() {
+        nm_transport::SecretKey::generate().to_bytes()
+    } else {
+        let vk = vk_of(&state)?;
+        load_identity_seed(&app, &vk, &user)?
+    };
+    let (_probe_client, probe) = dial(seed, "nat", &node, Vec::new(), None, None).await?;
+    let body = json!({ "local": local, "domain": domain, "password": password }).to_string();
+    let got = probe.name_account("name.login", &body).await.map_err(|e| registry_phrase(&e.to_string()))?;
+    drop(probe);
+    let got = got.trim().to_ascii_lowercase();
+    if user.is_empty() || got != user.to_ascii_lowercase() {
+        return Err("not_key_owner".into());
+    }
+    let nick = if nickname.trim().is_empty() { format!("{local}@{domain}") } else { nickname.trim().to_string() };
+    connect(app, state, user.clone(), "nat".into(), node.clone(), nick, Vec::new(), None, None).await?;
+    Ok(json!({ "user": user, "name": format!("{local}@{domain}"), "node": node }))
+}
+
+/// 已登录时修改家节点上的登录密码。调用方必须是该名字登记的公钥。
+#[tauri::command]
+async fn account_passwd(
+    state: State<'_, AppState>,
+    local: String,
+    domain: String,
+    old_password: String,
+    password: String,
+) -> Result<(), String> {
+    if password.chars().count() < 8 {
+        return Err("password_short".into());
+    }
+    if password == old_password {
+        return Err("same_password".into());
+    }
+    let (local, domain) = norm_account(&local, &domain)?;
+    let session = session_of(&state).await?;
+    let body = json!({ "local": local, "domain": domain, "old": old_password, "password": password }).to_string();
+    session.name_account("name.passwd", &body).await.map_err(|e| registry_phrase(&e.to_string()))?;
+    Ok(())
+}
+
+/// 本机持有对应私钥时，不验证旧密码，直接在家节点设置新密码。
+#[tauri::command]
+async fn account_reset(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    local: String,
+    domain: String,
+    password: String,
+    user: String,
+    registry: String,
+) -> Result<(), String> {
+    open_device_vault(&app, &state)?;
+    if password.chars().count() < 8 {
+        return Err("password_short".into());
+    }
+    let (local, domain) = norm_account(&local, &domain)?;
+    let user = user.trim().to_string();
+    if user.is_empty() {
+        return Err("not_key_owner".into());
+    }
+    let node = resolve_home_node(&registry, &domain).await?;
+    let vk = vk_of(&state)?;
+    let seed = load_identity_seed(&app, &vk, &user)?;
+    let body = json!({ "local": local, "domain": domain, "password": password }).to_string();
+    node_account(&node, seed, "name.reset", &body).await?;
+    Ok(())
+}
+
+/// 域名输入时的提示。优先用目录做前缀过滤；目录不可用时，改用公开解析核对当前域名。
+#[tauri::command]
+async fn account_suggest(q: String, registry: String) -> Result<Value, String> {
+    let needle = q.trim().to_lowercase();
+    if needle.is_empty() {
+        return Ok(json!({ "ok": true, "items": [], "status": "empty" }));
+    }
+    let base = registry_base(&registry);
+    let catalog = format!("{base}/api/catalog?q={}", query_escape(&needle));
+    if let Ok(v) = http_get_json(&catalog).await {
+        let items: Vec<Value> = v
+            .get("items")
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter(|it| {
+                        it.get("domain")
+                            .and_then(|d| d.as_str())
+                            .map(|d| d.to_lowercase().contains(&needle))
+                            .unwrap_or(false)
+                    })
+                    .take(8)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let exact = items.iter().any(|it| it.get("domain").and_then(|d| d.as_str()) == Some(needle.as_str()));
+        let status = if exact {
+            "exact"
+        } else if !items.is_empty() {
+            "list"
+        } else if needle.contains('.') {
+            "unknown"
+        } else {
+            "partial"
+        };
+        if status == "unknown" {
+            let resolve = format!("{base}/api/resolve?domain={}", query_escape(&needle));
+            if let Err(e) = http_get_json(&resolve).await {
+                if e.contains("域名已停用") {
+                    return Ok(json!({ "ok": true, "items": [], "status": "disabled" }));
+                }
+            }
+        }
+        return Ok(json!({ "ok": true, "items": items, "status": status }));
+    }
+    if !needle.contains('.') {
+        return Ok(json!({ "ok": true, "items": [], "status": "partial" }));
+    }
+    let resolve = format!("{base}/api/resolve?domain={}", query_escape(&needle));
+    match http_get_json(&resolve).await {
+        Ok(v) => {
+            let domain = v.get("domain").and_then(|d| d.as_str()).unwrap_or(needle.as_str());
+            let pubkey = v.get("pubkey").and_then(|d| d.as_str()).unwrap_or("");
+            Ok(json!({
+                "ok": true,
+                "status": "exact",
+                "items": [{ "domain": domain, "pubkey": pubkey }],
+            }))
+        }
+        Err(e) if e.contains("域名未登记") => Ok(json!({ "ok": true, "items": [], "status": "unknown" })),
+        Err(e) if e.contains("域名已停用") => Ok(json!({ "ok": true, "items": [], "status": "disabled" })),
+        Err(e) => Err(e),
+    }
+}
+
 /// 在 home node 认领本地名 → 返回完整名 local@domain。
 #[tauri::command]
 async fn name_claim(state: State<'_, AppState>, local_part: String) -> Result<String, String> {
@@ -751,7 +1096,129 @@ async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-/// 供前端 `platform.js` 探测系统（Win/Linux 自绘窗口三键 + 缩放热区；macOS 用系统交通灯）。
+fn https_get_raw(url: &str) -> Result<(u16, String), String> {
+    let rest = url.strip_prefix("https://").ok_or("地址必须是 https")?;
+    let (hostport, pathq) = rest.split_once('/').unwrap_or((rest, ""));
+    let path = format!("/{pathq}");
+    let (host, port) = match hostport.split_once(':') {
+        Some((h, p)) => (h, p.parse::<u16>().map_err(|_| "端口无效".to_string())?),
+        None => (hostport, 443u16),
+    };
+    let tcp = std::net::TcpStream::connect((host, port)).map_err(|e| e.to_string())?;
+    let _ = tcp.set_read_timeout(Some(std::time::Duration::from_secs(12)));
+    let _ = tcp.set_write_timeout(Some(std::time::Duration::from_secs(12)));
+    let mut builder = openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls()).map_err(|e| e.to_string())?;
+    if std::path::Path::new("/etc/ssl/cert.pem").exists() {
+        let _ = builder.set_ca_file("/etc/ssl/cert.pem");
+    }
+    let mut stream = builder.build().connect(host, tcp).map_err(|e| e.to_string())?;
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nAccept: */*\r\nAccept-Encoding: identity\r\n\r\n");
+    std::io::Write::write_all(&mut stream, req.as_bytes()).map_err(|e| e.to_string())?;
+    let mut raw = Vec::new();
+    std::io::Read::read_to_end(&mut stream, &mut raw).map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&raw);
+    let (head, body) = text.split_once("\r\n\r\n").ok_or("响应不完整")?;
+    let code: u16 = head.lines().next().and_then(|l| l.split_whitespace().nth(1)).and_then(|c| c.parse().ok()).unwrap_or(0);
+    if !(200..300).contains(&code) {
+        return Err(format!("HTTP {code}"));
+    }
+    Ok((code, body.to_string()))
+}
+
+fn rate_num(v: &Value) -> Option<f64> {
+    v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+}
+
+fn ticker_fx() -> Option<String> {
+    let v = https_get_json("https://open.er-api.com/v6/latest/USD").ok()?;
+    let rates = v.get("rates")?;
+    let cny = rate_num(rates.get("CNY")?)?;
+    let eur = rate_num(rates.get("EUR")?)?;
+    let gbp = rate_num(rates.get("GBP")?)?;
+    let jpy = rate_num(rates.get("JPY")?)?;
+    if eur <= 0.0 || gbp <= 0.0 || jpy <= 0.0 {
+        return None;
+    }
+    Some(format!(
+        "汇率  美元/人民币 {cny:.2}  欧元/人民币 {:.2}  英镑/人民币 {:.2}  100日元/人民币 {:.2}",
+        cny / eur,
+        cny / gbp,
+        cny / jpy * 100.0
+    ))
+}
+
+fn gate_last(pair: &str) -> Option<f64> {
+    let v = https_get_json(&format!(
+        "https://api.gateio.ws/api/v4/spot/tickers?currency_pair={pair}"
+    ))
+    .ok()?;
+    let row = v.as_array()?.first()?;
+    row.get("last")?.as_str()?.parse().ok()
+}
+
+fn ticker_crypto() -> Option<String> {
+    let btc = gate_last("BTC_USDT")?;
+    let eth = gate_last("ETH_USDT")?;
+    let sol = gate_last("SOL_USDT").unwrap_or(0.0);
+    let sol_txt = if sol > 0.0 { format!("  SOL {sol:.2}") } else { String::new() };
+    Some(format!("币价  BTC {btc:.0} 美元  ETH {eth:.0} 美元{sol_txt}"))
+}
+
+fn ticker_news() -> Option<String> {
+    let (_code, body) = https_get_raw("https://www.chinanews.com.cn/rss/scroll-news.xml").ok()?;
+    let item = body.split("<item>").nth(1)?;
+    let raw = item.split("<title>").nth(1)?.split("</title>").next()?.trim();
+    let title = raw
+        .trim_start_matches("<![CDATA[")
+        .trim_end_matches("]]>")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'");
+    let title = title.trim();
+    if title.is_empty() { None } else { Some(format!("要闻  {title}")) }
+}
+
+fn ticker_weather() -> Option<String> {
+    let v = https_get_json("https://api.open-meteo.com/v1/forecast?latitude=39.90,31.23,35.68,51.51,40.71,1.35&longitude=116.40,121.47,139.69,-0.13,-74.01,103.82&current=temperature_2m").ok()?;
+    let names = ["北京", "上海", "东京", "伦敦", "纽约", "新加坡"];
+    let temps: Vec<f64> = if let Some(arr) = v.as_array() {
+        arr.iter().filter_map(|x| x.pointer("/current/temperature_2m").and_then(|t| t.as_f64())).collect()
+    } else {
+        v.pointer("/current/temperature_2m").and_then(|t| t.as_f64()).into_iter().collect()
+    };
+    if temps.is_empty() {
+        return None;
+    }
+    let text = names.iter().zip(temps.iter()).map(|(n, t)| format!("{n} {t:.0}°")).collect::<Vec<_>>().join("  ");
+    Some(format!("天气  {text}"))
+}
+
+/// 标题栏跑马灯。只返回勾选的来源；某一路失败就略过，不编造数字。
+#[tauri::command]
+async fn ticker_feed(fx: bool, crypto: bool, news: bool, weather: bool) -> Result<Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let mut parts = Vec::new();
+        if fx {
+            if let Some(s) = ticker_fx() { parts.push(s); }
+        }
+        if crypto {
+            if let Some(s) = ticker_crypto() { parts.push(s); }
+        }
+        if news {
+            if let Some(s) = ticker_news() { parts.push(s); }
+        }
+        if weather {
+            if let Some(s) = ticker_weather() { parts.push(s); }
+        }
+        let text = if parts.is_empty() { "行情暂时不可用".to_string() } else { parts.join("     ·     ") };
+        json!({ "text": text })
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// 供前端 `platform.js` 探测系统。窗口按钮由标题栏自绘。
 #[tauri::command]
 fn platform() -> &'static str {
     std::env::consts::OS // "macos" | "windows" | "linux"
@@ -762,11 +1229,10 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
         .setup(|_app| {
-            // Windows/Linux：关系统窗口装饰，改用前端自绘标题栏 + 缩放热区（js/platform.js）；
-            // macOS 保留系统交通灯（tauri.conf.json 的 titleBarStyle:Overlay）。
-            #[cfg(not(target_os = "macos"))]
+            // 系统交通灯改由标题栏右侧的红黄绿按钮承担，各平台都关掉原生装饰。
             if let Some(w) = _app.get_webview_window("main") {
                 let _ = w.set_decorations(false);
+                let _ = w.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
             }
             Ok(())
         })
@@ -798,11 +1264,19 @@ pub fn run() {
             channel_backfill,
             name_claim,
             name_resolve,
+            ensure_device,
+            account_domains,
+            account_register,
+            account_login,
+            account_passwd,
+            account_reset,
+            account_suggest,
             name_reverse,
             node_users,
             my_id,
             disconnect,
             platform,
+            ticker_feed,
             list_identities,
             create_identity,
             auth_status,

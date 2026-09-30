@@ -14,7 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["macos-private-api"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
@@ -30,3 +30,5 @@ rand = "0.8"
 zeroize = "1"
 base64 = "0.22"
 bip39 = "2"
+# macOS 系统 TLS / rustls 访问 robot.link 会在握手时被重置，改用 OpenSSL。
+openssl = "0.10"

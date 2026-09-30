@@ -19,5 +19,8 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 argon2 = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
-reqwest = { version = "0.13", default-features = false, features = ["json"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }
+# macOS 系统 TLS 访问 robot.link 会在握手时被断开，注册中心请求改用 OpenSSL。
+openssl = "0.10"

@@ -38,7 +38,7 @@
     const idAttr = domId ? ` id="${domId}"` : "";
     const cls = s <= 28 ? "av av-sm" : "av";
     if (isImg(avatar)) {
-      return `<span class="${cls} av-img"${idAttr} style="width:${s}px;height:${s}px;flex:0 0 ${s}px;padding:0;overflow:hidden;background:${bg}"><img src="${avatar}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:50%;display:block">${extra || ""}</span>`;
+      return `<span class="${cls} av-img"${idAttr} style="width:${s}px;height:${s}px;flex:0 0 ${s}px;padding:0;overflow:hidden;background:${bg}"><img src="${avatar}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:var(--avatar-radius);display:block">${extra || ""}</span>`;
     }
     return `<span class="${cls}"${idAttr} style="width:${s}px;height:${s}px;flex:0 0 ${s}px;background:${bg}">${ch}${extra || ""}</span>`;
   }
@@ -46,9 +46,9 @@
   // 头像渲染：传入的应是可直接用的 data:URI（已解析）；否则回退首字母底色块。
   function avatarHtml(avatar, fallbackChar, size, bg) {
     const s = size || 40;
-    if (isImg(avatar)) return `<img src="${avatar}" alt="" style="width:${s}px;height:${s}px;border-radius:50%;object-fit:cover;display:block">`;
+    if (isImg(avatar)) return `<img src="${avatar}" alt="" style="width:${s}px;height:${s}px;border-radius:var(--avatar-radius);object-fit:cover;display:block">`;
     const ch = (typeof escapeHtml === "function") ? escapeHtml(fallbackChar || "?") : (fallbackChar || "?");
-    return `<div style="width:${s}px;height:${s}px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:${bg || "var(--accent-soft)"};color:#fff;font-weight:700;font-size:${Math.round(s * 0.42)}px">${ch}</div>`;
+    return `<div style="width:${s}px;height:${s}px;border-radius:var(--avatar-radius);display:flex;align-items:center;justify-content:center;background:${bg || "var(--accent-soft)"};color:#fff;font-weight:700;font-size:${Math.round(s * 0.42)}px">${ch}</div>`;
   }
 
   // 选图 → 居中裁剪缩放到 size → JPEG data:URI。

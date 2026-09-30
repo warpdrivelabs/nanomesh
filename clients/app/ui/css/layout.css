@@ -8,20 +8,38 @@
      整条可拖动（app-region: drag）；左侧留 78px 给交通灯；右侧放控件（控件本身设 no-drag）。
      左侧 82px 留白仅 macOS 需要（系统红绿灯浮在其上）；Windows/Linux 无原生装饰，JS 加 .no-native-decor
      后去掉左 padding，标题条左对齐、右侧改放自绘窗口控件（.win-ctrls）。 */
-  .titlebar{height:32px;flex:0 0 32px;display:flex;align-items:center;
+  .titlebar{height:40px;flex:0 0 40px;display:flex;align-items:center;gap:8px;position:relative;
     background:var(--panel);border-bottom:1px solid var(--border);
-    padding:0 10px 0 82px;-webkit-app-region:drag;user-select:none}
-  body.no-native-decor .titlebar{padding-left:12px}
-  .titlebar .tb-title{font-size:12px;color:var(--muted);font-weight:600;letter-spacing:0.06em}
-  .titlebar .sp{flex:1}
-  .tb-ctrls{display:flex;align-items:center;gap:2px;-webkit-app-region:no-drag}
+    padding:0 10px;-webkit-app-region:drag;user-select:none}
+  .tb-brand{display:flex;align-items:center;gap:8px;flex:none}
+  .tb-app-icon{width:22px;height:22px;border-radius:var(--avatar-radius);corner-shape:squircle;object-fit:cover;display:block;flex:none}
+  .titlebar .tb-title{font-size:13px;color:var(--ink);font-weight:700;letter-spacing:0.04em}
+  .tb-ctrls{display:flex;align-items:center;gap:2px;-webkit-app-region:no-drag;flex:none}
+  .tb-marquee{flex:1 1 0;width:0;min-width:0;align-self:stretch;overflow:hidden;display:flex;align-items:center}
+  .tb-marquee-track{display:flex;width:max-content;white-space:nowrap;color:var(--ink2);font-size:12px;will-change:transform;
+    animation-name:tb-marquee;animation-timing-function:linear;animation-iteration-count:infinite;animation-duration:48s}
+  .tb-marquee-track span{padding-right:4em}
+  .tb-marquee:hover .tb-marquee-track{animation-play-state:paused}
+  @keyframes tb-marquee{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+  .tb-ticker-pop{position:absolute;top:36px;left:210px;z-index:30;display:flex;flex-direction:column;gap:8px;
+    min-width:180px;padding:10px 12px;background:var(--panel2);border:1px solid var(--border2);
+    border-radius:var(--r-float);box-shadow:0 10px 28px rgba(0,0,0,.35);-webkit-app-region:no-drag}
+  .tb-ticker-pop[hidden]{display:none}
+  .tb-ticker-pop label{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink);cursor:pointer}
+  .tb-speed{gap:10px}
+  .tb-speed input[type=range]{flex:1;height:4px;accent-color:var(--aqua);cursor:pointer}
   .tb-btn{display:flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border-radius:var(--r-ctrl);color:var(--ink2);
     font-size:12px;background:transparent;border:1px solid transparent}
   .tb-btn:hover{background:var(--hover);color:var(--ink);border-color:var(--border)}
   .tb-btn .ico{font-size:14px;line-height:1}
   .tb-update{color:var(--aqua)} .tb-update:hover{border-color:var(--aqua)}
   /* Windows/Linux 窗口控件（最小化/最大化/关闭）：默认隐藏，initPlatformChrome 探测非 macOS 后 display:flex */
-  .win-ctrls{display:flex;align-items:center;-webkit-app-region:no-drag;margin-left:4px}
+  .win-ctrls{display:flex;align-items:center;gap:8px;-webkit-app-region:no-drag;margin-left:8px;flex:none}
+  .tl{width:13px;height:13px;border-radius:50%;border:none;padding:0;flex:none}
+  .tl-red{background:#ff5f57}
+  .tl-yellow{background:#febc2e}
+  .tl-green{background:#28c840}
+  .tl:hover{filter:brightness(0.92)}
   .win-btn{display:flex;align-items:center;justify-content:center;width:44px;height:32px;color:var(--ink2);border-radius:0}
   .win-btn:hover{background:var(--hover);color:var(--ink)}
   .win-btn.win-close:hover{background:var(--red);color:#fff}
@@ -62,7 +80,7 @@
   /* Telegram 式会话行 */
   .im-item{display:flex;gap:10px;padding:9px 8px;border-radius:var(--r-ctrl);cursor:pointer}
   .im-item:hover{background:var(--hover)}
-  .im-item .av{width:40px;height:40px;border-radius:50%;flex:0 0 40px;display:flex;align-items:center;justify-content:center;
+  .im-item .av{width:40px;height:40px;border-radius:var(--avatar-radius);flex:0 0 40px;display:flex;align-items:center;justify-content:center;
     font-size:16px;color:#fff}
   .im-item .mid{flex:1;min-width:0}
   .im-item .r1{display:flex;align-items:center;gap:6px} .im-item .nm{font-weight:600;font-size:14px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

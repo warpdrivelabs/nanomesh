@@ -11,12 +11,7 @@ function pwdPolicyError(p) {
   return "";
 }
 
-function showLockView() {
-  document.getElementById("main-view").style.display = "none";
-  document.getElementById("login-view").style.display = "none";
-  document.getElementById("lock-view").style.display = "flex";
-  seedLockSky();
-}
+function showLockView() {}
 
 function seedLockSky() {
   const far = document.getElementById("lock-stars-far");
@@ -145,19 +140,13 @@ function applyCooldownUI() {
   if (cooldownLeft() > 0) { tick(); _cooldownTimer = setInterval(tick, 1000); }
 }
 function afterUnlock() {
-  document.getElementById("lock-view").style.display = "none";
+  const lock = document.getElementById("lock-view");
+  if (lock) lock.remove();
   if (typeof showLoginView === "function") showLoginView();
-  resetIdle();
 }
 
-// 手动上锁（标题栏 🔒）：后端清零 VK + 断连，前端回锁屏。
-async function lockApp() {
-  clearTimeout(_idleTimer);
-  try { await NM.inv("lock"); } catch (_) {}
-  window.CURRENT_SVC = null;
-  renderLock("unlock");
-  showLockView();
-}
+// 主口令解锁页已取消。标题栏锁定不再切回该页。
+async function lockApp() {}
 window.lockApp = lockApp;
 window.routeStart = routeStart;
 
@@ -168,10 +157,7 @@ function autolockCfg() {
   catch (_) { return { minutes: 10, onBlur: false }; }
 }
 function saveAutolockCfg(c) { try { localStorage.setItem("nmspace-autolock", JSON.stringify(c)); } catch (_) {} }
-function isUnlockedView() {
-  return document.getElementById("lock-view").style.display === "none" &&
-    (document.getElementById("login-view").style.display !== "none" || document.getElementById("main-view").style.display !== "none");
-}
+function isUnlockedView() { return false; }
 function resetIdle() {
   clearTimeout(_idleTimer);
   const c = autolockCfg();
@@ -272,12 +258,12 @@ function initSec() {
 }
 initSec();
 async function routeStart() {
-  if (window.UIStore) await window.UIStore.hydrate(); // 先从后端回灌 UI 状态（节点服务/身份名等）
-  if (typeof window.renderNodeSvcList === "function") window.renderNodeSvcList(); // hydrate 后刷新节点服务面板
-  let st;
-  try { st = await NM.inv("auth_status"); } catch (_) { st = { masterSet: false, unlocked: false }; }
-  if (!st.masterSet) { renderLock("setup"); showLockView(); }
-  else if (!st.unlocked) { renderLock("unlock"); showLockView(); }
-  else if (typeof showLoginView === "function") showLoginView();
+  if (window.UIStore) await window.UIStore.hydrate();
+  if (typeof window.renderNodeSvcList === "function") window.renderNodeSvcList();
+  try { await NM.inv("ensure_device"); } catch (_) {}
+  const lock = document.getElementById("lock-view");
+  if (lock) lock.remove();
+  if (typeof showLoginView === "function") showLoginView();
+  if (typeof window.loadAccountDomains === "function") window.loadAccountDomains();
 }
 routeStart(); // defer 脚本：DOM 已就绪

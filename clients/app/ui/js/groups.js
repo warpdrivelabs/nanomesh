@@ -20,7 +20,7 @@
   // 群头像：已解析为 data:URI → 图；否则 👥 底色块。
   function groupAv(g, size) {
     const s = size || 40;
-    if (window.Profile && Profile.isImg(g.avatar)) return `<img src="${g.avatar}" alt="" style="width:${s}px;height:${s}px;border-radius:50%;object-fit:cover;display:block">`;
+    if (window.Profile && Profile.isImg(g.avatar)) return `<img src="${g.avatar}" alt="" style="width:${s}px;height:${s}px;border-radius:var(--avatar-radius);object-fit:cover;display:block">`;
     return `<span class="av" style="width:${s}px;height:${s}px;background:${avatarColor(g.id)}">${nmIcon("groups")}</span>`;
   }
 

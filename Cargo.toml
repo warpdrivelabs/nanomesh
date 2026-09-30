@@ -65,3 +65,6 @@ iroh-docs = "0.101"
 redb = "4"
 blake3 = "1"
 argon2 = "0.6"
+
+[patch.crates-io]
+native-tls = { path = "vendor/native-tls-0.2.18" }

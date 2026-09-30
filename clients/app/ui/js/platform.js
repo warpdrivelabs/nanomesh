@@ -10,7 +10,8 @@ async function winToggleMaximize(){
   await w.toggleMaximize();
   try{
     const maxed = await w.isMaximized();
-    document.getElementById("win-max-btn").querySelector(".ico").innerHTML = nmIcon(maxed ? "restore" : "maximize");
+    const ico = document.getElementById("win-max-btn")?.querySelector(".ico");
+    if (ico) ico.innerHTML = nmIcon(maxed ? "restore" : "maximize");
   }catch(e){}
 }
 async function winClose(){ const w=_tauriWin(); if(w) await w.close(); }
@@ -29,15 +30,16 @@ document.querySelectorAll(".resize-handle").forEach(h=>{
   if(!(window.__TAURI__ && window.__TAURI__.core)) return; // Web 壳：系统浏览器窗口，不处理
   try{
     const platform = await window.__TAURI__.core.invoke("platform"); // "macos" | "windows" | "linux"
-    if(platform !== "macos"){
-      document.body.classList.add("no-native-decor");
-      document.getElementById("win-ctrls").style.display = "flex";
-      // login 视图窗口三键 + 拖拽条（同条件显示）
-      const lwc = document.getElementById("login-win-ctrls");
-      if(lwc) lwc.style.display = "flex";
-      const lds = document.querySelector(".login-drag-strip");
-      if(lds) lds.style.display = "block";
-    }
+    document.body.classList.add("no-native-decor");
+    const w = _tauriWin();
+    if (w) { try { await w.setDecorations(false); } catch (_) {} }
+    const wc = document.getElementById("win-ctrls");
+    if (wc) wc.style.display = "flex";
+    const lwc = document.getElementById("login-win-ctrls");
+    if (lwc) lwc.style.display = "flex";
+    const lds = document.querySelector(".login-drag-strip");
+    if (lds) lds.style.display = "block";
+    if (platform === "macos") document.body.classList.add("is-macos");
   }catch(e){}
 })();
 

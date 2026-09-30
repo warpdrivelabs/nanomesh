@@ -1,14 +1,22 @@
 // nm-admind 前端：纯 Web Components 标准（自定义元素 + 原生 DOM，无框架、无构建）。
 
 /* ---------------- helpers ---------------- */
+const TOKEN_KEY = "admind-token";
+function authHeaders(extra) {
+  const headers = { ...(extra || {}) };
+  const token = sessionStorage.getItem(TOKEN_KEY);
+  if (token) headers.Authorization = "Bearer " + token;
+  return headers;
+}
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     method: opts.method || "GET",
-    headers: opts.body ? { "Content-Type": "application/json" } : {},
+    headers: authHeaders(opts.body ? { "Content-Type": "application/json" } : {}),
     body: opts.body ? JSON.stringify(opts.body) : undefined,
     credentials: "same-origin",
   });
   if (res.status === 401) {
+    sessionStorage.removeItem(TOKEN_KEY);
     window.dispatchEvent(new CustomEvent("admind:logout"));
     throw new Error("会话已失效，请重新登录");
   }
@@ -30,6 +38,11 @@ const fmtDur = (s) => {
   return `${s} 秒`;
 };
 const sinceMs = (ms) => (ms ? fmtDur((Date.now() - ms) / 1000) : "—");
+const fmtTime = (ms) => {
+  if (!ms) return "—";
+  const d = new Date(ms);
+  return Number.isNaN(d.getTime()) ? "—" : d.toLocaleString();
+};
 const shortId = (h) => (h && h.length > 16 ? `${h.slice(0, 10)}…${h.slice(-4)}` : h || "");
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 async function copyToClipboard(text) {
@@ -105,7 +118,7 @@ class AdminApp extends HTMLElement {
     this._onLogout = () => this.show("login");
     window.addEventListener("admind:logout", this._onLogout);
     try {
-      const s = await fetch("/api/session", { credentials: "same-origin" }).then((r) => r.json());
+      const s = await fetch("/api/session", { credentials: "same-origin", headers: authHeaders() }).then((r) => r.json());
       this.show(!s.authed ? "login" : s.mustChange ? "change" : "shell");
     } catch { this.show("login"); }
   }
@@ -124,7 +137,7 @@ class AdminLogin extends HTMLElement {
   connectedCallback() {
     this.innerHTML = `
     <div class="screen"><div class="card auth">
-      <div class="brand"><div class="logo">im</div><div><h1>nmd 管理控制台</h1><p>请登录以继续</p></div></div>
+      <div class="brand"><img class="logo" src="/nanomesh-logo.png" alt="NANO MESH" /><div><h1>nmd 管理控制台</h1><p>请登录以继续</p></div></div>
       <form>
         <label class="field"><span>用户名</span><input name="u" value="admin" autocomplete="username"></label>
         <label class="field"><span>密码</span><input name="p" type="password" autocomplete="current-password"></label>
@@ -137,6 +150,7 @@ class AdminLogin extends HTMLElement {
       e.preventDefault(); err.hidden = true;
       try {
         const r = await api("/api/login", { method: "POST", body: { username: form.u.value.trim(), password: form.p.value } });
+        if (r.token) sessionStorage.setItem(TOKEN_KEY, r.token);
         this.dispatchEvent(new CustomEvent("admind:navigate", { detail: r.mustChange ? "change" : "shell", bubbles: true }));
       } catch (ex) { err.textContent = ex.message; err.hidden = false; }
     });
@@ -148,7 +162,7 @@ class AdminChange extends HTMLElement {
   connectedCallback() {
     this.innerHTML = `
     <div class="screen"><div class="card auth">
-      <div class="brand"><div class="logo">im</div><div><h1>修改初始密码</h1><p>首次登录，请设置新密码后进入</p></div></div>
+      <div class="brand"><img class="logo" src="/nanomesh-logo.png" alt="NANO MESH" /><div><h1>修改初始密码</h1><p>首次登录，请设置新密码后进入</p></div></div>
       <form>
         <label class="field"><span>原密码</span><input name="o" type="password"></label>
         <label class="field"><span>新密码（至少 6 位）</span><input name="n" type="password"></label>
@@ -175,7 +189,7 @@ class AdminShell extends HTMLElement {
     this.innerHTML = `
     <div class="admin">
       <aside class="side">
-        <div class="side__brand"><div class="logo">im</div><span>nmd 控制台</span></div>
+        <div class="side__brand"><img class="logo" src="/nanomesh-logo.png" alt="NANO MESH" /><span>nmd 控制台</span></div>
         <nav class="side__nav"></nav>
         <div class="side__foot"><button class="btn btn--ghost btn--block side__logout">退出登录</button></div>
       </aside>
@@ -194,6 +208,7 @@ class AdminShell extends HTMLElement {
     });
     this.querySelector(".side__logout").onclick = async () => {
       try { await api("/api/logout", { method: "POST" }); } catch {}
+      sessionStorage.removeItem(TOKEN_KEY);
       this.dispatchEvent(new CustomEvent("admind:navigate", { detail: "login", bubbles: true }));
     };
     this.select("overview");
@@ -230,9 +245,13 @@ class AdminShell extends HTMLElement {
     }
     if (this.tab === "names") {
       try {
-        const [dom, names] = await Promise.all([api("/api/names/domains"), api("/api/names/list")]);
+        const [dom, names, pending] = await Promise.all([
+          api("/api/names/domains"),
+          api("/api/names/list"),
+          api("/api/names/pending").catch((ex) => ({ items: [], error: ex.message })),
+        ]);
         meta.textContent = "刷新于 " + new Date().toLocaleTimeString();
-        renderNames(host, dom, names, () => this.refresh());
+        renderNames(host, dom, names, pending, () => this.refresh());
       } catch (ex) {
         host.innerHTML = `<div class="err">${esc(ex.message)}</div>`;
       }
@@ -487,12 +506,22 @@ function renderPassword(host) {
 }
 
 /* ---------------- 域名管理面板 ---------------- */
-function renderNames(host, dom, names, refresh) {
+function renderNames(host, dom, names, pending, refresh) {
   const domains = (dom && dom.domains) || [];
   const list = (names && names.names) || [];
-  const domChips = domains.length
-    ? domains.map((d) => `<span style="display:inline-block;padding:4px 10px;margin:3px;border-radius:14px;background:var(--accent-soft,#17362b);color:var(--aqua,#1fb182);font-family:monospace;font-size:12.5px">${esc(d)}</span>`).join("")
-    : '<span class="muted">本节点暂无域名。在下方申请一个（形如 example.nm）。</span>';
+  const waiting = ((pending && pending.items) || []).filter((a) => a.status === "pending");
+  const pendingErr = pending && pending.error;
+  const approved = ((pending && pending.items) || []).filter((a) => a.status === "approved");
+  const approvedByDomain = new Map(approved.map((a) => [String(a.domain).toLowerCase(), a]));
+  const ownedRows = domains.length
+    ? domains.map((d) => {
+        const a = approvedByDomain.get(String(d).toLowerCase());
+        return `<tr><td><b>${esc(d)}</b></td><td>${esc(a && a.email || "—")}</td><td>${esc(fmtTime(a && a.created_ms))}</td><td>${esc(fmtTime(a && a.decided_ms))}</td></tr>`;
+      }).join("")
+    : '<tr><td colspan="4" class="muted center">本节点还没有已注册域名</td></tr>';
+  const waitRows = waiting.length
+    ? waiting.map((a) => `<tr><td><b>${esc(a.domain)}</b></td><td>${esc(a.email || "—")}</td><td>等待审核</td><td>${esc(fmtTime(a.created_ms))}</td></tr>`).join("")
+    : '<tr><td colspan="4" class="muted center">没有正在等待审核的域名</td></tr>';
   const domOpts = domains.map((d) => `<option value="${esc(d)}">${esc(d)}</option>`).join("");
   const rows = list.length
     ? list.map((r) => `<tr>
@@ -504,14 +533,20 @@ function renderNames(host, dom, names, refresh) {
     : '<tr><td colspan="4" class="muted center">该节点尚未登记任何命名</td></tr>';
   host.innerHTML = `
     <div class="card">
-      <div class="card__title">本节点域名（此去中心网格中申请/持有）</div>
-      <div>${domChips}</div>
-      <form class="domform" style="margin-top:12px;display:flex;gap:8px">
-        <input name="domain" placeholder="申请域名，如 example.nm" style="flex:1" autocomplete="off">
+      <div class="card__title">本节点域名</div>
+      <div class="muted" style="margin:8px 0 4px">已注册</div>
+      <table class="tbl"><thead><tr><th>域名</th><th>邮箱</th><th>申请时间</th><th>审核通过时间</th></tr></thead><tbody>${ownedRows}</tbody></table>
+      <div class="muted" style="margin:14px 0 4px">等待审核</div>
+      ${pendingErr ? `<div class="err">${esc(pendingErr)}</div>` : ""}
+      <table class="tbl"><thead><tr><th>域名</th><th>邮箱</th><th>状态</th><th>申请时间</th></tr></thead><tbody>${waitRows}</tbody></table>
+      <form class="domform" style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+        <input name="domain" placeholder="申请域名，如 example.nm" style="flex:1;min-width:180px" autocomplete="off">
+        <input name="email" type="email" placeholder="邮箱，如 ops@example.nm" style="flex:1;min-width:180px" autocomplete="off" required>
         <button class="btn btn--primary" type="submit">申请域名</button>
       </form>
       <div class="err" hidden style="margin-top:8px"></div>
-      <div class="muted" style="margin-top:6px">N1 为 TOFU 先到先得；全局唯一与冲突消解见 N2（见证注册表）。一个节点可持有多个域名。</div>
+      <div class="wait" hidden style="margin-top:8px"></div>
+      <div class="muted" style="margin-top:6px">申请提交到注册中心，通过或驳回后由网格消息写回本节点。一个节点可持有多个域名。</div>
     </div>
     <div class="card" style="margin-top:16px">
       <div class="card__title">域内命名登记（local-part → 公钥）</div>
@@ -529,14 +564,44 @@ function renderNames(host, dom, names, refresh) {
       <div class="muted" style="margin-top:8px">一个公钥可登记多个名字；一个名字只指向一个公钥。登记/删除即经联邦 gossip 广播，各节点收敛。</div>
     </div>`;
   const err = host.querySelector(".err"), err2 = host.querySelector(".err2");
+  const wait = host.querySelector(".wait");
   host.querySelector(".domform").addEventListener("submit", async (e) => {
     e.preventDefault(); err.hidden = true;
     const domain = e.target.domain.value.trim();
+    const email = e.target.email.value.trim();
     if (!domain) return;
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      err.textContent = "请填写正确的邮箱地址";
+      err.hidden = false;
+      return;
+    }
     try {
-      const r = await api("/api/names/domain-add", { method: "POST", body: { domain } });
+      const r = await api("/api/names/signup", { method: "POST", body: { domain, email } });
       if (r && r.ok === false) throw new Error(r.error || "申请失败");
-      refresh();
+      const want = (r.domain || domain).toLowerCase();
+      wait.hidden = false;
+      wait.textContent = `已提交 ${want}，等待注册中心审批…`;
+      const deadline = Date.now() + 10 * 60 * 1000;
+      const timer = setInterval(async () => {
+        if (!wait.isConnected) { clearInterval(timer); return; }
+        if (Date.now() > deadline) {
+          clearInterval(timer);
+          wait.textContent = "仍在等待审批。通过或驳回后会经网格送到本节点。";
+          return;
+        }
+        try {
+          const n = await api("/api/names/domain-notices");
+          const hit = (n.notices || []).find((x) => String(x.domain).toLowerCase() === want);
+          if (!hit) return;
+          clearInterval(timer);
+          if (hit.approved) {
+            wait.textContent = `${want} 已通过，已写入本节点域名列表。`;
+          } else {
+            wait.textContent = `${want} 已被驳回。`;
+          }
+          refresh();
+        } catch (ex) { wait.textContent = ex.message; }
+      }, 3000);
     } catch (ex) { err.textContent = ex.message; err.hidden = false; }
   });
   host.querySelector(".nameform").addEventListener("submit", async (e) => {

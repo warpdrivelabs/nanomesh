@@ -21,6 +21,7 @@ iroh-gossip = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 prost = "0.14"
+argon2 = { workspace = true }
 
 [dev-dependencies]
 nm-client = { workspace = true }

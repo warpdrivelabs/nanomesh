@@ -447,6 +447,22 @@ impl Session {
 
     // ---- 去中心命名（N1）----
     /// 在 home node 认领本地名 local-part（→ 本客户端公钥）；返回签发的 NameRecord。
+    /// 家节点账号口令命令。`name.register` / `name.login` 的参数是 JSON 文本。
+    /// 成功时 `name.login` 的结果正文是该名字登记的客户端公钥（hex）。
+    pub async fn name_account(&self, method: &str, body: &str) -> Result<String, ClientError> {
+        let params = Any {
+            type_url: "text/plain".to_string(),
+            value: body.as_bytes().to_vec(),
+        };
+        let res = rpc_over(&self.conn, self.my_id, method, Some(params)).await?;
+        if !res.ok {
+            return Err(ClientError::Other(res.error));
+        }
+        Ok(res
+            .result
+            .map(|p| String::from_utf8_lossy(&p.value).into_owned())
+            .unwrap_or_default())
+    }
     pub async fn name_claim(&self, local_part: &str) -> Result<NameRecord, ClientError> {
         let params = Any { type_url: "nmspace.v1.NameOp".to_string(), value: NameOp { local_part: local_part.to_string() }.encode_to_vec() };
         let res = rpc_over(&self.conn, self.my_id, "name.claim", Some(params)).await?;

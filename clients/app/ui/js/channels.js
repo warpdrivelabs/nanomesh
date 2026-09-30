@@ -15,7 +15,7 @@
   // 频道头像：已解析为 data:URI → 图；否则 📡 底色块。
   function channelAv(c, size) {
     const s = size || 40;
-    if (window.Profile && Profile.isImg(c.avatar)) return `<img src="${c.avatar}" alt="" style="width:${s}px;height:${s}px;border-radius:50%;object-fit:cover;display:block">`;
+    if (window.Profile && Profile.isImg(c.avatar)) return `<img src="${c.avatar}" alt="" style="width:${s}px;height:${s}px;border-radius:var(--avatar-radius);object-fit:cover;display:block">`;
     return `<span class="av" style="width:${s}px;height:${s}px;background:${avatarColor(c.id)}">${nmIcon("channels")}</span>`;
   }
 
