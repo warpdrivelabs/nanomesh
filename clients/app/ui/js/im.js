@@ -58,8 +58,13 @@ window.openChannel = function (cid) {
 // 供 channels.js 回填历史消息到会话缓存（不计未读；已存 id 去重）。
 window.imBackfill = function (convId, msgs) {
   const arr = (CONVOS[convId] = CONVOS[convId] || []);
-  for (const m of (msgs || [])) if (!arr.some((x) => x.id === m.id)) arr.push(m);
+  let added = false;
+  for (const raw of (msgs || [])) {
+    const m = window.Composer ? Composer.absorb(raw) : raw;
+    if (!arr.some((x) => x.id === m.id)) { arr.push(m); added = true; }
+  }
   arr.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  if (added) scheduleChatSave();
   if (convId === ACTIVE) renderConversation(); else renderPanels();
 };
 
@@ -73,10 +78,67 @@ function saveAdded() {
   } catch (_) {}
 }
 
+function slimMsg(m) {
+  const o = {
+    id: m.id, from: m.from, to: m.to, body: m.body || "", ts: m.ts || 0,
+    group: !!m.group, channel: !!m.channel, typeUrl: m.typeUrl || "",
+    kind: m.kind || "text", text: m.text || "",
+  };
+  const media = m.media;
+  if (media && typeof media === "object") {
+    o.media = {
+      v: media.v || 1, kind: media.kind || "", text: media.text || "",
+      mime: media.mime || "", name: media.name || "", size: media.size || 0,
+      w: media.w || 0, h: media.h || 0, dur: media.dur || 0,
+      parts: media.parts || [], home: media.home || "", thumb: media.thumb || "",
+      card: media.card || "",
+    };
+  }
+  return o;
+}
+async function loadChatLog(user) {
+  const empty = { convos: {}, unread: {} };
+  if (!user || !window.NM) return empty;
+  try {
+    const raw = await NM.inv("chat_log_load", { user });
+    const data = JSON.parse(raw || "{}");
+    const convos = data.convos && typeof data.convos === "object" ? data.convos : {};
+    const unread = data.unread && typeof data.unread === "object" ? data.unread : {};
+    for (const id of Object.keys(convos)) {
+      const list = Array.isArray(convos[id]) ? convos[id] : [];
+      convos[id] = list.map((m) => (window.Composer ? Composer.absorb(m) : m)).sort((a, b) => (a.ts || 0) - (b.ts || 0));
+    }
+    return { convos, unread };
+  } catch (_) { return empty; }
+}
+let chatSaveQueued = false;
+function scheduleChatSave() {
+  if (chatSaveQueued || !MY_ID) return;
+  chatSaveQueued = true;
+  queueMicrotask(() => { chatSaveQueued = false; flushChatLog(); });
+}
+async function flushChatLog() {
+  if (!MY_ID || !window.NM) return;
+  const convos = {};
+  for (const id of Object.keys(CONVOS)) convos[id] = (CONVOS[id] || []).slice(-10000).map(slimMsg);
+  try {
+    await NM.inv("chat_log_save", { user: MY_ID, data: JSON.stringify({ convos, unread: UNREAD }) });
+  } catch (_) {}
+}
+window.addEventListener("pagehide", () => { flushChatLog(); });
+
 async function imStart(myId) {
   MY_ID = myId || "";
-  CONVOS = CONVOS_BY_USER[MY_ID] = CONVOS_BY_USER[MY_ID] || {};
-  UNREAD = UNREAD_BY_USER[MY_ID] = UNREAD_BY_USER[MY_ID] || {};
+  CONVOS = CONVOS_BY_USER[MY_ID] = {};
+  UNREAD = UNREAD_BY_USER[MY_ID] = {};
+  const saved = await loadChatLog(MY_ID);
+  if (MY_ID !== (myId || "")) return;
+  for (const id of Object.keys(saved.convos)) {
+    const live = CONVOS[id] || [];
+    const seen = new Set(live.map((m) => m.id));
+    CONVOS[id] = saved.convos[id].filter((m) => !seen.has(m.id)).concat(live).sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  }
+  for (const id of Object.keys(saved.unread)) if (UNREAD[id] == null) UNREAD[id] = saved.unread[id];
   ADDED = loadAdded();
   ACTIVE = null; DETAIL_ID = null; CONTACTS = [];
   if (window.Tabs) Tabs.closeAll(); // 每次连接（含切换身份）重置多 tab 工作区
@@ -133,7 +195,8 @@ function renderConversations() {
     return;
   }
   box.innerHTML = peers.map(({ c, last }) => {
-    const preview = last ? escapeHtml((last.from === MY_ID ? "我: " : "") + last.body) : "";
+    const shown = last ? (window.Composer ? Composer.preview(last) : last.body) : "";
+    const preview = last ? escapeHtml((last.from === MY_ID ? "我: " : "") + shown) : "";
     return itemHtml(c, preview, UNREAD[c.id] || 0, ACTIVE);
   }).join("");
   wireItems(box, selectContact);
@@ -287,6 +350,7 @@ function selectContact(id) {
   if (window.Tabs) Tabs.open({ key: "c:" + id, kind: "chat", title, ico: "chat", render: draw });
   else draw();
 }
+window.selectContact = selectContact;
 
 // ── 主区会话（头部 + 消息流 + 输入条）──
 function renderConversation() {
@@ -316,8 +380,8 @@ function renderConversation() {
     : chn ? `<span class="conv-kind">${nmIcon("channels")} 频道${chn.topic ? " · " + escapeHtml(chn.topic) : ""}</span>`
     : (c.kind ? `<span class="conv-kind">${escapeHtml(c.kind)}</span>` : "");
   const logHtml = `<div class="log" id="conv-log">${msgs.map((m) => msgHtml(m, showSender)).join("") || '<div class="im-empty im-empty--center">暂无消息</div>'}</div>`;
-  const ph = grp ? "群内发言，⏎ 发送…" : chn ? "发布到频道，⏎ 发送…" : "输入消息，⏎ 发送…";
-  const composerHtml = `<div class="im-composer"><input id="conv-input" type="text" placeholder="${ph}" autocomplete="off" /><button id="conv-send" class="send" title="发送 ⏎">${nmIcon("send")}</button></div>`;
+  if (window.Composer) Composer.prepare(ACTIVE, !!(grp || chn));
+  const composerHtml = window.Composer ? Composer.markup() : "";
   // 群聊：左会话 + 右成员栏。私聊 / 频道：单栏（频道=订阅流 + 发布框）。
   const body = grp
     ? `<div class="grp-body"><div class="grp-chat">${logHtml}${composerHtml}</div><div class="grp-members" id="grp-members"></div></div>`
@@ -349,13 +413,29 @@ function renderConversation() {
       if (el) { el.style.padding = "0"; el.style.overflow = "hidden"; el.innerHTML = `<img src="${uri}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit">`; }
     });
   }
-  const input = document.getElementById("conv-input");
-  const doSend = () => sendMsg(input.value);
-  document.getElementById("conv-send").addEventListener("click", doSend);
-  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSend(); } });
+  if (window.Composer) {
+    Composer.attach({
+      sendText: (text) => sendMsg(text),
+      sendRich: (media) => sendRich(media),
+      mentions: mentionTargets,
+      cards: cardTargets,
+      messages: () => (CONVOS[ACTIVE] || []).slice(),
+    });
+    Composer.hydrate(document.getElementById("conv-log"));
+  }
   if (grp && window.Groups && Groups.renderMembersPanel) Groups.renderMembersPanel(ACTIVE, document.getElementById("grp-members"));
-  input.focus();
   scrollLog();
+}
+
+function mentionTargets() {
+  const grp = window.Groups && Groups.byId(ACTIVE);
+  if (grp) return (grp.members || []).filter((id) => id !== MY_ID).map((id) => ({ id, name: entityName(id) }));
+  return mergedEntities().filter((c) => c.id !== MY_ID).slice(0, 40).map((c) => ({ id: c.id, name: c.name || shortId(c.id) }));
+}
+function cardTargets() {
+  const meName = (window.Identity && Identity.nameOf && Identity.nameOf(MY_ID)) || "我";
+  const rest = mergedEntities().filter((c) => c.id && c.id !== MY_ID).slice(0, 40).map((c) => ({ id: c.id, name: c.name || shortId(c.id) }));
+  return [{ id: MY_ID, name: meName }, ...rest];
 }
 
 function msgClock(ts) {
@@ -372,11 +452,12 @@ function msgHtml(m, showSender) {
     : "";
   const stamp = (!sender && time) ? `<span class="im-time">${time}</span>` : "";
   const face = window.Profile ? Profile.faceHtml(m.from, who, 28) : "";
-  return `<div class="im-msg ${mine ? "me" : ""} with-av">
+  const rich = window.Composer ? Composer.bubble(m) : { cls: "", html: escapeHtml(m.body || "") };
+  return `<div class="im-msg ${mine ? "me" : ""} with-av" data-mid="${escapeHtml(m.id || "")}">
     ${face}
     <span class="im-stack">
       ${sender}
-      <span class="im-bubble">${escapeHtml(m.body)}</span>
+      <span class="im-bubble ${rich.cls}">${rich.html}</span>
       ${stamp}
     </span>
   </div>`;
@@ -385,22 +466,31 @@ function msgHtml(m, showSender) {
 async function sendMsg(text) {
   text = (text || "").trim();
   if (!text || !ACTIVE) return;
-  const input = document.getElementById("conv-input");
   const isGroup = !!(window.Groups && Groups.byId(ACTIVE));
   const isChannel = !isGroup && !!(window.Channels && Channels.byId(ACTIVE));
-  try {
-    if (isChannel) {
-      await NM.inv("channel_publish", { channelId: ACTIVE, body: text }); // 节点会回投给本地订阅者(含自己)，不做乐观插入以免重复
-    } else if (isGroup) {
-      await NM.inv("send_group", { groupId: ACTIVE, text });
-      pushMsg(ACTIVE, { id: "l" + Date.now(), from: MY_ID, body: text, ts: Date.now(), group: true, to: ACTIVE });
-    } else {
-      await NM.inv("send_to", { target: ACTIVE, text });
-      pushMsg(ACTIVE, { id: "l" + Date.now(), from: MY_ID, body: text, ts: Date.now(), to: ACTIVE });
-    }
-    if (input) { input.value = ""; input.focus(); }
-  } catch (e) {
-    if (window.toast) toast("发送失败：" + (e && e.message ? e.message : e));
+  if (isChannel) {
+    await NM.inv("channel_publish", { channelId: ACTIVE, body: text }); // 节点会回投给本地订阅者(含自己)，不做乐观插入以免重复
+  } else if (isGroup) {
+    await NM.inv("send_group", { groupId: ACTIVE, text });
+    pushMsg(ACTIVE, { id: "l" + Date.now(), from: MY_ID, body: text, ts: Date.now(), group: true, to: ACTIVE });
+  } else {
+    await NM.inv("send_to", { target: ACTIVE, text });
+    pushMsg(ACTIVE, { id: "l" + Date.now(), from: MY_ID, body: text, ts: Date.now(), to: ACTIVE });
+  }
+}
+
+async function sendRich(media) {
+  if (!ACTIVE || !window.Composer) return;
+  const isGroup = !!(window.Groups && Groups.byId(ACTIVE));
+  const isChannel = !isGroup && !!(window.Channels && Channels.byId(ACTIVE));
+  if (isChannel) {
+    await NM.inv("channel_publish", { channelId: ACTIVE, body: Composer.channelBody(media) });
+  } else {
+    await NM.inv("send_rich", { target: ACTIVE, body: Composer.encode(media), group: isGroup });
+    pushMsg(ACTIVE, {
+      id: "l" + Date.now(), from: MY_ID, to: ACTIVE, ts: Date.now(), group: isGroup,
+      typeUrl: "nmspace.v1/chat", body: Composer.encode(media),
+    });
   }
 }
 
@@ -408,23 +498,36 @@ function onCoreEvent(ev) {
   if (!ev || ev.type !== "message" || !ev.msg) return;
   const m = ev.msg;
   const key = (m.group || m.channel) ? m.to : m.from; // 群/频道按其 id 归会话；私聊按发送方
-  pushMsg(key, m);
-  if (key !== ACTIVE) UNREAD[key] = (UNREAD[key] || 0) + 1;
+  const fresh = pushMsg(key, m);
+  if (fresh && key !== ACTIVE) UNREAD[key] = (UNREAD[key] || 0) + 1;
+  if (fresh) scheduleChatSave();
   renderPanels();
 }
 
 function pushMsg(peer, m) {
-  (CONVOS[peer] = CONVOS[peer] || []).push(m);
+  m = window.Composer ? Composer.absorb(m) : m;
+  const arr = (CONVOS[peer] = CONVOS[peer] || []);
+  if (m.id && arr.some((x) => x.id === m.id)) return false;
+  arr.push(m);
+  scheduleChatSave();
   if (peer === ACTIVE) {
     const log = document.getElementById("conv-log");
-    if (log) { if (log.querySelector(".im-empty")) log.innerHTML = ""; log.insertAdjacentHTML("beforeend", msgHtml(m, !!(m.group || m.channel))); scrollLog(); }
+    if (log) {
+      if (log.querySelector(".im-empty")) log.innerHTML = "";
+      log.insertAdjacentHTML("beforeend", msgHtml(m, !!(m.group || m.channel)));
+      const nodes = log.querySelectorAll(".im-msg");
+      if (window.Composer) Composer.hydrate(nodes[nodes.length - 1]);
+      scrollLog();
+    }
   }
   renderPanels();
+  return true;
 }
 
 function scrollLog() { const log = document.getElementById("conv-log"); if (log) log.scrollTop = log.scrollHeight; }
 
 async function imDisconnect() {
+  await flushChatLog();
   try { await NM.inv("disconnect"); } catch (_) {}
   MY_ID = ""; CONTACTS = []; ADDED = []; CONVOS = {}; UNREAD = {}; ACTIVE = null; DETAIL_ID = null;
   if (window.Tabs) Tabs.closeAll();

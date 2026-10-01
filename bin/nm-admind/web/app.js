@@ -290,7 +290,37 @@ function renderPanel(tab, host, d, refresh) {
       ${metric("累计接收", fmtBytes(d.traffic?.bytes_in))}
       ${metric("累计发送", fmtBytes(d.traffic?.bytes_out))}
       ${metric("节点", `<code class="mono">${shortId(d.id)}</code>`)}
+    </div>
+    <div class="card restart-card">
+      <div>
+        <b>nmd 服务</b>
+        <div class="muted">重启本机节点。进行中的连接会短暂断开。</div>
+        <div class="restart-msg" hidden></div>
+      </div>
+      <button class="btn btn--danger" type="button" id="nmd-restart">重启 nmd</button>
     </div>`;
+    const btn = host.querySelector("#nmd-restart");
+    const msg = host.querySelector(".restart-msg");
+    btn.onclick = async () => {
+      if (!confirm("重启 nmd？当前连接会短暂断开。")) return;
+      btn.disabled = true;
+      btn.textContent = "正在重启…";
+      msg.hidden = true;
+      try {
+        const r = await api("/api/nmd/restart", { method: "POST" });
+        msg.className = "restart-msg " + (r.back ? "ok" : "err");
+        msg.textContent = r.back ? "nmd 已重启并恢复。" : "已发出重启，节点尚未恢复，请稍后刷新。";
+        msg.hidden = false;
+        if (r.back) setTimeout(refresh, 800);
+      } catch (e) {
+        msg.className = "restart-msg err";
+        msg.textContent = e.message;
+        msg.hidden = false;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "重启 nmd";
+      }
+    };
   } else if (tab === "connections") {
     const rows = (d.connections || []).map((c) => `<tr>
       <td class="nowrap"><span class="copyline"><code class="mono">${shortId(c.id)}</code>${copyIconBtn(`data-copy="${esc(c.id)}"`)}</span></td>

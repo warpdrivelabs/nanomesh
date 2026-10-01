@@ -61,6 +61,10 @@ strong { font-weight: 700; }
 .badge--danger { background: var(--danger-soft); color: var(--danger); }
 .badge--ok { background: var(--ok-soft); color: var(--ok); }
 
+.restart-card { margin-top: 14px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.restart-msg { margin-top: 8px; font-size: 13px; }
+.restart-msg.ok { color: var(--ok); }
+.restart-msg.err { color: var(--danger); }
 .err { background: var(--danger-soft); color: var(--danger);
   border: 1px solid color-mix(in srgb, var(--danger) 24%, transparent);
   padding: 9px 12px; border-radius: var(--r-sm); font-size: 13px; word-break: break-word; }

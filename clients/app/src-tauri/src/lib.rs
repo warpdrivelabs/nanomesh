@@ -231,6 +231,37 @@ fn ui_kv_set(app: AppHandle, key: String, value: Option<String>) -> Result<(), S
     Ok(())
 }
 
+fn chat_log_path(app: &AppHandle, user: &str) -> Result<std::path::PathBuf, String> {
+    let user = user.trim().to_ascii_lowercase();
+    if user.is_empty() || user.len() > 128 || !user.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("身份无效".into());
+    }
+    let dir = data_dir(app)?.join("chats");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join(format!("{user}.json")))
+}
+
+/// 读出某个身份的本机会话记录。没有文件时返回空对象。
+#[tauri::command]
+fn chat_log_load(app: AppHandle, user: String) -> Result<String, String> {
+    let path = chat_log_path(&app, &user)?;
+    Ok(std::fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string()))
+}
+
+/// 把某个身份的会话记录整份写到本机。先写临时文件再换名，避免写到一半损坏。
+#[tauri::command]
+fn chat_log_save(app: AppHandle, user: String, data: String) -> Result<(), String> {
+    if data.len() > 48 * 1024 * 1024 {
+        return Err("会话记录过大".into());
+    }
+    serde_json::from_str::<Value>(&data).map_err(|_| "会话记录不是合法 JSON".to_string())?;
+    let path = chat_log_path(&app, &user)?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, data).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// 列出全部用户身份（公钥 hex）。仅解锁后可用；种子加密存 `identities/<pubkey>.enc`。
 #[tauri::command]
 fn list_identities(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<String>, String> {
@@ -302,11 +333,10 @@ async fn finish_session(
     let apph = app.clone();
     async_runtime::spawn(async move {
         while let Some(gram) = inbox.recv().await {
-            let body = gram
-                .payload
-                .as_ref()
-                .map(|p| String::from_utf8_lossy(&p.value).to_string())
-                .unwrap_or_default();
+            let (type_url, body) = match gram.payload.as_ref() {
+                Some(p) => (p.type_url.clone(), String::from_utf8_lossy(&p.value).to_string()),
+                None => (String::new(), String::new()),
+            };
             let ev = json!({
                 "type": "message",
                 "msg": {
@@ -315,6 +345,7 @@ async fn finish_session(
                     "to": hex(&gram.receiver),                 // 群消息=群id；频道=频道id；私聊=本人id
                     "group": matches!(gram.kind(), nm_proto::GramKind::GroupMessage),
                     "channel": matches!(gram.kind(), nm_proto::GramKind::ChannelPublish),
+                    "typeUrl": type_url,
                     "body": body,
                     "ts": gram.timestamp_ms,
                 }
@@ -508,6 +539,45 @@ async fn blob_put(state: State<'_, AppState>, data_b64: String, mime: String) ->
     Ok(format!("b3:{}", hex(&hash)))
 }
 
+fn blob_hex(reference: &str) -> Result<&str, String> {
+    let hexh = reference.strip_prefix("b3:").unwrap_or(reference).trim();
+    parse_id(hexh)?;
+    Ok(hexh)
+}
+
+fn read_cached_uri(app: &AppHandle, reference: &str) -> Option<String> {
+    let hexh = blob_hex(reference).ok()?;
+    let path = data_dir(app).ok()?.join("blobs").join(format!("{hexh}.uri"));
+    let s = std::fs::read_to_string(path).ok()?;
+    if s.starts_with("data:") { Some(s) } else { None }
+}
+
+fn write_blob_cache(app: &AppHandle, hash_hex: &str, mime: &str, data: &[u8]) {
+    use base64::Engine;
+    let Ok(dir) = data_dir(app) else { return };
+    let dir = dir.join("blobs");
+    let _ = std::fs::create_dir_all(&dir);
+    let mime = if mime.trim().is_empty() { "application/octet-stream" } else { mime.trim() };
+    let uri = format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(data)
+    );
+    let _ = std::fs::write(dir.join(format!("{hash_hex}.uri")), uri);
+}
+
+fn read_cached_bytes(app: &AppHandle, reference: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let uri = read_cached_uri(app, reference)?;
+    let b64 = uri.split_once(',')?.1;
+    base64::engine::general_purpose::STANDARD.decode(b64).ok()
+}
+
+/// 只读本机缓存。没有的项是空字符串，不会向节点请求。
+#[tauri::command]
+fn blob_cached(app: AppHandle, references: Vec<String>) -> Result<Vec<String>, String> {
+    Ok(references.into_iter().map(|r| read_cached_uri(&app, &r).unwrap_or_default()).collect())
+}
+
 /// 取 blob 并返回 data:URI（带 app_data_dir/blobs 本地缓存，避免重复拉取）。
 /// `reference` = "b3:<hash-hex>"；`home_node` = 实体归属节点 hex（可空，用于跨节点回源）。
 #[tauri::command]
@@ -517,15 +587,11 @@ async fn blob_get(
     reference: String,
     home_node: String,
 ) -> Result<String, String> {
-    use base64::Engine;
-    let hexh = reference.strip_prefix("b3:").unwrap_or(&reference).trim();
-    let hash = parse_id(hexh)?; // 64-hex → [u8;32]
-    let dir = data_dir(&app)?.join("blobs");
-    let _ = std::fs::create_dir_all(&dir);
-    let cache = dir.join(format!("{hexh}.uri"));
-    if let Ok(s) = std::fs::read_to_string(&cache) {
-        return Ok(s); // 缓存命中
+    if let Some(s) = read_cached_uri(&app, &reference) {
+        return Ok(s);
     }
+    let hexh = blob_hex(&reference)?.to_string();
+    let hash = parse_id(&hexh)?;
     let home = if home_node.trim().is_empty() {
         Vec::new()
     } else {
@@ -533,14 +599,311 @@ async fn blob_get(
     };
     let session = session_of(&state).await?;
     let (data, mime) = session.blob_get(hash.to_vec(), home).await.map_err(|e| e.to_string())?;
-    let mime = if mime.trim().is_empty() { "image/jpeg".to_string() } else { mime };
-    let uri = format!(
-        "data:{};base64,{}",
-        mime,
-        base64::engine::general_purpose::STANDARD.encode(&data)
-    );
-    let _ = std::fs::write(&cache, &uri);
-    Ok(uri)
+    let mime = if mime.trim().is_empty() { "application/octet-stream".to_string() } else { mime };
+    write_blob_cache(&app, &hexh, &mime, &data);
+    read_cached_uri(&app, &reference).ok_or_else(|| "缓存写入失败".to_string())
+}
+
+/// 上传一块媒体，返回内容哈希和所在节点。单块须小于节点的 1MB 上限。
+#[tauri::command]
+async fn blob_put_ref(app: AppHandle, state: State<'_, AppState>, data_b64: String, mime: String) -> Result<Value, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_b64.trim())
+        .map_err(|e| format!("非法 base64: {e}"))?;
+    let session = session_of(&state).await?;
+    let (hash, home) = session.blob_put(bytes.clone(), &mime).await.map_err(|e| e.to_string())?;
+    let hash_hex = hex(&hash);
+    write_blob_cache(&app, &hash_hex, &mime, &bytes);
+    Ok(json!({ "ref": format!("b3:{hash_hex}"), "home": hex(&home) }))
+}
+
+const MEDIA_CAP: usize = 50 * 1024 * 1024;
+
+async fn gather_blobs(app: &AppHandle, state: &State<'_, AppState>, references: &[String], home_node: &str) -> Result<Vec<u8>, String> {
+    if references.is_empty() {
+        return Err("没有可读取的内容".into());
+    }
+    let home = if home_node.trim().is_empty() {
+        Vec::new()
+    } else {
+        parse_id(home_node.trim()).map(|h| h.to_vec()).unwrap_or_default()
+    };
+    let session = session_of(state).await?;
+    let mut all = Vec::new();
+    for reference in references {
+        let data = if let Some(cached) = read_cached_bytes(app, reference) {
+            cached
+        } else {
+            let hexh = blob_hex(reference)?.to_string();
+            let hash = parse_id(&hexh)?;
+            let (data, mime) = session.blob_get(hash.to_vec(), home.clone()).await.map_err(|e| e.to_string())?;
+            write_blob_cache(app, &hexh, &mime, &data);
+            data
+        };
+        if all.len().saturating_add(data.len()) > MEDIA_CAP {
+            return Err("文件超过 50MB".into());
+        }
+        all.extend(data);
+    }
+    Ok(all)
+}
+
+fn media_cache_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = data_dir(app)?.join("media-cache");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+fn downloads_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let dir = std::path::PathBuf::from(if home.is_empty() { "/tmp".into() } else { home }).join("Downloads");
+    if dir.is_dir() { dir } else { std::env::temp_dir() }
+}
+
+fn safe_filename(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '\0' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    let cleaned = cleaned.trim().trim_start_matches('.').to_string();
+    if cleaned.is_empty() { "文件".into() } else { cleaned.chars().take(120).collect() }
+}
+
+fn unique_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let candidate = dir.join(name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let path = std::path::Path::new(name);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("文件");
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+    for n in 2..1000 {
+        let next = if ext.is_empty() {
+            format!("{stem} {n}")
+        } else {
+            format!("{stem} {n}.{ext}")
+        };
+        let p = dir.join(next);
+        if !p.exists() {
+            return p;
+        }
+    }
+    dir.join(format!("{name}.new"))
+}
+
+fn path_under(root: &std::path::Path, target: &std::path::Path) -> bool {
+    let Ok(root) = root.canonicalize() else { return false };
+    let Ok(target) = target.canonicalize() else { return false };
+    target.starts_with(root)
+}
+
+/// 把分片拼成一个缓存文件，供播放或另存。已拼过的直接返回路径。
+#[tauri::command]
+async fn media_file(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    references: Vec<String>,
+    home_node: String,
+    ext: String,
+) -> Result<String, String> {
+    let ext = ext.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect::<String>();
+    let ext = if ext.is_empty() { "bin".to_string() } else { ext };
+    let key = references.join(",");
+    let name = format!("{:016x}.{}", simple_key(&key), ext);
+    let path = media_cache_dir(&app)?.join(name);
+    if !path.is_file() {
+        let bytes = gather_blobs(&app, &state, &references, &home_node).await?;
+        std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    }
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// 拼好后写入下载目录，返回最终路径。
+#[tauri::command]
+async fn save_media(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    references: Vec<String>,
+    home_node: String,
+    filename: String,
+) -> Result<String, String> {
+    let bytes = gather_blobs(&app, &state, &references, &home_node).await?;
+    let path = unique_path(&downloads_dir(), &safe_filename(&filename));
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// 用系统默认程序打开缓存或下载目录里的文件。
+#[tauri::command]
+async fn open_path(app: AppHandle, path: String) -> Result<(), String> {
+    let target = std::path::PathBuf::from(&path);
+    let cache = media_cache_dir(&app)?;
+    let downloads = downloads_dir();
+    if !path_under(&cache, &target) && !path_under(&downloads, &target) {
+        return Err("只能打开已接收的文件".into());
+    }
+    let status = {
+        #[cfg(target_os = "macos")]
+        { std::process::Command::new("open").arg(&target).status() }
+        #[cfg(target_os = "linux")]
+        { std::process::Command::new("xdg-open").arg(&target).status() }
+        #[cfg(target_os = "windows")]
+        { std::process::Command::new("cmd").args(["/C", "start", "", &path]).status() }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        { return Err("当前系统不能打开文件".into()); }
+    };
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(_) => Err("系统没有打开这个文件".into()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn simple_key(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// 私聊或群发一条富消息。`body` 是 nmspace.v1/chat 的 JSON。
+#[tauri::command]
+async fn send_rich(state: State<'_, AppState>, target: String, body: String, group: bool) -> Result<(), String> {
+    let session = session_of(&state).await?;
+    session.send_rich(parse_id(&target)?, &body, group).await.map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn capture_screen(app: AppHandle, hide: bool) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    { capture_screen_mac(app, hide).await }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = (app, hide); Err("当前系统还不能截图".into()) }
+}
+
+#[tauri::command]
+async fn list_windows(app: AppHandle) -> Result<Vec<Value>, String> {
+    #[cfg(target_os = "macos")]
+    { list_windows_mac(app).await }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = app; Err("当前系统还不能列出窗口".into()) }
+}
+
+#[tauri::command]
+async fn capture_window(id: u32) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    { capture_window_mac(id).await }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = id; Err("当前系统还不能截取窗口".into()) }
+}
+
+#[cfg(target_os = "macos")]
+async fn capture_screen_mac(app: AppHandle, hide: bool) -> Result<String, String> {
+    let win = app.get_webview_window("main");
+    let restore = if hide {
+        if let Some(w) = &win { let _ = w.hide(); }
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        win
+    } else {
+        None
+    };
+    let joined = tokio::task::spawn_blocking(|| shot(&["-x", "-m", "-t", "jpg"])).await;
+    if let Some(w) = restore {
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+    joined.map_err(|e| e.to_string())?
+}
+
+#[cfg(target_os = "macos")]
+async fn capture_window_mac(id: u32) -> Result<String, String> {
+    let flag = format!("-l{id}");
+    tokio::task::spawn_blocking(move || shot(&[flag.as_str(), "-x", "-o", "-t", "jpg"]))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[cfg(target_os = "macos")]
+fn shot(args: &[&str]) -> Result<String, String> {
+    use base64::Engine;
+    let path = std::env::temp_dir().join(format!(
+        "nm-shot-{}-{}.jpg",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
+    ));
+    let status = std::process::Command::new("/usr/sbin/screencapture")
+        .args(args)
+        .arg(&path)
+        .status()
+        .map_err(|e| e.to_string())?;
+    let bytes = std::fs::read(&path).unwrap_or_default();
+    let _ = std::fs::remove_file(&path);
+    if !status.success() || bytes.is_empty() {
+        return Err("截图失败。请在系统设置的隐私与安全性中允许本应用录制屏幕".into());
+    }
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+#[cfg(target_os = "macos")]
+const WINDOW_LIST_SWIFT: &str = r#"import Cocoa
+import Foundation
+let opts = CGWindowListOption(arrayLiteral: .optionOnScreenOnly, .excludeDesktopElements)
+guard let raw = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] else {
+    print("[]")
+    exit(0)
+}
+var rows: [[String: Any]] = []
+for w in raw {
+    let layer = w["kCGWindowLayer"] as? Int ?? 0
+    if layer != 0 { continue }
+    let wid = w["kCGWindowNumber"] as? Int ?? 0
+    if wid == 0 { continue }
+    let owner = w["kCGWindowOwnerName"] as? String ?? ""
+    let title = w["kCGWindowName"] as? String ?? ""
+    if owner == "Window Server" || owner == "Dock" { continue }
+    if title == "NANO MESH" || owner == "nmspace" { continue }
+    if title.isEmpty && owner.isEmpty { continue }
+    rows.append(["id": wid, "title": title, "app": owner])
+    if rows.count >= 40 { break }
+}
+let data = try! JSONSerialization.data(withJSONObject: rows)
+FileHandle.standardOutput.write(data)
+"#;
+
+#[cfg(target_os = "macos")]
+async fn list_windows_mac(app: AppHandle) -> Result<Vec<Value>, String> {
+    let dir = data_dir(&app)?;
+    tokio::task::spawn_blocking(move || {
+        let bin = dir.join("nm-windows");
+        if !bin.is_file() {
+            let src = dir.join("nm-windows.swift");
+            std::fs::write(&src, WINDOW_LIST_SWIFT).map_err(|e| e.to_string())?;
+            let st = std::process::Command::new("swiftc")
+                .args(["-O", "-o"])
+                .arg(&bin)
+                .arg(&src)
+                .status()
+                .map_err(|_| "这台电脑没有 swiftc，不能列出窗口".to_string())?;
+            if !st.success() {
+                return Err("不能列出窗口".into());
+            }
+        }
+        let out = std::process::Command::new(&bin).output().map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err("不能列出窗口".into());
+        }
+        let list: Vec<Value> = serde_json::from_slice(&out.stdout).unwrap_or_default();
+        Ok(list)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 设置本人在线状态（P2）：online / away / busy / dnd。节点据此 gossip 广播，其他端按 TTL 判在线。
@@ -1129,8 +1492,13 @@ fn rate_num(v: &Value) -> Option<f64> {
     v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
 }
 
-fn ticker_fx() -> Option<String> {
-    let v = https_get_json("https://open.er-api.com/v6/latest/USD").ok()?;
+fn ticker_row(label: &str, value: &str, hint: &str, url: &str) -> Value {
+    json!({ "label": label, "value": value, "hint": hint, "url": url })
+}
+
+fn ticker_fx() -> Option<Value> {
+    let url = "https://open.er-api.com/v6/latest/USD";
+    let v = https_get_json(url).ok()?;
     let rates = v.get("rates")?;
     let cny = rate_num(rates.get("CNY")?)?;
     let eur = rate_num(rates.get("EUR")?)?;
@@ -1139,80 +1507,206 @@ fn ticker_fx() -> Option<String> {
     if eur <= 0.0 || gbp <= 0.0 || jpy <= 0.0 {
         return None;
     }
-    Some(format!(
-        "汇率  美元/人民币 {cny:.2}  欧元/人民币 {:.2}  英镑/人民币 {:.2}  100日元/人民币 {:.2}",
-        cny / eur,
-        cny / gbp,
-        cny / jpy * 100.0
-    ))
+    let eur_cny = cny / eur;
+    let gbp_cny = cny / gbp;
+    let jpy_cny = cny / jpy * 100.0;
+    let note = v.get("time_last_update_utc").and_then(|t| t.as_str()).unwrap_or("");
+    Some(json!({
+        "id": "fx",
+        "title": "汇率",
+        "label": format!("汇率  美元/人民币 {cny:.2}  欧元/人民币 {eur_cny:.2}  英镑/人民币 {gbp_cny:.2}  100日元/人民币 {jpy_cny:.2}"),
+        "source": "ExchangeRate-API",
+        "url": url,
+        "note": note,
+        "rows": [
+            ticker_row("美元/人民币", &format!("{cny:.4}"), "1 美元", url),
+            ticker_row("欧元/人民币", &format!("{eur_cny:.4}"), "1 欧元", url),
+            ticker_row("英镑/人民币", &format!("{gbp_cny:.4}"), "1 英镑", url),
+            ticker_row("100日元/人民币", &format!("{jpy_cny:.4}"), "100 日元", url),
+        ],
+    }))
 }
 
-fn gate_last(pair: &str) -> Option<f64> {
-    let v = https_get_json(&format!(
-        "https://api.gateio.ws/api/v4/spot/tickers?currency_pair={pair}"
-    ))
-    .ok()?;
-    let row = v.as_array()?.first()?;
-    row.get("last")?.as_str()?.parse().ok()
+fn gate_ticker(pair: &str) -> Option<Value> {
+    let v = https_get_json(&format!("https://api.gateio.ws/api/v4/spot/tickers?currency_pair={pair}")).ok()?;
+    v.as_array()?.first().cloned()
 }
 
-fn ticker_crypto() -> Option<String> {
-    let btc = gate_last("BTC_USDT")?;
-    let eth = gate_last("ETH_USDT")?;
-    let sol = gate_last("SOL_USDT").unwrap_or(0.0);
-    let sol_txt = if sol > 0.0 { format!("  SOL {sol:.2}") } else { String::new() };
-    Some(format!("币价  BTC {btc:.0} 美元  ETH {eth:.0} 美元{sol_txt}"))
+fn gate_num(row: &Value, key: &str) -> Option<f64> {
+    row.get(key).and_then(rate_num)
 }
 
-fn ticker_news() -> Option<String> {
-    let (_code, body) = https_get_raw("https://www.chinanews.com.cn/rss/scroll-news.xml").ok()?;
-    let item = body.split("<item>").nth(1)?;
-    let raw = item.split("<title>").nth(1)?.split("</title>").next()?.trim();
-    let title = raw
+fn ticker_crypto() -> Option<Value> {
+    let pairs = [("BTC", "BTC_USDT"), ("ETH", "ETH_USDT"), ("SOL", "SOL_USDT")];
+    let mut rows = Vec::new();
+    let mut bits = Vec::new();
+    for (name, pair) in pairs {
+        let Some(row) = gate_ticker(pair) else { continue };
+        let Some(last) = gate_num(&row, "last") else { continue };
+        let page = format!("https://www.gate.io/trade/{pair}");
+        let change = row.get("change_percentage").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let mut hint = Vec::new();
+        if let Some(hi) = gate_num(&row, "high_24h") { hint.push(format!("24h 高 {hi:.2}")); }
+        if let Some(lo) = gate_num(&row, "low_24h") { hint.push(format!("24h 低 {lo:.2}")); }
+        let value = if name == "BTC" || name == "ETH" {
+            format!("{last:.0} 美元")
+        } else {
+            format!("{last:.2} 美元")
+        };
+        let change_txt = if change.is_empty() { String::new() } else { format!("  {change}%") };
+        bits.push(format!("{name} {value}{change_txt}"));
+        let shown = if change.is_empty() { value } else { format!("{value}  {change}%") };
+        rows.push(ticker_row(name, &shown, &hint.join("  "), &page));
+    }
+    if rows.is_empty() {
+        return None;
+    }
+    let first = rows[0].get("url").and_then(|u| u.as_str()).unwrap_or("https://www.gate.io");
+    Some(json!({
+        "id": "crypto",
+        "title": "数字货币",
+        "label": format!("币价  {}", bits.join("  ")),
+        "source": "Gate.io",
+        "url": first,
+        "note": "现货最新价",
+        "rows": rows,
+    }))
+}
+
+fn rss_text(block: &str, tag: &str) -> Option<String> {
+    let raw = block.split(&format!("<{tag}>")).nth(1)?.split(&format!("</{tag}>")).next()?.trim();
+    let text = raw
         .trim_start_matches("<![CDATA[")
         .trim_end_matches("]]>")
         .replace("&amp;", "&")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
-        .replace("&apos;", "'");
-    let title = title.trim();
-    if title.is_empty() { None } else { Some(format!("要闻  {title}")) }
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">");
+    let text = text.trim();
+    if text.is_empty() { None } else { Some(text.to_string()) }
 }
 
-fn ticker_weather() -> Option<String> {
-    let v = https_get_json("https://api.open-meteo.com/v1/forecast?latitude=39.90,31.23,35.68,51.51,40.71,1.35&longitude=116.40,121.47,139.69,-0.13,-74.01,103.82&current=temperature_2m").ok()?;
+fn ticker_news() -> Option<Value> {
+    let (_code, body) = https_get_raw("https://www.chinanews.com.cn/rss/scroll-news.xml").ok()?;
+    let mut rows = Vec::new();
+    for item in body.split("<item>").skip(1).take(8) {
+        let Some(title) = rss_text(item, "title") else { continue };
+        let link = rss_text(item, "link").unwrap_or_default();
+        let when = rss_text(item, "pubDate").unwrap_or_default();
+        rows.push(ticker_row(&title, &when, "", &link));
+        if rows.len() == 8 { break; }
+    }
+    let first = rows.first()?.get("label")?.as_str()?.to_string();
+    let url = rows.first().and_then(|r| r.get("url")).and_then(|u| u.as_str()).unwrap_or("").to_string();
+    Some(json!({
+        "id": "news",
+        "title": "要闻",
+        "label": format!("要闻  {first}"),
+        "source": "中国新闻网",
+        "url": url,
+        "note": "滚动要闻",
+        "rows": rows,
+    }))
+}
+
+fn weather_phrase(code: i64) -> &'static str {
+    match code {
+        0 => "晴",
+        1 | 2 => "少云",
+        3 => "阴",
+        45 | 48 => "雾",
+        51 | 53 | 55 | 56 | 57 | 61 | 63 | 65 | 66 | 67 | 80 | 81 | 82 => "雨",
+        71 | 73 | 75 | 77 | 85 | 86 => "雪",
+        95 | 96 | 99 => "雷雨",
+        _ => "",
+    }
+}
+
+fn ticker_weather() -> Option<Value> {
+    let url = "https://api.open-meteo.com/v1/forecast?latitude=39.90,31.23,35.68,51.51,40.71,1.35&longitude=116.40,121.47,139.69,-0.13,-74.01,103.82&current=temperature_2m,weather_code,wind_speed_10m";
+    let v = https_get_json(url).ok()?;
     let names = ["北京", "上海", "东京", "伦敦", "纽约", "新加坡"];
-    let temps: Vec<f64> = if let Some(arr) = v.as_array() {
-        arr.iter().filter_map(|x| x.pointer("/current/temperature_2m").and_then(|t| t.as_f64())).collect()
+    let spots: Vec<&Value> = if let Some(arr) = v.as_array() {
+        arr.iter().collect()
     } else {
-        v.pointer("/current/temperature_2m").and_then(|t| t.as_f64()).into_iter().collect()
+        vec![&v]
     };
-    if temps.is_empty() {
+    let mut rows = Vec::new();
+    let mut bits = Vec::new();
+    for (name, spot) in names.iter().zip(spots.iter()) {
+        let Some(temp) = spot.pointer("/current/temperature_2m").and_then(|t| t.as_f64()) else { continue };
+        let phrase = spot.pointer("/current/weather_code").and_then(|c| c.as_i64()).map(weather_phrase).unwrap_or("");
+        let wind = spot.pointer("/current/wind_speed_10m").and_then(|w| w.as_f64());
+        let mut hint = phrase.to_string();
+        if let Some(w) = wind {
+            if !hint.is_empty() { hint.push_str("  "); }
+            hint.push_str(&format!("风 {w:.0} km/h"));
+        }
+        bits.push(format!("{name} {temp:.0}°"));
+        rows.push(ticker_row(name, &format!("{temp:.0}°"), &hint, ""));
+    }
+    if rows.is_empty() {
         return None;
     }
-    let text = names.iter().zip(temps.iter()).map(|(n, t)| format!("{n} {t:.0}°")).collect::<Vec<_>>().join("  ");
-    Some(format!("天气  {text}"))
+    Some(json!({
+        "id": "weather",
+        "title": "天气",
+        "label": format!("天气  {}", bits.join("  ")),
+        "source": "Open-Meteo",
+        "url": "https://open-meteo.com/",
+        "note": "当前气温",
+        "rows": rows,
+    }))
+}
+
+/// 用系统浏览器打开 https 链接。中国新闻网的要闻链接仍是 http，只放行这个域名。
+#[tauri::command]
+fn open_https(url: String) -> Result<(), String> {
+    let url = url.trim();
+    let ok = url.starts_with("https://")
+        || url.starts_with("http://www.chinanews.com.cn/")
+        || url.starts_with("http://www.chinanews.com/");
+    if !ok || url.chars().any(|c| c.is_control() || c == ' ') {
+        return Err("这个地址不能打开".into());
+    }
+    let status = {
+        #[cfg(target_os = "macos")]
+        { std::process::Command::new("open").arg(url).status() }
+        #[cfg(target_os = "linux")]
+        { std::process::Command::new("xdg-open").arg(url).status() }
+        #[cfg(target_os = "windows")]
+        { std::process::Command::new("cmd").args(["/C", "start", "", url]).status() }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        { return Err("当前系统不能打开链接".into()); }
+    };
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(_) => Err("系统没有打开这个链接".into()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// 标题栏跑马灯。只返回勾选的来源；某一路失败就略过，不编造数字。
+/// 每一条自带来源地址，点开后由界面放到下方标签页。
 #[tauri::command]
 async fn ticker_feed(fx: bool, crypto: bool, news: bool, weather: bool) -> Result<Value, String> {
     tokio::task::spawn_blocking(move || {
-        let mut parts = Vec::new();
+        let mut items = Vec::new();
         if fx {
-            if let Some(s) = ticker_fx() { parts.push(s); }
+            if let Some(v) = ticker_fx() { items.push(v); }
         }
         if crypto {
-            if let Some(s) = ticker_crypto() { parts.push(s); }
+            if let Some(v) = ticker_crypto() { items.push(v); }
         }
         if news {
-            if let Some(s) = ticker_news() { parts.push(s); }
+            if let Some(v) = ticker_news() { items.push(v); }
         }
         if weather {
-            if let Some(s) = ticker_weather() { parts.push(s); }
+            if let Some(v) = ticker_weather() { items.push(v); }
         }
-        let text = if parts.is_empty() { "行情暂时不可用".to_string() } else { parts.join("     ·     ") };
-        json!({ "text": text })
+        json!({ "items": items })
     })
     .await
     .map_err(|e| e.to_string())
@@ -1243,6 +1737,15 @@ pub fn run() {
             update_profile,
             blob_put,
             blob_get,
+            blob_cached,
+            blob_put_ref,
+            media_file,
+            save_media,
+            open_path,
+            send_rich,
+            capture_screen,
+            list_windows,
+            capture_window,
             presence_set,
             group_create,
             group_list,
@@ -1277,6 +1780,7 @@ pub fn run() {
             disconnect,
             platform,
             ticker_feed,
+            open_https,
             list_identities,
             create_identity,
             auth_status,
@@ -1290,7 +1794,9 @@ pub fn run() {
             recover,
             read_audit,
             ui_kv_get_all,
-            ui_kv_set
+            ui_kv_set,
+            chat_log_load,
+            chat_log_save
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

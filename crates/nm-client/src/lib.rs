@@ -495,6 +495,23 @@ impl Session {
         route_send(&self.conn, &msg).await
     }
 
+    /// 私聊或群的富消息。`json` 为 `nmspace.v1/chat` 载荷，媒体本体在 blob 里。
+    pub async fn send_rich(&self, target: [u8; 32], json: &str, group: bool) -> Result<Gram, ClientError> {
+        let n = self.next_corr.fetch_add(1, Ordering::SeqCst);
+        let mut msg = build_gram(
+            if group { GramKind::GroupMessage } else { GramKind::Message },
+            self.my_id,
+            target.to_vec(),
+            Some(Any {
+                type_url: "nmspace.v1/chat".to_string(),
+                value: json.as_bytes().to_vec(),
+            }),
+        );
+        msg.gram_id = n;
+        msg.crc = nm_crypto::content_hash(json.as_bytes()).to_vec();
+        route_send(&self.conn, &msg).await
+    }
+
     async fn group_op(&self, method: &str, op: GroupOp) -> Result<(), ClientError> {
         let params = Any { type_url: "nmspace.v1.GroupOp".to_string(), value: op.encode_to_vec() };
         let res = rpc_over(&self.conn, self.my_id, method, Some(params)).await?;

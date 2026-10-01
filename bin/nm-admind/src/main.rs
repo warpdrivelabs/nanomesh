@@ -4,6 +4,7 @@
 mod auth;
 
 use std::net::SocketAddr;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -136,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/names/domain-add", post(|s: State<AppState>, h: HeaderMap, b: Json<serde_json::Value>| proxy_post(s, h, "/names/domain-add", b)))
         .route("/api/names/set", post(|s: State<AppState>, h: HeaderMap, b: Json<serde_json::Value>| proxy_post(s, h, "/names/set", b)))
         .route("/api/names/del", post(|s: State<AppState>, h: HeaderMap, b: Json<serde_json::Value>| proxy_post(s, h, "/names/del", b)))
+        .route("/api/nmd/restart", post(nmd_restart))
         .with_state(state);
 
     let https_addr: Option<SocketAddr> = match (&args.tls_cert, &args.tls_key) {
@@ -487,6 +489,146 @@ async fn local_node_id(s: &AppState) -> Result<String, Response> {
             .into_response());
     }
     Ok(node_id)
+}
+
+/// 重启本机 nmd。优先走 systemd（系统服务或用户服务）；没有服务时按监听端口找到进程再拉起。
+async fn nmd_restart(State(s): State<AppState>, headers: HeaderMap) -> Response {
+    if !session_ok(&s, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if s.auth.must_change() {
+        return (StatusCode::FORBIDDEN, "首次登录请先修改密码").into_response();
+    }
+    let how = match restart_nmd_service(&s.nmd_api) {
+        Ok(msg) => msg,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "ok": false, "error": e })),
+            )
+                .into_response();
+        }
+    };
+    let back = wait_nmd_up(&s).await;
+    Json(json!({ "ok": true, "how": how, "back": back })).into_response()
+}
+
+fn systemctl(user: bool, args: &[&str]) -> Option<std::process::Output> {
+    let mut cmd = Command::new("systemctl");
+    if user {
+        cmd.arg("--user");
+    }
+    cmd.args(args).output().ok()
+}
+
+fn unit_live(user: bool) -> bool {
+    let Some(out) = systemctl(user, &["is-active", "nmd"]) else {
+        return false;
+    };
+    let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    matches!(state.as_str(), "active" | "activating" | "reloading")
+}
+
+fn restart_nmd_service(nmd_api: &str) -> Result<String, String> {
+    if unit_live(false) {
+        let out = systemctl(false, &["restart", "nmd"]).ok_or("无法执行 systemctl")?;
+        if out.status.success() {
+            return Ok("已通过 systemctl 重启 nmd".into());
+        }
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if err.is_empty() { "systemctl 重启 nmd 失败".into() } else { err });
+    }
+    if unit_live(true) {
+        let out = systemctl(true, &["restart", "nmd"]).ok_or("无法执行 systemctl --user")?;
+        if out.status.success() {
+            return Ok("已通过 systemctl --user 重启 nmd".into());
+        }
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if err.is_empty() { "systemctl --user 重启 nmd 失败".into() } else { err });
+    }
+    restart_nmd_process(nmd_api)
+}
+
+fn api_port(nmd_api: &str) -> Option<u16> {
+    let rest = nmd_api.split("://").nth(1).unwrap_or(nmd_api);
+    let hostport = rest.split('/').next().unwrap_or(rest);
+    hostport.rsplit_once(':')?.1.parse().ok()
+}
+
+fn listener_pid(port: u16) -> Option<u32> {
+    let out = Command::new("lsof")
+        .args(["-nP", "-t", &format!("-iTCP:{port}"), "-sTCP:LISTEN"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).lines().next()?.trim().parse().ok()
+}
+
+fn process_args(pid: u32) -> Option<Vec<String>> {
+    let out = Command::new("ps").args(["-ww", "-o", "args=", "-p", &pid.to_string()]).output().ok()?;
+    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if line.is_empty() {
+        return None;
+    }
+    Some(line.split_whitespace().map(str::to_string).collect())
+}
+
+fn process_cwd(pid: u32) -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::fs::read_link(format!("/proc/{pid}/cwd")) {
+        return Some(p);
+    }
+    let out = Command::new("lsof").args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"]).output().ok()?;
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if let Some(path) = line.strip_prefix('n') {
+            if !path.is_empty() {
+                return Some(std::path::PathBuf::from(path));
+            }
+        }
+    }
+    None
+}
+
+fn restart_nmd_process(nmd_api: &str) -> Result<String, String> {
+    let port = api_port(nmd_api).ok_or("无法从 nmd 地址解析端口")?;
+    let pid = listener_pid(port).ok_or(format!("没有进程在监听 {port}"))?;
+    let args = process_args(pid).ok_or("读不到 nmd 的启动命令")?;
+    let exe = args.first().map(String::as_str).unwrap_or("");
+    if !exe.ends_with("/nmd") && exe != "nmd" && !exe.ends_with("\\nmd") {
+        return Err("监听端口上的进程不是 nmd".into());
+    }
+    let cwd = process_cwd(pid).ok_or("读不到 nmd 的工作目录")?;
+    let script = format!("while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; cd \"$NMD_CWD\" && exec \"$@\"");
+    Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .arg("sh")
+        .args(&args)
+        .env("NMD_CWD", &cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("无法安排重启: {e}"))?;
+    let killed = Command::new("kill").arg(pid.to_string()).status().map(|s| s.success()).unwrap_or(false);
+    if !killed {
+        return Err("已安排拉起，但没能结束当前 nmd".into());
+    }
+    Ok("已重启 nmd 进程".into())
+}
+
+async fn wait_nmd_up(s: &AppState) -> bool {
+    for _ in 0..25 {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        if s.http
+            .get(format!("{}/identity", s.nmd_api))
+            .header("x-admin-token", &s.nmd_token)
+            .send()
+            .await
+            .is_ok()
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// 反代 GET 到 nmd 控制 API（需已登录且已改密）。

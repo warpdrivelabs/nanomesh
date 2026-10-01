@@ -283,6 +283,17 @@
 .tab-sep { height: 1px; margin: 4px 6px; background: var(--border); }
 main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .conv { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.tick-page { flex: 1; min-height: 0; overflow: auto; padding: 28px 32px 40px; display: flex; flex-direction: column; gap: 16px; }
+.tick-page h2 { margin: 0; font-size: 20px; font-weight: 650; }
+.tick-src { color: var(--muted); font-size: 12px; }
+.tick-rows { display: flex; flex-direction: column; }
+.tick-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.tick-row b { display: block; font-size: 14px; font-weight: 600; }
+.tick-row small { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; }
+.tick-row-side { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; color: var(--ink); font-variant-numeric: tabular-nums; }
+.tick-open, .tick-link { border: 1px solid var(--border); background: transparent; color: var(--aqua); height: 28px; padding: 0 10px; border-radius: 8px; font-size: 12px; }
+.tick-open:hover, .tick-link:hover { background: var(--hover); }
+.tick-open { align-self: flex-start; }
 .conv-head { display: flex; align-items: center; gap: 9px; height: var(--header-h); flex: 0 0 var(--header-h);
   padding: 0 16px; border-bottom: 1px solid var(--border); }
 .conv-head b { font-size: 14px; }
@@ -400,14 +411,58 @@ html[data-theme="light"] .home-feats li { background: color-mix(in srgb, var(--p
 .im-center .txt { font-size: 16px; font-weight: 600; color: var(--ink); }
 .im-center .sub { font-size: 12px; }
 
-/* 输入条 */
-.im-composer { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 10px 14px 12px; border-top: 1px solid var(--border); background: var(--panel); }
-.im-composer input { flex: 1; height: 40px; padding: 0 14px; border-radius: 20px; border: 1px solid var(--border); background: var(--bg); color: var(--ink); font-size: 14px; font-family: inherit; outline: none; }
-.im-composer input:hover { border-color: var(--border2); }
-.im-composer input:focus { border-color: var(--aqua); background: var(--surface); box-shadow: 0 0 0 3px color-mix(in srgb, var(--aqua) 18%, transparent); }
-.im-composer .send { width: 40px; height: 40px; border-radius: 50%; background: var(--aqua); border: none; color: var(--on-accent); flex: 0 0 40px; display: inline-flex; align-items: center; justify-content: center; }
-.im-composer .send:hover { filter: brightness(1.08); }
-.im-composer .send:active { filter: brightness(0.96); }
+/* 输入区：顶栏图标 + 多行文本。Enter 发送，Shift+Enter 换行。 */
+.im-composer { position: relative; flex: 0 0 auto; display: flex; flex-direction: column; min-height: 132px; border-top: 1px solid var(--border); background: var(--panel); }
+.im-tools { display: flex; align-items: center; gap: 2px; height: 36px; padding: 0 8px; }
+.im-tool, .im-caret { width: 28px; height: 28px; border: none; background: transparent; color: var(--muted); border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; padding: 0; }
+.im-tool:hover, .im-caret:hover, .im-tool.is-on { background: var(--hover); color: var(--ink); }
+.im-tool.is-rec { color: var(--red); }
+.im-split { position: relative; display: inline-flex; align-items: center; }
+.im-caret { width: 14px; }
+.im-caret .nm-ico { width: 10px; height: 10px; }
+.im-tools .im-tool .nm-ico { width: 18px; height: 18px; }
+.im-tool--end { margin-left: auto; }
+.im-pending { display: none; flex-wrap: wrap; gap: 8px; padding: 0 12px 6px; }
+.im-pending.is-on { display: flex; }
+.im-chip { display: inline-flex; align-items: center; gap: 8px; max-width: 240px; height: 36px; padding: 0 8px 0 4px; border-radius: 8px; background: var(--hover); color: var(--ink); font-size: 12px; }
+.im-chip img { width: 28px; height: 28px; object-fit: cover; border-radius: 4px; }
+.im-chip b { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.im-chip button { border: none; background: transparent; color: var(--muted); width: 18px; height: 18px; padding: 0; }
+.im-composer textarea { flex: 1; width: 100%; min-height: 88px; max-height: 180px; resize: none; border: none; background: transparent; color: var(--ink); font: inherit; font-size: 14px; line-height: 1.5; padding: 2px 14px 12px; outline: none; }
+.im-pop { position: absolute; z-index: 30; top: auto; bottom: calc(100% + 6px); left: 8px; min-width: 180px; max-width: 320px; max-height: 280px; overflow: auto; background: var(--panel2); border: 1px solid var(--border2); border-radius: 10px; padding: 4px; box-shadow: 0 10px 28px rgba(0,0,0,.4); }
+.im-pop button { display: flex; align-items: center; width: 100%; text-align: left; border: none; background: transparent; color: var(--ink); min-height: 32px; padding: 0 10px; border-radius: 6px; font-size: 13px; }
+.im-pop button:hover { background: var(--hover); }
+.im-pop button small { margin-left: 8px; color: var(--muted); }
+.im-pop--wide { width: 304px; }
+.im-emoji-tabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px; position: sticky; top: 0; background: var(--panel2); }
+.im-emoji-tabs button { flex: 0 0 auto; width: auto; white-space: nowrap; padding: 0 8px; color: var(--muted); }
+.im-emoji-tabs button.is-on { color: var(--ink); background: var(--hover); }
+.im-emoji-grid { display: grid; grid-template-columns: repeat(8, 32px); gap: 2px; padding: 4px; }
+.im-emoji-grid button { width: 32px; height: 32px; justify-content: center; font-size: 18px; padding: 0; }
+.im-history { display: none; flex-direction: column; max-height: 220px; border-bottom: 1px solid var(--border); background: var(--bg); }
+.im-history.is-on { display: flex; }
+.im-history input { height: 32px; margin: 8px 10px 4px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); color: var(--ink); padding: 0 10px; font: inherit; font-size: 13px; outline: none; }
+.im-history-list { overflow: auto; padding: 0 6px 8px; }
+.im-history-list button { display: flex; gap: 8px; width: 100%; border: none; background: transparent; color: var(--ink); text-align: left; border-radius: 6px; padding: 6px 8px; font-size: 13px; }
+.im-history-list button:hover { background: var(--hover); }
+.im-history-list button span { color: var(--muted); flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.im-history-list button b { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.im-history-empty { color: var(--muted); font-size: 12px; padding: 8px 12px 12px; }
+.im-bubble--media { background: var(--panel); color: var(--ink); border: 1px solid var(--border); padding: 4px; overflow: hidden; }
+.im-msg.me .im-bubble--media { background: var(--panel); color: var(--ink); border-color: var(--border); box-shadow: 0 1px 1px color-mix(in srgb, #000 12%, transparent); }
+.im-photo { display: block; max-width: 240px; max-height: 240px; border-radius: 12px; cursor: zoom-in; }
+.im-voice, .im-file, .im-card { display: flex; align-items: center; gap: 8px; min-width: 160px; padding: 6px 8px; }
+.im-voice audio, .im-video video { display: block; max-width: 260px; }
+.im-video video { max-height: 180px; border-radius: 10px; background: #000; }
+.im-file, .im-card, .im-fetch { border: none; background: transparent; color: inherit; cursor: pointer; text-align: left; width: 100%; }
+.im-fetch { display: flex; align-items: center; gap: 8px; min-width: 160px; padding: 6px 8px; }
+.im-fetch b { display: block; font-size: 13px; font-weight: 600; }
+.im-fetch small { display: block; color: var(--muted); font-size: 12px; }
+.im-file b, .im-card b { display: block; font-size: 13px; font-weight: 600; }
+.im-file small, .im-card small, .im-media-miss { color: var(--muted); font-size: 12px; }
+.im-msg.im-flash .im-bubble { outline: 2px solid var(--aqua); }
+.im-lightbox { position: fixed; inset: 0; z-index: 80; background: rgba(0,0,0,.78); display: flex; align-items: center; justify-content: center; }
+.im-lightbox img { max-width: 92vw; max-height: 92vh; border-radius: 8px; }
 
 /* ── 连接页：已保存节点列表 ── */
 .saved-wrap { margin-top: 26px; }

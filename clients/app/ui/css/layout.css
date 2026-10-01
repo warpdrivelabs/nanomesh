@@ -19,6 +19,9 @@
   .tb-marquee-track{display:flex;width:max-content;white-space:nowrap;color:var(--ink2);font-size:12px;will-change:transform;
     animation-name:tb-marquee;animation-timing-function:linear;animation-iteration-count:infinite;animation-duration:48s}
   .tb-marquee-track span{padding-right:4em}
+  .tb-tick{border:none;background:transparent;color:inherit;font:inherit;padding:0 0.15em;cursor:pointer}
+  .tb-tick:hover{color:var(--ink)}
+  .tb-tick-sep{color:var(--muted);padding:0 0.7em}
   .tb-marquee:hover .tb-marquee-track{animation-play-state:paused}
   @keyframes tb-marquee{from{transform:translateX(0)}to{transform:translateX(-50%)}}
   .tb-ticker-pop{position:absolute;top:36px;left:210px;z-index:30;display:flex;flex-direction:column;gap:8px;
