@@ -11,7 +11,9 @@
   .titlebar{height:40px;flex:0 0 40px;display:flex;align-items:center;gap:8px;position:relative;
     background:var(--panel);border-bottom:1px solid var(--border);
     padding:0 10px;-webkit-app-region:drag;user-select:none}
-  .tb-brand{display:flex;align-items:center;gap:8px;flex:none}
+  .tb-brand{display:flex;align-items:center;gap:8px;flex:none;cursor:grab;-webkit-app-region:drag}
+  .tb-brand:active{cursor:grabbing}
+  .tb-app-icon,.titlebar .tb-title{-webkit-app-region:drag}
   .tb-app-icon{width:22px;height:22px;border-radius:var(--avatar-radius);corner-shape:squircle;object-fit:cover;display:block;flex:none}
   .titlebar .tb-title{font-size:13px;color:var(--ink);font-weight:700;letter-spacing:0.04em}
   .tb-ctrls{display:flex;align-items:center;gap:2px;-webkit-app-region:no-drag;flex:none}
@@ -24,7 +26,7 @@
   .tb-tick-sep{color:var(--muted);padding:0 0.7em}
   .tb-marquee:hover .tb-marquee-track{animation-play-state:paused}
   @keyframes tb-marquee{from{transform:translateX(0)}to{transform:translateX(-50%)}}
-  .tb-ticker-pop{position:absolute;top:36px;left:210px;z-index:30;display:flex;flex-direction:column;gap:8px;
+  .tb-ticker-pop{position:absolute;top:auto;bottom:calc(100% + 6px);right:8px;left:auto;z-index:30;display:flex;flex-direction:column;gap:8px;
     min-width:180px;padding:10px 12px;background:var(--panel2);border:1px solid var(--border2);
     border-radius:var(--r-float);box-shadow:0 10px 28px rgba(0,0,0,.35);-webkit-app-region:no-drag}
   .tb-ticker-pop[hidden]{display:none}
@@ -37,7 +39,7 @@
   .tb-btn .ico{font-size:14px;line-height:1}
   .tb-update{color:var(--aqua)} .tb-update:hover{border-color:var(--aqua)}
   /* Windows/Linux 窗口控件（最小化/最大化/关闭）：默认隐藏，initPlatformChrome 探测非 macOS 后 display:flex */
-  .win-ctrls{display:flex;align-items:center;gap:8px;-webkit-app-region:no-drag;margin-left:8px;flex:none}
+  .win-ctrls{display:flex;align-items:center;gap:8px;-webkit-app-region:no-drag;margin-left:auto;flex:none}
   .tl{width:13px;height:13px;border-radius:50%;border:none;padding:0;flex:none}
   .tl-red{background:#ff5f57}
   .tl-yellow{background:#febc2e}

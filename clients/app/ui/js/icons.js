@@ -41,6 +41,10 @@ const NM_ICON_PATHS = {
   mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v4M8 21h8"/>',
   at: '<circle cx="10" cy="9" r="3"/><path d="M4.5 19c.6-2.6 2.4-4 5.5-4s4.9 1.4 5.5 4"/><path d="M18 8v6M18 11h2.2a1.8 1.8 0 0 0 0-3.6H18"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v6l4 2"/>',
+  "close-left": '<path d="M14 7 8 12l6 5"/><path d="M18 6v12"/>',
+  "close-right": '<path d="m10 7 6 5-6 5"/><path d="M6 6v12"/>',
+  "close-others": '<rect x="9" y="6.5" width="6" height="11" rx="1.5"/><path d="M5 9.5 7.2 12 5 14.5M19 9.5 16.8 12 19 14.5"/>',
+  "close-all": '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="m9 9 6 6M15 9l-6 6"/>',
 };
 
 function nmIcon(name) {

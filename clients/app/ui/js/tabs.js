@@ -114,13 +114,14 @@
     const idx = TABS.findIndex((t) => t.key === key);
     if (idx < 0) return;
     const m = ctxEl();
-    const item = (act, label, disabled) => `<button type="button" class="tab-mi" data-act="${act}"${disabled ? " disabled" : ""}>${esc(label)}</button>`;
+    const item = (act, label, ico, disabled) => `<button type="button" class="tab-mi" data-act="${act}"${disabled ? " disabled" : ""}>${window.nmIcon ? nmIcon(ico) : ""}<span>${esc(label)}</span></button>`;
     m.innerHTML = [
-      item("current", "关闭当前", false),
-      item("left", "关闭左侧", idx === 0),
-      item("right", "关闭右侧", idx === TABS.length - 1),
+      item("current", "关闭当前", "close", false),
+      item("others", "关闭其他", "close-others", TABS.length < 2),
+      item("left", "关闭左侧", "close-left", idx === 0),
+      item("right", "关闭右侧", "close-right", idx === TABS.length - 1),
       '<div class="tab-sep"></div>',
-      item("all", "关闭全部", false),
+      item("all", "关闭全部", "close-all", false),
     ].join("");
     m.hidden = false;
     m.style.left = "0px";
@@ -132,6 +133,7 @@
       const act = btn.dataset.act;
       hideCtx();
       if (act === "current") close(key);
+      else if (act === "others") closeKeys(TABS.filter((t) => t.key !== key).map((t) => t.key), key);
       else if (act === "left") closeKeys(TABS.slice(0, idx).map((t) => t.key), key);
       else if (act === "right") closeKeys(TABS.slice(idx + 1).map((t) => t.key), key);
       else if (act === "all") closeShown();

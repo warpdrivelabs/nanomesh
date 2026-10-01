@@ -27,22 +27,16 @@
       <button class="tb-btn" data-act="toggleSidebar" title="隐藏/显示左侧栏"><span class="ico" id="tb-side-ico" data-ico="sidebar-close"></span></button>
       <button class="tb-btn" data-act="toggleTheme" title="浅色/深色主题"><span class="ico" id="tb-theme-ico" data-ico="sun"></span></button>
       <button class="tb-btn" data-act="disconnect" title="断开 / 切换服务器"><span class="ico" data-ico="disconnect"></span></button>
-      <button class="tb-btn" id="tb-ticker-cfg" type="button" title="定制跑马灯"><span class="ico" data-ico="ticker"></span></button>
     </div>
-    <div class="tb-marquee" data-tauri-drag-region>
-      <div class="tb-marquee-track" id="tb-marquee-track">正在获取标题栏内容…</div>
-    </div>
-    <div class="tb-ticker-pop" id="tb-ticker-pop" hidden>
-      <label><input type="checkbox" data-ticker="fx" /> 主要货币汇率</label>
-      <label><input type="checkbox" data-ticker="crypto" /> 主要数字货币</label>
-      <label><input type="checkbox" data-ticker="news" /> 最新要闻</label>
-      <label><input type="checkbox" data-ticker="weather" /> 主要城市天气</label>
-      <label class="tb-speed">速率<input id="tb-ticker-speed" type="range" min="1" max="10" step="1" value="5" /></label>
+    <div class="tabbar" id="tabbar" style="display:none">
+      <div class="tabstrip" id="tabstrip"></div>
+      <button type="button" class="tab-more" id="tab-more" title="未显示的标签"></button>
+      <div class="tab-over" id="tab-over" hidden></div>
     </div>
     <div class="win-ctrls" id="win-ctrls">
-      <button class="tl tl-red" data-act="winClose" title="关闭"></button>
-      <button class="tl tl-yellow" data-act="winMinimize" title="最小化"></button>
       <button class="tl tl-green" id="win-max-btn" data-act="winToggleMaximize" title="缩放"></button>
+      <button class="tl tl-yellow" data-act="winMinimize" title="最小化"></button>
+      <button class="tl tl-red" data-act="winClose" title="关闭"></button>
     </div>
   </div>
   <!-- 用户切换下拉（标题栏 tb-user 触发；position:fixed，DOM 位置无关） -->
@@ -160,11 +154,6 @@
     <div class="splitter" id="splitter" title="拖动调整左侧栏宽度"></div>
     <!-- 主区：多 tab 工作区（会话 / 实体详情 / 群详情 / 节点服务详情各成一页）-->
     <main>
-      <div class="tabbar" id="tabbar" style="display:none">
-        <div class="tabstrip" id="tabstrip"></div>
-        <button type="button" class="tab-more" id="tab-more" title="未显示的标签"></button>
-        <div class="tab-over" id="tab-over" hidden></div>
-      </div>
       <template id="conv-home-tpl">
         <div class="home">
           <div class="home-sky" aria-hidden="true">
@@ -187,6 +176,23 @@
       </template>
       <div class="conv" id="conv"></div>
     </main>
+  </div>
+  <div class="statusbar" id="statusbar">
+    <div class="sb-node" id="sb-node" title="">
+      <span class="sb-dot" id="sb-dot"></span>
+      <span class="sb-node-text" id="sb-node-text">未连接</span>
+    </div>
+    <div class="tb-marquee">
+      <div class="tb-marquee-track" id="tb-marquee-track">正在获取状态栏内容…</div>
+    </div>
+    <button class="tb-btn" id="tb-ticker-cfg" type="button" title="定制跑马灯"><span class="ico" data-ico="ticker"></span></button>
+    <div class="tb-ticker-pop" id="tb-ticker-pop" hidden>
+      <label><input type="checkbox" data-ticker="fx" /> 主要货币汇率</label>
+      <label><input type="checkbox" data-ticker="crypto" /> 主要数字货币</label>
+      <label><input type="checkbox" data-ticker="news" /> 最新要闻</label>
+      <label><input type="checkbox" data-ticker="weather" /> 主要城市天气</label>
+      <label class="tb-speed">速率<input id="tb-ticker-speed" type="range" min="1" max="10" step="1" value="5" /></label>
+    </div>
   </div>
 </div>
 

@@ -14,7 +14,29 @@ function showLoginView() {
 function showMainView() {
   document.getElementById("login-view").style.display = "none";
   document.getElementById("main-view").style.display = "flex";
+  paintHomeNode();
 }
+function paintHomeNode() {
+  const text = document.getElementById("sb-node-text");
+  const dot = document.getElementById("sb-dot");
+  const host = document.getElementById("sb-node");
+  if (!text) return;
+  const svc = window.CURRENT_SVC;
+  if (!svc || !svc.node) {
+    text.textContent = "Home Node 未连接";
+    if (dot) dot.classList.remove("on");
+    if (host) host.title = "";
+    return;
+  }
+  const pk = window.NodeSvc ? NodeSvc.pubkeyOf(svc.node) : "";
+  const short = pk ? pk.slice(0, 8) : "";
+  const mode = svc.mode === "nat" ? "穿透" : svc.mode === "lan" ? "同网" : svc.mode === "selfhost" ? "自建" : (svc.mode || "");
+  const who = svc.name || "已连接";
+  text.textContent = ["Home Node", who, short, mode].filter(Boolean).join("  ");
+  if (dot) dot.classList.add("on");
+  if (host) host.title = pk || String(svc.node);
+}
+window.paintHomeNode = paintHomeNode;
 window.showLoginView = showLoginView;
 window.showMainView = showMainView;
 

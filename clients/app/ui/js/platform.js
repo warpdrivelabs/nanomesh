@@ -17,6 +17,14 @@ async function winToggleMaximize(){
 async function winClose(){ const w=_tauriWin(); if(w) await w.close(); }
 // 无边框缩放热区：pointerdown 触发 Tauri 原生 startResizeDragging（比手搓 CSS resize 在各平台更可靠）。
 // macOS 用系统边框缩放（decorations=Overlay 保留系统 resize），resize-handle 在 mac 上通过 CSS 隐藏，不干扰。
+document.querySelectorAll(".tb-brand").forEach((el) => {
+  el.addEventListener("mousedown", async (e) => {
+    if (e.button !== 0) return;
+    const w = _tauriWin();
+    if (!w || !w.startDragging) return;
+    try { await w.startDragging(); } catch (_) {}
+  });
+});
 document.querySelectorAll(".resize-handle").forEach(h=>{
   h.addEventListener("pointerdown", async e=>{
     e.preventDefault();

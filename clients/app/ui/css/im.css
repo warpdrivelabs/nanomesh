@@ -255,7 +255,9 @@
 
 /* ── 主区会话 ── */
 /* 主区多 tab 工作区（cmx-agent 样式）*/
-.tabbar { position: relative; display: flex; align-items: stretch; height: 32px; flex: 0 0 32px; box-sizing: border-box; border-bottom: 1px solid var(--border); background: var(--panel); }
+.tabbar { position: relative; display: flex; align-items: stretch; height: 28px; flex: 1 1 auto; min-width: 0; box-sizing: border-box; border-bottom: none; background: transparent; -webkit-app-region: no-drag; }
+.titlebar .tab { height: 28px; align-self: center; border-right: none; border-radius: 8px; margin-right: 2px; }
+.titlebar .tab.active::before { top: auto; bottom: 0; border-radius: 2px 2px 0 0; }
 .tabstrip { flex: 1; min-width: 0; display: flex; align-items: stretch; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
 .tabstrip::-webkit-scrollbar { display: none; width: 0; height: 0; }
 .tab { display: flex; align-items: center; gap: 7px; padding: 0 8px 0 12px; max-width: 200px; flex: 0 0 auto; border-right: 1px solid var(--border); position: relative; cursor: pointer; font-size: 13px; color: var(--muted); background: transparent; }
@@ -282,6 +284,13 @@
 .tab-mi:disabled { color: var(--muted); opacity: .4; }
 .tab-sep { height: 1px; margin: 4px 6px; background: var(--border); }
 main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.statusbar { position: relative; flex: 0 0 28px; height: 28px; display: flex; align-items: center; gap: 8px; padding: 0 8px 0 12px; background: var(--panel); border-top: 1px solid var(--border); -webkit-app-region: no-drag; }
+.sb-node { display: flex; align-items: center; gap: 6px; flex: 0 1 auto; min-width: 0; max-width: 42%; color: var(--ink2); font-size: 12px; }
+.sb-node-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sb-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+.sb-dot.on { background: var(--green); }
+.statusbar .tb-marquee { flex: 1 1 0; }
+.statusbar .tb-btn { flex: none; }
 .conv { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .tick-page { flex: 1; min-height: 0; overflow: auto; padding: 28px 32px 40px; display: flex; flex-direction: column; gap: 16px; }
 .tick-page h2 { margin: 0; font-size: 20px; font-weight: 650; }
@@ -428,7 +437,13 @@ html[data-theme="light"] .home-feats li { background: color-mix(in srgb, var(--p
 .im-chip img { width: 28px; height: 28px; object-fit: cover; border-radius: 4px; }
 .im-chip b { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .im-chip button { border: none; background: transparent; color: var(--muted); width: 18px; height: 18px; padding: 0; }
-.im-composer textarea { flex: 1; width: 100%; min-height: 88px; max-height: 180px; resize: none; border: none; background: transparent; color: var(--ink); font: inherit; font-size: 14px; line-height: 1.5; padding: 2px 14px 12px; outline: none; }
+.im-write { position: relative; flex: 1; display: flex; min-height: 88px; }
+.im-composer textarea { flex: 1; width: 100%; min-height: 88px; max-height: 180px; resize: none; border: none; background: transparent; color: var(--ink); font: inherit; font-size: 14px; line-height: 1.5; padding: 2px 52px 12px 14px; outline: none; }
+.im-send { position: absolute; right: 12px; bottom: 10px; width: 30px; height: 30px; border-radius: 50%; border: none; padding: 0; display: inline-flex; align-items: center; justify-content: center; background: var(--hover); color: var(--muted); transition: background .16s, color .16s, transform .12s, box-shadow .16s; }
+.im-send .nm-ico { width: 15px; height: 15px; }
+.im-send.is-ready { background: var(--aqua); color: var(--on-accent); box-shadow: 0 4px 12px color-mix(in srgb, var(--aqua) 36%, transparent); }
+.im-send.is-ready:hover { filter: brightness(1.08); }
+.im-send:active { transform: scale(0.94); }
 .im-pop { position: absolute; z-index: 30; top: auto; bottom: calc(100% + 6px); left: 8px; min-width: 180px; max-width: 320px; max-height: 280px; overflow: auto; background: var(--panel2); border: 1px solid var(--border2); border-radius: 10px; padding: 4px; box-shadow: 0 10px 28px rgba(0,0,0,.4); }
 .im-pop button { display: flex; align-items: center; width: 100%; text-align: left; border: none; background: transparent; color: var(--ink); min-height: 32px; padding: 0 10px; border-radius: 6px; font-size: 13px; }
 .im-pop button:hover { background: var(--hover); }

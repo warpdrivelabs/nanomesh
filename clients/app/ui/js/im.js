@@ -530,6 +530,8 @@ async function imDisconnect() {
   await flushChatLog();
   try { await NM.inv("disconnect"); } catch (_) {}
   MY_ID = ""; CONTACTS = []; ADDED = []; CONVOS = {}; UNREAD = {}; ACTIVE = null; DETAIL_ID = null;
+  window.CURRENT_SVC = null;
+  if (typeof paintHomeNode === "function") paintHomeNode();
   if (window.Tabs) Tabs.closeAll();
   if (typeof showLoginView === "function") showLoginView();
 }

@@ -72,7 +72,10 @@ function markup() {
       <button type="button" class="im-tool im-tool--end" data-act="history" title="会话记录">${nmIcon("clock")}</button>
     </div>
     <div class="im-pending${d.pending.length ? " is-on" : ""}" id="conv-pending">${pendingHtml(d.pending)}</div>
-    <textarea id="conv-input" rows="3" aria-label="消息">${escapeHtml(d.text || "")}</textarea>
+    <div class="im-write">
+      <textarea id="conv-input" rows="3" aria-label="消息">${escapeHtml(d.text || "")}</textarea>
+      <button type="button" class="im-send" id="conv-send" data-act="send" title="发送">${nmIcon("send")}</button>
+    </div>
     <div class="im-pop" id="conv-pop" hidden></div>
     <input type="file" id="conv-pick-image" accept="image/*" multiple hidden />
     <input type="file" id="conv-pick-video" accept="video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov" hidden />
@@ -88,12 +91,20 @@ function pendingHtml(items) {
   }).join("");
 }
 
+function syncSend() {
+  const btn = document.getElementById("conv-send");
+  const input = document.getElementById("conv-input");
+  if (!btn) return;
+  const ready = !!((input && input.value.trim()) || ((viewId && drafts.get(viewId) && drafts.get(viewId).pending) || []).length);
+  btn.classList.toggle("is-ready", ready);
+}
 function paintPending() {
   const box = document.getElementById("conv-pending");
   if (!box) return;
   const items = draft().pending;
   box.classList.toggle("is-on", items.length > 0);
   box.innerHTML = pendingHtml(items);
+  syncSend();
 }
 
 function attach(next) {
@@ -104,8 +115,9 @@ function attach(next) {
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); doSend(); }
   });
-  input.addEventListener("input", () => { draft().text = input.value; fit(input); });
+  input.addEventListener("input", () => { draft().text = input.value; fit(input); syncSend(); });
   fit(input);
+  syncSend();
   const img = document.getElementById("conv-pick-image");
   const vid = document.getElementById("conv-pick-video");
   const file = document.getElementById("conv-pick-file");
@@ -185,6 +197,7 @@ function onComposerClick(e) {
   if (act === "mic") { toggleMic(); return; }
   if (act === "mention") { insertAt("@" + (btn.getAttribute("data-name") || "") + " "); closePop(); return; }
   if (act === "card") { closePop(); sendCard(btn.getAttribute("data-id") || "", btn.getAttribute("data-name") || ""); return; }
+  if (act === "send") { doSend(); return; }
   if (act === "history") { toggleHistory(); return; }
   if (act === "hist-jump") { jump(btn.getAttribute("data-mid") || ""); return; }
 }
@@ -488,7 +501,7 @@ async function doSend() {
     }
   } catch (e) {
     toast("发送失败：" + errText(e));
-  } finally { sending = false; }
+  } finally { sending = false; syncSend(); }
 }
 
 async function upload(item) {
