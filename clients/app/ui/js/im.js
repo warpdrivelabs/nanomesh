@@ -226,8 +226,18 @@ function renderEntities() {
 function renderGroup(key, icon, label, items) {
   const q = (document.getElementById("entity-search-input").value || "").trim();
   const folded = !q && ENT_FOLDED.has(key);
+  const person = key === "person";
   const rows = items.length
-    ? items.map((c) => itemHtml(c, escapeHtml(c.kind || "") + (c.added ? " · 手动" : ""), 0, DETAIL_ID)).join("")
+    ? items.map((c) => {
+        const tag = c.added ? " · 手动" : "";
+        if (person) {
+          const sub = c.handle
+            ? `<span class="nm-handle">${escapeHtml(c.handle)}</span>${tag}`
+            : (tag ? tag.slice(3) : "");
+          return itemHtml(c, sub, 0, DETAIL_ID, { inlineHandle: false });
+        }
+        return itemHtml(c, escapeHtml(c.kind || "") + tag, 0, DETAIL_ID);
+      }).join("")
     : '<div class="ent-empty">暂无</div>';
   return `<div class="ent-group${folded ? " folded" : ""}" data-type="${key}">
     <button type="button" class="ent-head" aria-expanded="${folded ? "false" : "true"}">
@@ -240,13 +250,14 @@ function renderGroup(key, icon, label, items) {
   </div>`;
 }
 
-function itemHtml(c, sub, unread, sel) {
+function itemHtml(c, sub, unread, sel, opts) {
+  const inlineHandle = !opts || opts.inlineHandle !== false;
   const dot = (window.Profile && c.presence) ? Profile.presenceDot(c.presence, 11) : "";
   const face = window.Profile ? Profile.faceHtml(c.id, c.name || "?", 40, dot, c.avatar) : `<span class="av" style="background:${avatarColor(c.id)}">${escapeHtml((c.name || "?").slice(0, 1))}</span>`;
   return `<div class="im-item ${c.id === sel ? "on" : ""}" data-id="${c.id}" title="${escapeHtml(c.id)}">
     ${face}
     <span class="mid">
-      <span class="r1"><span class="nm">${escapeHtml(c.name || shortId(c.id))}</span>${c.handle ? `<span class="nm-handle" style="font-size:11px;color:var(--aqua);margin-left:6px;font-family:ui-monospace,Menlo,monospace">${escapeHtml(c.handle)}</span>` : ""}</span>
+      <span class="r1"><span class="nm">${escapeHtml(c.name || shortId(c.id))}</span>${inlineHandle && c.handle ? `<span class="nm-handle nm-handle--inline">${escapeHtml(c.handle)}</span>` : ""}</span>
       <span class="r2"><span class="msg">${sub || ""}</span>${unread ? `<span class="unread">${unread}</span>` : ""}</span>
     </span></div>`;
 }
