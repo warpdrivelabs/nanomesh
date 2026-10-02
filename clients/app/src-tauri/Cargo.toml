@@ -32,3 +32,16 @@ base64 = "0.22"
 bip39 = "2"
 # macOS 系统 TLS / rustls 访问 robot.link 会在握手时被重置，改用 OpenSSL。
 openssl = "0.10"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+hkdf = "0.12"
+sha2 = "0.10"
+
+# 设备口令存系统钥匙串（Android 无对应后端，退回 0600 文件）。
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target."cfg(windows)".dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(all(target_os = "linux", not(target_os = "android")))'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust", "vendored"] }

@@ -13,7 +13,7 @@
     no_such_user: "家节点上没有这个用户。",
     bad_password: "密码不正确",
     same_password: "新密码不能与旧密码相同",
-    not_key_owner: "该账号已在其他设备注册，本机没有匹配的私钥，这里不能重置密码。",
+    not_key_owner: "本机没有该账号的私钥。若在其他设备注册过，请先导入那台设备导出的备份串。",
     no_password: "该账号未设置密码",
     no_store: "家节点暂时无法保存口令",
   };
@@ -73,6 +73,122 @@
     });
   }
 
+  let pairRid = "";
+
+  function showTab(name) {
+    document.querySelectorAll("#acct-import .acct-tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === name));
+    document.querySelectorAll("#acct-import .acct-pane").forEach((p) => { p.hidden = p.dataset.pane !== name; });
+  }
+  function showImport(on, tab) {
+    const box = document.getElementById("acct-import");
+    if (!box) return;
+    box.hidden = !on;
+    if (on && tab) showTab(tab);
+    if (!on) stopPair();
+  }
+  function pairStatus(text, sas) {
+    const box = document.getElementById("acct-pair-status");
+    box.hidden = !text && !sas;
+    document.getElementById("acct-pair-text").textContent = text || "";
+    document.getElementById("acct-pair-sas").textContent = sas || "";
+  }
+  function stopPair() {
+    if (pairRid) NM.inv("pair_cancel").catch(() => {});
+    pairRid = "";
+    pairStatus("", "");
+  }
+  function accountFields() {
+    const local = document.getElementById("acct-local").value.trim();
+    const domain = document.getElementById("acct-domain").value.trim();
+    return { local, domain, password: document.getElementById("acct-password").value };
+  }
+
+  async function startPair(kind) {
+    const { local, domain, password } = accountFields();
+    const box = errBox();
+    box.textContent = "";
+    if (!local || !domain) { box.textContent = "请先填写用户名和域名"; return; }
+    if (kind === "push" && !password) { box.textContent = "请先填写密码"; return; }
+    const btn = document.getElementById(kind === "push" ? "acct-pair-go" : "acct-ticket-go");
+    btn.disabled = true;
+    stopPair();
+    try {
+      if (kind === "push") {
+        const r = await NM.inv("pair_request", { local, domain, password, registry: "", device: "" });
+        if (r && r.have) {
+          showImport(false);
+          await submit();
+          return;
+        }
+        pairRid = r.rid;
+        pairStatus("请求已发送，等待旧设备响应…", "");
+      } else {
+        const r = await NM.inv("pair_ticket", { local, domain, registry: "", device: "" });
+        pairRid = r.rid;
+        document.getElementById("acct-ticket-out").value = r.ticket;
+        pairStatus("迁移串已生成，请在 5 分钟内到旧设备粘贴。", "");
+      }
+    } catch (err) {
+      box.textContent = explain(err);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function onPairEvent(ev) {
+    if (!ev || !pairRid || ev.rid !== pairRid) return;
+    if (ev.type === "sas") {
+      pairStatus("请在旧设备的确认框中输入下面的核对码：", ev.sas);
+    } else if (ev.type === "done") {
+      pairRid = "";
+      document.getElementById("acct-ticket-out").value = "";
+      saveKey(ev.name, ev.user);
+      if (document.getElementById("acct-password").value && mode === "login") {
+        pairStatus("私钥已迁移到本机，正在登录…", "");
+        showImport(false);
+        await submit();
+      } else {
+        pairStatus("私钥已迁移到本机。请输入密码登录；忘记密码可点「忘记密码」重新设置。", "");
+      }
+    } else if (ev.type === "denied") {
+      pairRid = "";
+      pairStatus("旧设备拒绝了这次迁移。", "");
+    } else if (ev.type === "expired") {
+      pairRid = "";
+      pairStatus("迁移请求已过期，请重新发起。", "");
+    } else if (ev.type === "failed") {
+      pairRid = "";
+      pairStatus("迁移失败：" + (ev.error || "未知错误"), "");
+    }
+  }
+
+  async function doImport() {
+    const blob = document.getElementById("acct-import-blob").value.trim();
+    const password = document.getElementById("acct-import-pw").value;
+    const btn = document.getElementById("acct-import-go");
+    const box = errBox();
+    box.textContent = "";
+    if (!blob || !password) { box.textContent = "请粘贴备份串并输入备份口令"; return; }
+    btn.disabled = true;
+    btn.textContent = "导入中…";
+    try {
+      await NM.inv("ensure_device");
+      const n = await NM.inv("import_backup", { blob, password });
+      document.getElementById("acct-import-blob").value = "";
+      document.getElementById("acct-import-pw").value = "";
+      showImport(false);
+      if (typeof renderUserOptions === "function") renderUserOptions();
+      const ready = fullName() && document.getElementById("acct-password").value;
+      box.textContent = "已导入 " + n + " 个身份" + (ready ? "，正在登录…" : "，请输入账号和密码登录。");
+      if (ready && mode === "login") await submit();
+    } catch (err) {
+      box.textContent = explain(err);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "导入并登录";
+    }
+  }
+
   function setMode(next) {
     mode = next;
     const reg = next === "register";
@@ -88,6 +204,8 @@
     document.getElementById("acct-submit").textContent = reg ? "注册" : reset ? "设置新密码" : "登录";
     document.getElementById("acct-switch").textContent = reg || reset ? "已有账号？去登录" : "没有账号？去注册";
     document.getElementById("acct-forgot").style.display = next === "login" ? "" : "none";
+    document.getElementById("acct-import-open").style.display = next === "register" ? "none" : "";
+    if (next === "register") showImport(false);
     document.getElementById("acct-password").autocomplete = reg || reset ? "new-password" : "current-password";
     document.getElementById("acct-password").placeholder = reset ? "新密码，至少 8 位" : "至少 8 位";
     const box = errBox();
@@ -174,11 +292,8 @@
     try {
       if (mode === "reset") {
         const user = map()[fullName()] || "";
-        if (!user) {
-          box.textContent = MSG.not_key_owner;
-          return;
-        }
-        await NM.inv("account_reset", { local, domain, password, user, registry: "" });
+        const owner = await NM.inv("account_reset", { local, domain, password, user, registry: "" });
+        if (owner) saveKey(fullName(), owner);
         document.getElementById("acct-password").value = "";
         document.getElementById("acct-pass2").value = "";
         setMode("login");
@@ -216,6 +331,7 @@
       }
       if (code === "not_key_owner") {
         box.textContent = MSG.not_key_owner;
+        showImport(true);
         return;
       }
       box.textContent = explain(err);
@@ -278,17 +394,26 @@
       if (last.domain) document.getElementById("acct-domain").value = last.domain;
     }
     form.addEventListener("submit", submit);
+    document.getElementById("acct-import-open").addEventListener("click", () => {
+      showImport(document.getElementById("acct-import").hidden);
+    });
+    document.getElementById("acct-import-cancel").addEventListener("click", () => showImport(false));
+    document.getElementById("acct-import-go").addEventListener("click", doImport);
+    document.querySelectorAll("#acct-import .acct-tabs button").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
+    document.getElementById("acct-pair-go").addEventListener("click", () => startPair("push"));
+    document.getElementById("acct-ticket-go").addEventListener("click", () => startPair("ticket"));
+    document.getElementById("acct-ticket-copy").addEventListener("click", async () => {
+      const v = document.getElementById("acct-ticket-out").value;
+      if (!v) return;
+      try { await navigator.clipboard.writeText(v); if (window.toast) toast("迁移串已复制"); } catch (_) {}
+    });
+    NM.onEvent("pair://event", onPairEvent);
     document.getElementById("acct-switch").addEventListener("click", () => {
       setMode(mode === "login" ? "register" : "login");
     });
     document.getElementById("acct-forgot").addEventListener("click", () => {
-      const user = map()[fullName()] || "";
       if (!document.getElementById("acct-local").value.trim() || !document.getElementById("acct-domain").value.trim()) {
         errBox().textContent = "请先填写用户名和域名";
-        return;
-      }
-      if (!user) {
-        errBox().textContent = MSG.not_key_owner;
         return;
       }
       document.getElementById("acct-password").value = "";

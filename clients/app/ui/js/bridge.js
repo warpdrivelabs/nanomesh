@@ -18,5 +18,11 @@
       try { cb(e.payload); } catch (err) { console.error("core://event handler", err); }
     });
   }
-  window.NM = { inv, onCoreEvent, hasTauri: () => !!core() };
+  async function onEvent(name, cb) {
+    if (!(window.__TAURI__ && window.__TAURI__.event)) return () => {};
+    return await window.__TAURI__.event.listen(name, (e) => {
+      try { cb(e.payload); } catch (err) { console.error(name + " handler", err); }
+    });
+  }
+  window.NM = { inv, onCoreEvent, onEvent, hasTauri: () => !!core() };
 })();

@@ -51,6 +51,16 @@ pub fn vault_exists(dir: &Path) -> bool {
     vault_file(dir).exists()
 }
 
+pub(crate) fn write_private(path: &Path, data: impl AsRef<[u8]>) -> Result<(), String> {
+    std::fs::write(path, data).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
 fn derive_mk(password: &str, salt: &[u8], m: u32, t: u32, p: u32) -> Result<[u8; 32], String> {
     let params = Params::new(m, t, p, Some(32)).map_err(|e| e.to_string())?;
     let a = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
@@ -179,7 +189,7 @@ pub fn import(dir: &Path, vk: &[u8; 32], blob_b64: &str, password: &str) -> Resu
         seed.copy_from_slice(&it.seed);
         let pk = pubkey_of_seed(&seed);
         let enc = encrypt_seed(vk, &seed)?;
-        std::fs::write(ident_dir(dir).join(format!("{}.enc", hexstr(&pk))), enc).map_err(|e| e.to_string())?;
+        write_private(&ident_dir(dir).join(format!("{}.enc", hexstr(&pk))), enc)?;
         seed.zeroize();
         n += 1;
     }
@@ -267,7 +277,7 @@ pub fn read_audit(dir: &Path, n: usize) -> Vec<String> {
 
 fn write_meta(dir: &Path, meta: &VaultMeta) -> Result<(), String> {
     let s = serde_json::to_string_pretty(meta).map_err(|e| e.to_string())?;
-    std::fs::write(vault_file(dir), s).map_err(|e| e.to_string())
+    write_private(&vault_file(dir), s)
 }
 fn read_meta(dir: &Path) -> Result<VaultMeta, String> {
     let s = std::fs::read_to_string(vault_file(dir)).map_err(|_| "尚未设置主口令".to_string())?;
@@ -349,7 +359,7 @@ fn migrate_plaintext(dir: &Path, vk: &[u8; 32]) -> Result<(), String> {
         seed.copy_from_slice(bytes);
         let pk = pubkey_of_seed(&seed);
         let enc = encrypt_seed(vk, &seed)?;
-        std::fs::write(idir.join(format!("{}.enc", hexstr(&pk))), enc).map_err(|e| e.to_string())?;
+        write_private(&idir.join(format!("{}.enc", hexstr(&pk))), enc)?;
         seed.zeroize();
         Ok(())
     };

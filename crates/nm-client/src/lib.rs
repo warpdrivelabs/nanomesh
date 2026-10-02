@@ -512,6 +512,20 @@ impl Session {
         route_send(&self.conn, &msg).await
     }
 
+    /// 私聊通道上的自定义载荷（如设备迁移握手），接收方按 `type_url` 分派。
+    pub async fn send_typed(&self, target: [u8; 32], type_url: &str, body: &[u8]) -> Result<Gram, ClientError> {
+        let n = self.next_corr.fetch_add(1, Ordering::SeqCst);
+        let mut msg = build_gram(
+            GramKind::Message,
+            self.my_id,
+            target.to_vec(),
+            Some(Any { type_url: type_url.to_string(), value: body.to_vec() }),
+        );
+        msg.gram_id = n;
+        msg.crc = nm_crypto::content_hash(body).to_vec();
+        route_send(&self.conn, &msg).await
+    }
+
     async fn group_op(&self, method: &str, op: GroupOp) -> Result<(), ClientError> {
         let params = Any { type_url: "nmspace.v1.GroupOp".to_string(), value: op.encode_to_vec() };
         let res = rpc_over(&self.conn, self.my_id, method, Some(params)).await?;

@@ -22,6 +22,8 @@ use tauri::{async_runtime, AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 
 mod auth;
+mod pair;
+mod pairing;
 
 /// 已建立的连接（客户端 + 会话共享句柄）。
 struct Conn {
@@ -35,6 +37,7 @@ struct AppState {
     conn: Mutex<Option<Conn>>,
     /// 解锁后驻留的保险库密钥 VK；None = 已上锁（见 auth.rs / docs/CLIENT_AUTH_SECURITY.md）。
     vault: std::sync::Mutex<Option<[u8; 32]>>,
+    pair: pairing::PairState,
 }
 
 fn hex(b: &[u8]) -> String {
@@ -333,6 +336,10 @@ async fn finish_session(
     let apph = app.clone();
     async_runtime::spawn(async move {
         while let Some(gram) = inbox.recv().await {
+            if let Some(p) = gram.payload.as_ref().filter(|p| p.type_url.starts_with(pair::PREFIX)) {
+                pairing::on_old_side(&apph, &p.type_url, &p.value, &gram.sender).await;
+                continue;
+            }
             let (type_url, body) = match gram.payload.as_ref() {
                 Some(p) => (p.type_url.clone(), String::from_utf8_lossy(&p.value).to_string()),
                 None => (String::new(), String::new()),
@@ -1095,6 +1102,70 @@ fn write_device_key(dir: &std::path::Path, pw: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn wipe_device_key_file(dir: &std::path::Path) {
+    let key_path = dir.join("device.key");
+    if let Ok(meta) = std::fs::metadata(&key_path) {
+        let _ = std::fs::write(&key_path, vec![0u8; meta.len() as usize]);
+        let _ = std::fs::remove_file(&key_path);
+    }
+}
+
+/// 设备口令放在系统钥匙串（macOS/iOS Keychain、Windows 凭据管理器、Linux Secret Service）；
+/// 没有钥匙串的平台（Android）返回 Unsupported，调用方退回 0600 文件。
+mod devkey {
+    pub enum Error {
+        Unsupported,
+        Denied(String),
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios", windows, all(target_os = "linux", not(target_os = "android"))))]
+    fn entry(dir: &std::path::Path) -> Result<keyring::Entry, Error> {
+        keyring::Entry::new("io.nmspace.app", &format!("device-vault:{}", dir.display())).map_err(|e| match e {
+            keyring::Error::PlatformFailure(_) | keyring::Error::NoStorageAccess(_) => Error::Unsupported,
+            other => Error::Denied(other.to_string()),
+        })
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios", windows, all(target_os = "linux", not(target_os = "android"))))]
+    pub fn get(dir: &std::path::Path) -> Result<Option<String>, Error> {
+        match entry(dir)?.get_password() {
+            Ok(pw) => Ok(Some(pw)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(keyring::Error::PlatformFailure(_)) => Err(Error::Unsupported),
+            Err(e) => Err(Error::Denied(e.to_string())),
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios", windows, all(target_os = "linux", not(target_os = "android"))))]
+    pub fn set(dir: &std::path::Path, pw: &str) -> Result<(), Error> {
+        entry(dir)?.set_password(pw).map_err(|e| match e {
+            keyring::Error::PlatformFailure(_) | keyring::Error::NoStorageAccess(_) => Error::Unsupported,
+            other => Error::Denied(other.to_string()),
+        })
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "ios", windows, all(target_os = "linux", not(target_os = "android")))))]
+    pub fn get(_dir: &std::path::Path) -> Result<Option<String>, Error> {
+        Err(Error::Unsupported)
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "ios", windows, all(target_os = "linux", not(target_os = "android")))))]
+    pub fn set(_dir: &std::path::Path, _pw: &str) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
+}
+
+/// 保存设备口令：优先钥匙串，成功后抹掉明文文件；钥匙串不可用时写 0600 文件。
+fn store_device_key(dir: &std::path::Path, pw: &str) -> Result<(), String> {
+    match devkey::set(dir, pw) {
+        Ok(()) => {
+            wipe_device_key_file(dir);
+            Ok(())
+        }
+        Err(_) => write_device_key(dir, pw),
+    }
+}
+
 fn open_device_vault(app: &AppHandle, state: &State<'_, AppState>) -> Result<(), String> {
     if state.vault.lock().unwrap().is_some() {
         return Ok(());
@@ -1102,11 +1173,28 @@ fn open_device_vault(app: &AppHandle, state: &State<'_, AppState>) -> Result<(),
     let dir = data_dir(app)?;
     let key_path = dir.join("device.key");
     if auth::vault_exists(&dir) {
+        let mut denied = None;
+        match devkey::get(&dir) {
+            Ok(Some(pw)) => {
+                if let Ok(vk) = auth::unlock(&dir, pw.trim()) {
+                    *state.vault.lock().unwrap() = Some(vk);
+                    wipe_device_key_file(&dir);
+                    return Ok(());
+                }
+            }
+            Ok(None) | Err(devkey::Error::Unsupported) => {}
+            Err(devkey::Error::Denied(e)) => denied = Some(e),
+        }
         if let Ok(pw) = std::fs::read_to_string(&key_path) {
             if let Ok(vk) = auth::unlock(&dir, pw.trim()) {
                 *state.vault.lock().unwrap() = Some(vk);
+                let _ = store_device_key(&dir, pw.trim());
                 return Ok(());
             }
+        }
+        // 钥匙串拒绝访问不等于没有口令；此时重建保险库会让本机身份全部失联。
+        if let Some(e) = denied {
+            return Err(format!("无法读取系统钥匙串，请允许本应用访问后重试：{e}"));
         }
         // 旧主口令库无法在无界面下打开。挪走后改由本机设备密钥建库，不再弹出解锁页。
         let legacy = dir.join(format!("vault.json.legacy-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)));
@@ -1116,7 +1204,7 @@ fn open_device_vault(app: &AppHandle, state: &State<'_, AppState>) -> Result<(),
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut raw);
     let pw = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, raw);
     let vk = auth::setup(&dir, &pw)?;
-    write_device_key(&dir, &pw)?;
+    store_device_key(&dir, &pw)?;
     *state.vault.lock().unwrap() = Some(vk);
     Ok(())
 }
@@ -1295,20 +1383,28 @@ async fn account_login(
     let (local, domain) = norm_account(&local, &domain)?;
     let node = resolve_home_node(&registry, &domain).await?;
     let user = user.trim().to_string();
-    let seed = if user.is_empty() {
-        nm_transport::SecretKey::generate().to_bytes()
-    } else {
-        let vk = vk_of(&state)?;
-        load_identity_seed(&app, &vk, &user)?
-    };
+    let vk = vk_of(&state)?;
+    let seed = match user.is_empty() {
+        true => None,
+        false => load_identity_seed(&app, &vk, &user).ok(),
+    }
+    .unwrap_or_else(|| nm_transport::SecretKey::generate().to_bytes());
     let (_probe_client, probe) = dial(seed, "nat", &node, Vec::new(), None, None).await?;
     let body = json!({ "local": local, "domain": domain, "password": password }).to_string();
     let got = probe.name_account("name.login", &body).await.map_err(|e| registry_phrase(&e.to_string()))?;
     drop(probe);
     let got = got.trim().to_ascii_lowercase();
-    if user.is_empty() || got != user.to_ascii_lowercase() {
+    // 名字→公钥映射只在前端 localStorage；导入备份或换了 webview 源后会缺失，按家节点返回的公钥找本机私钥。
+    let user = if !user.is_empty() && got == user.to_ascii_lowercase() {
+        user
+    } else if got.len() == 64
+        && got.chars().all(|c| c.is_ascii_hexdigit())
+        && identities_dir(&app)?.join(format!("{got}.enc")).exists()
+    {
+        got
+    } else {
         return Err("not_key_owner".into());
-    }
+    };
     let nick = if nickname.trim().is_empty() { format!("{local}@{domain}") } else { nickname.trim().to_string() };
     connect(app, state, user.clone(), "nat".into(), node.clone(), nick, Vec::new(), None, None).await?;
     Ok(json!({ "user": user, "name": format!("{local}@{domain}"), "node": node }))
@@ -1346,22 +1442,31 @@ async fn account_reset(
     password: String,
     user: String,
     registry: String,
-) -> Result<(), String> {
+) -> Result<String, String> {
     open_device_vault(&app, &state)?;
     if password.chars().count() < 8 {
         return Err("password_short".into());
     }
     let (local, domain) = norm_account(&local, &domain)?;
     let user = user.trim().to_string();
-    if user.is_empty() {
-        return Err("not_key_owner".into());
-    }
     let node = resolve_home_node(&registry, &domain).await?;
     let vk = vk_of(&state)?;
-    let seed = load_identity_seed(&app, &vk, &user)?;
     let body = json!({ "local": local, "domain": domain, "password": password }).to_string();
-    node_account(&node, seed, "name.reset", &body).await?;
-    Ok(())
+    if !user.is_empty() {
+        let seed = load_identity_seed(&app, &vk, &user)?;
+        node_account(&node, seed, "name.reset", &body).await?;
+        return Ok(user);
+    }
+    // 没有名字→公钥映射（例如刚导入备份）：逐个用本机身份尝试，家节点只接受登记公钥本人。
+    for pk in list_identities(app.clone(), state.clone())? {
+        let seed = load_identity_seed(&app, &vk, &pk)?;
+        match node_account(&node, seed, "name.reset", &body).await {
+            Ok(_) => return Ok(pk),
+            Err(e) if e.contains("not_key_owner") => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err("not_key_owner".into())
 }
 
 /// 域名输入时的提示。优先用目录做前缀过滤；目录不可用时，改用公开解析核对当前域名。
@@ -1773,6 +1878,12 @@ pub fn run() {
             account_login,
             account_passwd,
             account_reset,
+            pairing::pair_request,
+            pairing::pair_ticket,
+            pairing::pair_cancel,
+            pairing::pair_accept_ticket,
+            pairing::pair_approve,
+            pairing::pair_reject,
             account_suggest,
             name_reverse,
             node_users,

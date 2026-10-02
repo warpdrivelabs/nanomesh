@@ -119,6 +119,17 @@
     .acct-ask p { margin: 0 0 10px; font-size: 13px; line-height: 1.5; color: var(--ink); }
     .acct-ask-ops { display: flex; gap: 10px; align-items: center; }
     .acct-ask-ops .login-submit { width: auto; height: 36px; margin: 0; padding: 0 16px; }
+    .acct-import-ta, .acct-import-pw { display: block; width: 100%; box-sizing: border-box; margin: 0 0 10px; padding: 8px 10px;
+      border: 1px solid var(--border2); border-radius: var(--r-ctrl); background: var(--bg); color: var(--ink); font: inherit; font-size: 12px; }
+    .acct-import-ta { min-height: 72px; resize: vertical; font-family: ui-monospace, Menlo, monospace; word-break: break-all; }
+    .acct-tabs { display: flex; gap: 4px; margin: 0 0 12px; border-bottom: 1px solid var(--border2); }
+    .acct-tabs button { border: none; background: none; color: var(--muted); font: inherit; font-size: 13px; padding: 6px 10px; cursor: pointer;
+      border-bottom: 2px solid transparent; margin-bottom: -1px; }
+    .acct-tabs button.on { color: var(--aqua); border-bottom-color: var(--aqua); }
+    .acct-pair-status { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border2); }
+    .acct-sas { font-family: ui-monospace, Menlo, monospace; font-size: 30px; font-weight: 700; letter-spacing: 4px; color: var(--aqua); text-align: center; }
+    .acct-sas:empty { display: none; }
+    .acct-import-foot { margin-top: 10px; justify-content: flex-end; }
     .login-submit { letter-spacing: 0; text-indent: 0; background: linear-gradient(135deg, var(--accent) 0%, var(--green) 100%);
       border: none; border-radius: var(--r-ctrl); width: 100%; height: 44px; margin-top: 6px; font-size: 14px; font-weight: 600; color: var(--on-accent);
       cursor: pointer; transition: filter .2s, box-shadow .2s; box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 35%, transparent); }

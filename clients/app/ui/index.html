@@ -71,6 +71,12 @@
           <div class="sec-actions"><button class="ns-btn ns-primary" id="sec-imp-go">导入</button></div>
         </div>
         <div class="sec-sec">
+          <div class="sec-t">设备迁移</div>
+          <div class="sec-hint">新设备在登录页选「迁移串」生成一段文字，粘贴到这里，核对后即可把当前账号的私钥发给那台设备。</div>
+          <textarea id="sec-pair-in" class="sec-ta" spellcheck="false" placeholder="粘贴新设备上的迁移串（nmpair1:…）"></textarea>
+          <div class="sec-actions"><button class="ns-btn ns-primary" id="sec-pair-go">处理迁移串</button></div>
+        </div>
+        <div class="sec-sec">
           <div class="sec-t">恢复码（找回主口令）</div>
           <div class="sec-hint">生成一段 24 词恢复码，<b>离线抄写保存</b>；忘记主口令时在解锁页用它重置。生成新码会覆盖旧码。</div>
           <div class="sec-actions"><button class="ns-btn ns-primary" id="sec-rec-go">生成恢复码</button></div>
@@ -83,6 +89,18 @@
           <div id="sec-audit-out" class="sec-audit"></div>
         </div>
         <div class="sec-msg" id="sec-msg"></div>
+      </div>
+    </div>
+  </div>
+  <div class="sec-overlay" id="pair-modal">
+    <div class="sec-box pair-box">
+      <div class="sec-head"><span class="ico" data-ico="shield"></span>设备迁移请求</div>
+      <div class="sec-body">
+        <p class="pair-desc" id="pair-desc"></p>
+        <div class="sec-hint">只有你本人正在那台设备上操作时才继续。请输入那台设备上显示的 6 位核对码；陌生请求请直接拒绝。</div>
+        <input id="pair-sas" class="sec-input pair-sas" inputmode="numeric" maxlength="7" placeholder="000 000" autocomplete="off" />
+        <div class="sec-actions"><button class="ns-btn ns-primary" id="pair-allow">允许</button><button class="ns-btn" id="pair-deny">拒绝</button></div>
+        <div class="sec-msg" id="pair-msg"></div>
       </div>
     </div>
   </div>
@@ -273,6 +291,37 @@
             <button class="login-submit" id="acct-submit" type="submit">登录</button>
             <button type="button" class="acct-link" id="acct-forgot">忘记密码</button>
             <button type="button" class="acct-link" id="acct-switch">没有账号？去注册</button>
+            <button type="button" class="acct-link" id="acct-import-open">换了设备？把私钥迁移到本机</button>
+            <div class="acct-ask acct-import" id="acct-import" hidden>
+              <div class="acct-tabs" role="tablist">
+                <button type="button" data-tab="push" class="on">旧设备确认</button>
+                <button type="button" data-tab="ticket">迁移串</button>
+                <button type="button" data-tab="backup">备份串</button>
+              </div>
+              <div class="acct-pane" data-pane="push">
+                <p>旧设备需在线并已登录该账号。填好上方账号和密码后发送请求，旧设备会弹出确认框，在那里输入本机显示的核对码。</p>
+                <div class="acct-ask-ops"><button type="button" class="login-submit" id="acct-pair-go">发送请求</button></div>
+              </div>
+              <div class="acct-pane" data-pane="ticket" hidden>
+                <p>只需填好上方账号。把生成的迁移串发到旧设备，在旧设备「安全设置 → 设备迁移」中粘贴。5 分钟内有效，只能用一次。</p>
+                <textarea id="acct-ticket-out" class="acct-import-ta" readonly spellcheck="false" placeholder="迁移串会出现在这里"></textarea>
+                <div class="acct-ask-ops">
+                  <button type="button" class="login-submit" id="acct-ticket-go">生成迁移串</button>
+                  <button type="button" class="acct-link" id="acct-ticket-copy">复制</button>
+                </div>
+              </div>
+              <div class="acct-pane" data-pane="backup" hidden>
+                <p>在旧设备的「安全设置 → 加密备份」中导出备份串，粘贴到这里，并输入导出时设置的备份口令。</p>
+                <textarea id="acct-import-blob" class="acct-import-ta" spellcheck="false" placeholder="粘贴备份串"></textarea>
+                <input id="acct-import-pw" type="password" class="acct-import-pw" autocomplete="off" placeholder="备份口令" />
+                <div class="acct-ask-ops"><button type="button" class="login-submit" id="acct-import-go">导入并登录</button></div>
+              </div>
+              <div class="acct-pair-status" id="acct-pair-status" hidden>
+                <p id="acct-pair-text"></p>
+                <div class="acct-sas" id="acct-pair-sas"></div>
+              </div>
+              <div class="acct-ask-ops acct-import-foot"><button type="button" class="acct-link" id="acct-import-cancel">关闭</button></div>
+            </div>
             <div class="acct-ask" id="acct-ask" hidden>
               <p id="acct-ask-text"></p>
               <div class="acct-ask-ops">
@@ -333,5 +382,6 @@
 <script src="js/im.js" defer></script>
 <script src="js/main.js" defer></script>
 <script src="js/auth.js" defer></script>
+<script src="js/pairing.js" defer></script>
 </body>
 </html>
