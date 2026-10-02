@@ -42,13 +42,29 @@ struct SessionMeta {
 }
 type SessionsMeta = DashMap<Vec<u8>, SessionMeta>;
 
-/// 一条活动会话的管理快照（后端管理台「连接监控」用）。
+/// 一条活动会话的管理快照（后端管理台「连接监控 / 对等节点」用）。
 pub struct SessionRow {
     pub id: [u8; 32],
     pub since_unix_ms: u64,
     pub bytes_tx: u64,
     pub bytes_rx: u64,
     pub alpn: String,
+    /// 当前选中路径 RTT（毫秒）；无路径时为 `None`。
+    pub rtt_ms: Option<f64>,
+    /// 拥塞窗口（字节）。
+    pub cwnd: Option<u64>,
+    /// 当前路径 MTU（UDP 载荷）。
+    pub mtu: Option<u16>,
+    pub lost_packets: u64,
+    pub lost_bytes: u64,
+    pub datagrams_tx: u64,
+    pub datagrams_rx: u64,
+    pub congestion_events: u64,
+    pub black_holes: u64,
+    /// `"direct"` / `"relay"` / `""`（未知）。
+    pub path_kind: String,
+    /// 选中路径远端传输地址（IP/中继 URL）。
+    pub remote_addr: String,
 }
 
 /// 存储统计（后端管理台「存储管理」用）。
@@ -586,7 +602,7 @@ impl Node {
 
     // ---- 后端管理台访问器 ----
 
-    /// 活动会话快照（连接监控）。顺带清理陈旧的会话元数据。
+    /// 活动会话快照（连接监控 / 对等连通性）。顺带清理陈旧的会话元数据。
     pub fn sessions_snapshot(&self) -> Vec<SessionRow> {
         self.sessions_meta.retain(|k, _| self.sessions.contains_key(k));
         self.sessions
@@ -604,14 +620,7 @@ impl Node {
                     .and_then(|m| m.since.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
-                let stats = conn.stats();
-                SessionRow {
-                    id,
-                    since_unix_ms,
-                    bytes_tx: stats.udp_tx.bytes,
-                    bytes_rx: stats.udp_rx.bytes,
-                    alpn: String::from_utf8_lossy(conn.alpn()).into_owned(),
-                }
+                session_row_from_conn(id, since_unix_ms, conn)
             })
             .collect()
     }
@@ -1412,6 +1421,56 @@ impl Node {
                 }
             }
         })
+    }
+}
+
+/// 从活动连接提取管理台用的链路质量快照（字节/RTT/丢包/路径类型等）。
+fn session_row_from_conn(id: [u8; 32], since_unix_ms: u64, conn: &IrohConnection) -> SessionRow {
+    let stats = conn.stats();
+    let paths = conn.paths();
+    let selected = paths
+        .iter()
+        .find(|p| p.is_selected())
+        .or_else(|| paths.iter().next());
+    let (rtt_ms, cwnd, mtu, congestion_events, black_holes, path_kind, remote_addr) =
+        if let Some(p) = selected {
+            let ps = p.stats();
+            let kind = if p.is_relay() {
+                "relay"
+            } else if p.is_ip() {
+                "direct"
+            } else {
+                ""
+            };
+            (
+                Some(ps.rtt.as_secs_f64() * 1000.0),
+                Some(ps.cwnd),
+                Some(ps.current_mtu),
+                ps.congestion_events,
+                ps.black_holes_detected,
+                kind.to_string(),
+                p.remote_addr().to_string(),
+            )
+        } else {
+            (None, None, None, 0, 0, String::new(), String::new())
+        };
+    SessionRow {
+        id,
+        since_unix_ms,
+        bytes_tx: stats.udp_tx.bytes,
+        bytes_rx: stats.udp_rx.bytes,
+        alpn: String::from_utf8_lossy(conn.alpn()).into_owned(),
+        rtt_ms,
+        cwnd,
+        mtu,
+        lost_packets: stats.lost_packets,
+        lost_bytes: stats.lost_bytes,
+        datagrams_tx: stats.udp_tx.datagrams,
+        datagrams_rx: stats.udp_rx.datagrams,
+        congestion_events,
+        black_holes,
+        path_kind,
+        remote_addr,
     }
 }
 

@@ -30,6 +30,28 @@ fn parse_id(s: &str) -> Option<[u8; 32]> {
     Some(o)
 }
 
+/// 会话链路质量 JSON（连接监控 / 对等节点共用）。
+fn session_json(r: &nm_node::SessionRow) -> Value {
+    json!({
+        "id": hex(&r.id),
+        "since_unix_ms": r.since_unix_ms,
+        "bytes_tx": r.bytes_tx,
+        "bytes_rx": r.bytes_rx,
+        "alpn": r.alpn,
+        "rtt_ms": r.rtt_ms,
+        "cwnd": r.cwnd,
+        "mtu": r.mtu,
+        "lost_packets": r.lost_packets,
+        "lost_bytes": r.lost_bytes,
+        "datagrams_tx": r.datagrams_tx,
+        "datagrams_rx": r.datagrams_rx,
+        "congestion_events": r.congestion_events,
+        "black_holes": r.black_holes,
+        "path_kind": r.path_kind,
+        "remote_addr": r.remote_addr,
+    })
+}
+
 /// 进程自指标（后台每 2s 采样）。
 #[derive(Clone, Copy, Default)]
 struct ProcMetrics {
@@ -140,15 +162,7 @@ async fn connections(State(st): State<AppState>) -> Json<Value> {
         .node
         .sessions_snapshot()
         .into_iter()
-        .map(|r| {
-            json!({
-                "id": hex(&r.id),
-                "since_unix_ms": r.since_unix_ms,
-                "bytes_tx": r.bytes_tx,
-                "bytes_rx": r.bytes_rx,
-                "alpn": r.alpn,
-            })
-        })
+        .map(|r| session_json(&r))
         .collect();
     Json(json!({ "connections": rows }))
 }
@@ -218,6 +232,14 @@ async fn identity(State(st): State<AppState>) -> Json<Value> {
 }
 
 async fn peers(State(st): State<AppState>) -> Json<Value> {
+    // 活动会话按 id 索引，与联邦 peers 目录 join → 连通性 / 链路质量。
+    let sessions: std::collections::HashMap<String, nm_node::SessionRow> = st
+        .node
+        .sessions_snapshot()
+        .into_iter()
+        .map(|r| (hex(&r.id), r))
+        .collect();
+    let mut online = 0usize;
     let peers: Vec<Value> = st
         .node
         .peers_detail()
@@ -235,14 +257,38 @@ async fn peers(State(st): State<AppState>) -> Json<Value> {
             } else {
                 info.federation.as_str()
             };
-            json!({
+            let sess = sessions.get(&id);
+            let connected = sess.is_some();
+            if connected {
+                online += 1;
+            }
+            let mut row = json!({
                 "id": id, "name": info.name, "address": info.address,
                 "email": info.email, "mobile": info.mobile, "gps": info.gps,
                 "source": source, "last_seen": info.last_seen, "federation": federation,
-            })
+                "connected": connected,
+            });
+            if let Some(s) = sess {
+                let obj = row.as_object_mut().unwrap();
+                for (k, v) in session_json(s).as_object().unwrap() {
+                    // 保留 peers 的 id；其余会话字段写入同行。
+                    if k != "id" {
+                        obj.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            row
         })
         .collect();
-    Json(json!({ "peers": peers, "federation": st.federation }))
+    let total = peers.len();
+    Json(json!({
+        "peers": peers,
+        "federation": st.federation,
+        "self_id": hex(st.node.id().as_bytes()),
+        "online": online,
+        "offline": total.saturating_sub(online),
+        "total": total,
+    }))
 }
 
 #[derive(serde::Deserialize)]
