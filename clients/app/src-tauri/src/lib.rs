@@ -358,7 +358,8 @@ async fn finish_session(
             let ev = json!({
                 "type": "message",
                 "msg": {
-                    "id": gram.gram_id.to_string(),
+                    // gram_id 是发送方每个连接从 1 起的计数，重连会重复；拼上发送方与时间戳才唯一
+                    "id": format!("{}-{}-{}", hex(&gram.sender), gram.timestamp_ms, gram.gram_id),
                     "from": hex(&gram.sender),
                     "to": hex(&gram.receiver),                 // 群消息=群id；频道=频道id；私聊=本人id
                     "group": matches!(gram.kind(), nm_proto::GramKind::GroupMessage),
