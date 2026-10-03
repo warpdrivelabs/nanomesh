@@ -168,7 +168,7 @@ async function imRefresh() {
   if (window.Profile) Profile.resolveList(CONTACTS, () => renderPanels());
 }
 
-function renderPanels() { renderConversations(); renderEntities(); }
+function renderPanels() { renderConversations(); renderEntities(); if (window.Tray) Tray.sync(); }
 
 function bindPanelUI() {
   const s1 = document.getElementById("im-search-input");
@@ -512,10 +512,34 @@ function onCoreEvent(ev) {
   // 群/频道按其 id 归会话；私聊按对方：别人发来按发送方，自己其它设备发出按接收方
   const key = (m.group || m.channel || mine) ? m.to : m.from;
   const fresh = pushMsg(key, m);
-  if (fresh && !mine && key !== ACTIVE) UNREAD[key] = (UNREAD[key] || 0) + 1;
+  // 窗口在后台时，当前会话的新消息也算未读，回到窗口再清零
+  const seen = key === ACTIVE && (!window.Tray || Tray.focused());
+  if (fresh && !mine && !seen) UNREAD[key] = (UNREAD[key] || 0) + 1;
   if (fresh) scheduleChatSave();
   renderPanels();
+  if (fresh && !mine && !seen && window.Tray) Tray.onMessage(key, m);
 }
+
+// ── 托盘 / 通知用到的会话入口 ──
+window.imSnapshot = () => ({ myId: MY_ID, unread: UNREAD, convos: CONVOS, active: ACTIVE });
+window.imOpen = function (id) {
+  if (!id || !MY_ID) return;
+  if (window.Groups && Groups.byId(id)) openGroupChat(id);
+  else if (window.Channels && Channels.byId(id)) openChannel(id);
+  else selectContact(id);
+};
+window.imMarkRead = function (id) {
+  if (!UNREAD[id]) return;
+  UNREAD[id] = 0;
+  scheduleChatSave();
+  renderPanels();
+};
+window.imMarkAllRead = function () {
+  for (const id of Object.keys(UNREAD)) UNREAD[id] = 0;
+  scheduleChatSave();
+  renderPanels();
+};
+window.imFlush = () => flushChatLog();
 
 function pushMsg(peer, m) {
   m = window.Composer ? Composer.absorb(m) : m;
@@ -546,6 +570,7 @@ async function imDisconnect() {
   window.CURRENT_SVC = null;
   if (typeof paintHomeNode === "function") paintHomeNode();
   if (window.Tabs) Tabs.closeAll();
+  if (window.Tray) Tray.sync();
   if (typeof showLoginView === "function") showLoginView();
 }
 window.imStart = imStart;

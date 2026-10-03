@@ -25,6 +25,8 @@ mod auth;
 mod devices;
 mod pair;
 mod pairing;
+#[cfg(desktop)]
+mod tray;
 
 /// 已建立的连接（客户端 + 会话共享句柄）。
 struct Conn {
@@ -1852,7 +1854,19 @@ fn platform() -> &'static str {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // 单实例必须最先注册：再次启动时唤起已运行的窗口（Windows 点通知也会走这里）。
+    #[cfg(desktop)]
+    let builder = builder
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| tray::show_main(app)))
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![tray::HIDDEN_ARG]),
+        ))
+        .plugin(tray::shortcut_plugin())
+        .on_window_event(tray::on_window_event);
+    builder
+        .plugin(tauri_plugin_notification::init())
         .manage(AppState::default())
         .setup(|_app| {
             // 系统交通灯改由标题栏右侧的红黄绿按钮承担，各平台都关掉原生装饰。
@@ -1860,6 +1874,8 @@ pub fn run() {
                 let _ = w.set_decorations(false);
                 let _ = w.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
             }
+            #[cfg(desktop)]
+            tray::setup(_app.handle())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1939,8 +1955,24 @@ pub fn run() {
             ui_kv_get_all,
             ui_kv_set,
             chat_log_load,
-            chat_log_save
+            chat_log_save,
+            #[cfg(desktop)]
+            tray::tray_sync,
+            #[cfg(desktop)]
+            tray::tray_notify,
+            #[cfg(desktop)]
+            tray::tray_prefs_get,
+            #[cfg(desktop)]
+            tray::tray_prefs_set,
+            #[cfg(desktop)]
+            tray::tray_test_notify,
+            #[cfg(desktop)]
+            tray::app_quit
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, _ev| {
+            #[cfg(desktop)]
+            tray::on_run_event(_app, &_ev);
+        });
 }

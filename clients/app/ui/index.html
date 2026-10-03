@@ -131,6 +131,73 @@
       <div class="dlg-foot"><div class="sec-msg" id="dev-msg"></div><button class="ns-btn" data-close="dev-modal">完成</button></div>
     </div>
   </div>
+  <!-- 通知与托盘 -->
+  <div class="sec-overlay" id="tray-modal">
+    <div class="dlg">
+      <div class="dlg-head"><span class="ico" data-ico="bell"></span><span class="dlg-title">通知与托盘</span><span class="dlg-sub">新消息怎么提醒你，程序怎么驻留后台</span><button class="sec-x" data-close="tray-modal" title="关闭"><span class="ico" data-ico="close"></span></button></div>
+      <div class="dlg-main">
+        <nav class="dlg-nav">
+          <button class="on" data-pane="notify"><span data-ico="bell"></span>消息通知</button>
+          <button data-pane="mute"><span data-ico="moon"></span>免打扰</button>
+          <button data-pane="tray"><span data-ico="tray"></span>托盘与窗口</button>
+          <button data-pane="hotkey"><span data-ico="keyboard"></span>快捷键</button>
+          <div class="dlg-nav-sep"></div>
+          <button data-pane="about"><span data-ico="info"></span>关于</button>
+        </nav>
+        <section class="dlg-pane" data-pane="notify">
+          <div class="pane-head"><div><div class="pane-t">消息通知</div><div class="pane-d">窗口不在前台时，新消息用系统通知提醒你。设置即时生效。</div></div>
+            <button class="ns-btn" id="tp-test">发送测试通知</button></div>
+          <div class="set-list">
+            <label class="set-row"><span class="set-txt"><b>新消息系统通知</b><small>私聊、群聊和频道的新消息</small></span><input type="checkbox" class="tg" data-pref="notify" /></label>
+            <label class="set-row"><span class="set-txt"><b>显示发送者和内容</b><small>关闭后只提示「你收到一条新消息」，适合投屏或公共场合</small></span><input type="checkbox" class="tg" data-pref="preview" /></label>
+            <label class="set-row"><span class="set-txt"><b>提示音</b><small>通知时播放系统提示音</small></span><input type="checkbox" class="tg" data-pref="sound" /></label>
+            <label class="set-row" id="tp-flash-row"><span class="set-txt"><b>托盘图标闪烁</b><small>有新消息时托盘图标闪烁，打开窗口后停止</small></span><input type="checkbox" class="tg" data-pref="flash" /></label>
+            <label class="set-row"><span class="set-txt"><b id="tp-badge-t">未读数角标</b><small id="tp-badge-d">在任务栏图标上显示未读消息数</small></span><input type="checkbox" class="tg" data-pref="badge" /></label>
+          </div>
+        </section>
+        <section class="dlg-pane" data-pane="mute" hidden>
+          <div class="pane-head"><div><div class="pane-t">免打扰</div><div class="pane-d">免打扰期间不弹通知、不响铃、不闪烁，未读数照常累计。把状态设为<b>「勿扰」</b>也有同样效果。</div></div></div>
+          <div class="mute-now" id="tp-mute-now"></div>
+          <div class="mute-grid">
+            <button class="mute-opt" data-mute="30m"><b>30 分钟</b><small>开个短会</small></button>
+            <button class="mute-opt" data-mute="1h"><b>1 小时</b><small>专心做事</small></button>
+            <button class="mute-opt" data-mute="8h"><b>8 小时</b><small>一个工作日</small></button>
+            <button class="mute-opt" data-mute="tomorrow"><b>到明早 8 点</b><small>今晚不打扰</small></button>
+            <button class="mute-opt" data-mute="forever"><b>直到我关闭</b><small>手动恢复</small></button>
+            <button class="mute-opt mute-off" data-mute="off"><b>恢复通知</b><small>立即结束免打扰</small></button>
+          </div>
+        </section>
+        <section class="dlg-pane" data-pane="tray" hidden>
+          <div class="pane-head"><div><div class="pane-t">托盘与窗口</div><div class="pane-d" id="tp-tray-d">程序可以常驻系统托盘，关掉窗口也不会错过消息。</div></div></div>
+          <div class="set-list">
+            <label class="set-row"><span class="set-txt"><b>关闭窗口时最小化到托盘</b><small id="tp-close-d">关闭后可点托盘图标重新打开；关掉此项则关闭即退出</small></span><input type="checkbox" class="tg" data-pref="closeToTray" /></label>
+            <label class="set-row"><span class="set-txt"><b>开机自动启动</b><small>登录系统后在后台启动并驻留托盘，不弹出窗口</small></span><input type="checkbox" class="tg" data-pref="autostart" /></label>
+          </div>
+          <div class="set-tips" id="tp-tray-tips"></div>
+        </section>
+        <section class="dlg-pane" data-pane="hotkey" hidden>
+          <div class="pane-head"><div><div class="pane-t">全局快捷键</div><div class="pane-d">在任何程序里按下快捷键，都能立即显示或隐藏 NANO MESH 窗口。</div></div></div>
+          <div class="set-list">
+            <label class="set-row"><span class="set-txt"><b>启用快捷键</b><small>显示 / 隐藏主窗口</small></span><input type="checkbox" class="tg" id="tp-hk-on" /></label>
+          </div>
+          <div class="hk-box">
+            <button class="hk-rec" id="tp-hk-rec" title="点击后按下新的组合键"></button>
+            <div class="hk-ops"><button class="ns-btn" id="tp-hk-reset">恢复默认</button></div>
+          </div>
+          <div class="pane-d" id="tp-hk-hint">点击上方按键框，然后按下新的组合键（需包含 Ctrl、Alt 或 ⌘ 之一），按 Esc 取消。</div>
+        </section>
+        <section class="dlg-pane" data-pane="about" hidden>
+          <div class="about-box">
+            <img src="nanomesh-logo.png" alt="" class="about-logo" />
+            <div class="about-name">NANO MESH</div>
+            <div class="about-ver" id="tp-ver"></div>
+            <div class="pane-d">去中心化的即时通讯与协作网络。<br />每台设备独立密钥，消息经家节点与联邦转发。</div>
+          </div>
+        </section>
+      </div>
+      <div class="dlg-foot"><div class="sec-msg" id="tp-msg"></div><button class="ns-btn" data-close="tray-modal">完成</button></div>
+    </div>
+  </div>
   <div class="sec-overlay" id="pair-modal">
     <div class="sec-box pair-box">
       <div class="sec-head"><span class="ico" data-ico="shield"></span>设备迁移请求</div>
@@ -424,5 +491,6 @@
 <script src="js/auth.js" defer></script>
 <script src="js/pairing.js" defer></script>
 <script src="js/devices.js" defer></script>
+<script src="js/tray.js" defer></script>
 </body>
 </html>

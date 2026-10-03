@@ -55,16 +55,13 @@ async function toggleUserMenu() {
      ${cur ? `<div class="um-item um-profile" id="um-profile"><span class="um-av um-plus">${nmIcon("person")}</span><span class="um-meta"><b>编辑资料</b><small>昵称 · 状态 · 简介</small></span></div>` : ""}
      ${cur ? `<div class="um-item" id="um-passwd"><span class="um-av um-plus">${nmIcon("lock")}</span><span class="um-meta"><b>修改登录密码</b><small>在家节点上更新口令哈希</small></span></div>` : ""}
      ${cur ? `<div class="um-item" id="um-devices"><span class="um-av um-plus">${nmIcon("device")}</span><span class="um-meta"><b>我的设备</b><small>设备列表 · 吊销 · 紧急冻结 · 授权新设备</small></span></div>` : ""}
+     ${window.Tray && Tray.available() ? `<div class="um-item" id="um-notify"><span class="um-av um-plus">${nmIcon("bell")}</span><span class="um-meta"><b>通知与托盘</b><small>系统通知 · 免打扰 · 托盘 · 快捷键</small></span></div>` : ""}
      <div class="um-item um-sec" id="um-sec"><span class="um-av um-plus">${nmIcon("shield")}</span><span class="um-meta"><b>安全设置</b><small>自动锁定 · 改口令 · 备份</small></span></div>
      <div class="um-item um-new" id="um-new"><span class="um-av um-plus">${nmIcon("plus")}</span><span class="um-meta"><b>新建 / 切换账号</b><small>回到启动页</small></span></div>`;
   m.classList.add("on");
   m.querySelectorAll("#um-status .um-st").forEach((b) => b.addEventListener("click", async () => {
-    const st = b.dataset.st;
-    const p = Profile.get(cur); p.status = st; Profile.save(cur, p);
-    try { await NM.inv("presence_set", { status: st }); } catch (_) {}
-    if (typeof updateUserChip === "function") updateUserChip();
     m.classList.remove("on");
-    if (window.toast) toast("状态：" + Profile.presenceLabel(st));
+    await setMyStatus(b.dataset.st);
   }));
   m.querySelectorAll(".um-item[data-pk]").forEach((el) => el.addEventListener("click", () => {
     m.classList.remove("on");
@@ -84,9 +81,23 @@ async function toggleUserMenu() {
   const dv = document.getElementById("um-devices");
   if (dv) dv.addEventListener("click", () => { m.classList.remove("on"); if (window.Devices) Devices.open(); });
   const sec = document.getElementById("um-sec");
-  if (sec) sec.addEventListener("click", () => { m.classList.remove("on"); if (typeof openSecModal === "function") openSecModal(); });  const nw = document.getElementById("um-new");
+  if (sec) sec.addEventListener("click", () => { m.classList.remove("on"); if (typeof openSecModal === "function") openSecModal(); });
+  const nt = document.getElementById("um-notify");
+  if (nt) nt.addEventListener("click", () => { m.classList.remove("on"); if (window.Tray) Tray.openSettings(); });
+  const nw = document.getElementById("um-new");
   if (nw) nw.addEventListener("click", () => { m.classList.remove("on"); if (typeof imDisconnect === "function") imDisconnect(); });
 }
+
+async function setMyStatus(st) {
+  const cur = Identity.current();
+  if (!cur || !window.Profile) return;
+  const p = Profile.get(cur); p.status = st; Profile.save(cur, p);
+  try { await NM.inv("presence_set", { status: st }); } catch (_) {}
+  updateUserChip();
+  if (window.Tray) Tray.sync();
+  if (window.toast) toast("状态：" + Profile.presenceLabel(st));
+}
+window.setMyStatus = setMyStatus;
 
 async function switchUser(pk) {
   const svc = window.CURRENT_SVC;
