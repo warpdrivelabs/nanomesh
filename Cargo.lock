@@ -2704,6 +2704,7 @@ dependencies = [
  "nm-proto",
  "nm-transport",
  "prost",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
 ]

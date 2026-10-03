@@ -2,6 +2,8 @@
 //! 新设备：`pair_request`（账号 + 密码，家节点把请求投给旧设备）或 `pair_ticket`（只填账号，生成迁移串）。
 //! 旧设备：私聊收件循环把 `pair.request` 交给 `on_old_side`；或在安全设置里粘贴迁移串调 `pair_accept_ticket`。
 //! 旧设备用户必须输入新设备上显示的核对码才能放行，防止陌生人发来请求后被误点允许。
+//! v2：新设备先生成自己的设备密钥，旧设备放行时用账号私钥给它签设备证书；
+//! 只有勾选「同时设为管理设备」才连同账号私钥一起交出。只有持有账号私钥的设备能放行。
 
 use std::collections::HashMap;
 
@@ -21,8 +23,16 @@ pub struct NewSide {
     owner: Option<[u8; 32]>,
     key: Option<[u8; 32]>,
     name: String,
+    dk_seed: [u8; 32],
+    dk: [u8; 32],
     _client: Client,
     _session: Arc<Session>,
+}
+
+impl Drop for NewSide {
+    fn drop(&mut self) {
+        self.dk_seed.zeroize();
+    }
 }
 
 pub struct OldSide {
@@ -30,6 +40,9 @@ pub struct OldSide {
     key: [u8; 32],
     sas: String,
     at: u64,
+    /// v2 请求里的新设备公钥；None 为 v1（只能交出账号私钥）。
+    dk: Option<[u8; 32]>,
+    device: String,
 }
 
 #[derive(Default)]
@@ -42,7 +55,7 @@ fn clean_text(s: &str, max: usize) -> String {
     s.chars().filter(|c| !c.is_control()).take(max).collect()
 }
 
-fn device_label() -> String {
+pub fn device_label() -> String {
     #[cfg(target_os = "macos")]
     if let Ok(o) = std::process::Command::new("scutil").args(["--get", "ComputerName"]).output() {
         let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -79,7 +92,7 @@ async fn start_new(
     let (local, domain) = norm_account(&local, &domain)?;
     let node = resolve_home_node(&registry, &domain).await?;
     let eph_seed = nm_transport::SecretKey::generate().to_bytes();
-    let (client, mut session) = dial(eph_seed, "nat", &node, Vec::new(), None, None).await?;
+    let (client, mut session) = dial(eph_seed, "nat", &node, Vec::new(), None, None, None).await?;
     let name = format!("{local}@{domain}");
     let owner = match password {
         Some(pw) => {
@@ -87,7 +100,7 @@ async fn start_new(
             let got = session.name_account("name.login", &body).await.map_err(|e| registry_phrase(&e.to_string()))?;
             let got = got.trim().to_ascii_lowercase();
             let pk = pair::unhex32(&got).map_err(|_| "家节点返回的公钥无效".to_string())?;
-            if identities_dir(&app)?.join(format!("{got}.enc")).exists() {
+            if devices::has_local(&app, &got) {
                 return Ok(json!({ "have": true, "user": got }));
             }
             Some(pk)
@@ -99,13 +112,16 @@ async fn start_new(
     let eph = session.id_bytes();
     let (xsec, xpk) = pair::keypair();
     let rid = pair::random_rid();
+    let dk_seed = devices::new_seed();
+    let dk = pubkey_of_seed(&dk_seed);
     let req = pair::Request {
-        v: 1,
+        v: 2,
         rid: rid.clone(),
         xpk: hex(&xpk),
         device: clean_text(&device_or_label(device), 64),
         name: name.clone(),
         ts: pair::now_ms(),
+        dk: hex(&dk),
     };
     let mut out = json!({ "rid": rid });
     match owner {
@@ -125,6 +141,8 @@ async fn start_new(
         owner,
         key: None,
         name,
+        dk_seed,
+        dk,
         _client: client,
         _session: session,
     });
@@ -188,7 +206,7 @@ async fn on_new_side(app: &AppHandle, rid: &str, ty: &str, body: &[u8], sender: 
                 return Ok(false);
             }
             let xpk_old = pair::unhex32(&o.xpk)?;
-            let s = pair::derive(&ns.xsec, &xpk_old, &ns.rid, &sender, &ns.eph, &ns.xpk, &xpk_old)?;
+            let s = pair::derive(&ns.xsec, &xpk_old, &ns.rid, &sender, &ns.eph, &ns.xpk, &xpk_old, Some(&ns.dk))?;
             ns.owner = Some(sender);
             ns.key = Some(s.key);
             emit(app, json!({ "type": "sas", "rid": ns.rid, "sas": s.sas }));
@@ -201,26 +219,46 @@ async fn on_new_side(app: &AppHandle, rid: &str, ty: &str, body: &[u8], sender: 
             }
             let key = ns.key.ok_or("尚未完成核对")?;
             let mut plain = pair::open(&key, &gr.ct)?;
-            if plain.len() != 32 {
-                plain.zeroize();
-                return Err("收到的私钥长度异常".into());
-            }
-            let mut seed = [0u8; 32];
-            seed.copy_from_slice(&plain);
-            plain.zeroize();
-            if pubkey_of_seed(&seed) != sender {
-                seed.zeroize();
-                return Err("收到的私钥与对方身份不符".into());
-            }
             let vk = vk_of(&state)?;
-            let enc = auth::encrypt_seed(&vk, &seed);
-            seed.zeroize();
             let user = hex(&sender);
-            auth::write_private(&identities_dir(app)?.join(format!("{user}.enc")), enc?)?;
+            let seed_hex = if plain.len() == 32 {
+                // v1 旧设备：直接交出账号私钥。
+                Some(hex(&plain))
+            } else {
+                let body = serde_json::from_slice::<pair::GrantBody>(&plain);
+                let body = body.map_err(|_| "授权内容格式错误".to_string());
+                plain.zeroize();
+                let mut body = body?;
+                let cert = devices::cert_from_b64(&body.cert)?;
+                nm_crypto::verify_device_cert(&cert).map_err(|_| "设备证书签名无效".to_string())?;
+                if cert.account != sender || cert.device != ns.dk {
+                    return Err("设备证书与本次迁移不符".into());
+                }
+                if body.seed.is_none() && cert.role == nm_crypto::DEVICE_ROLE_ADMIN {
+                    return Err("管理设备授权缺少账号私钥".into());
+                }
+                devices::save(app, &vk, &user, &devices::DeviceKey { seed: ns.dk_seed, cert })?;
+                body.seed.take()
+            };
+            plain.zeroize();
+            if let Some(mut sh) = seed_hex {
+                let parsed = pair::unhex32(&sh);
+                sh.zeroize();
+                let mut seed = parsed.map_err(|_| "收到的私钥格式异常".to_string())?;
+                if pubkey_of_seed(&seed) != sender {
+                    seed.zeroize();
+                    devices::remove(app, &user);
+                    return Err("收到的私钥与对方身份不符".into());
+                }
+                let enc = auth::encrypt_seed(&vk, &seed);
+                seed.zeroize();
+                auth::write_private(&identities_dir(app)?.join(format!("{user}.enc")), enc?)?;
+            }
             auth::audit(&data_dir(app)?, "pair:received");
             let name = ns.name.clone();
+            let admin = devices::has_account_key(app, &user);
             *g = None;
-            emit(app, json!({ "type": "done", "rid": rid, "user": user, "name": name }));
+            emit(app, json!({ "type": "done", "rid": rid, "user": user, "name": name, "admin": admin }));
             Ok(true)
         }
         pair::T_DENY => {
@@ -284,7 +322,7 @@ pub async fn on_old_side(app: &AppHandle, ty: &str, body: &[u8], sender: &[u8]) 
 }
 
 async fn offer_for(app: &AppHandle, req: pair::Request, peer: [u8; 32]) -> Result<Value, String> {
-    if req.v != 1 || !pair::fresh(req.ts) {
+    if !matches!(req.v, 1 | 2) || !pair::fresh(req.ts) {
         return Err("迁移请求已过期".into());
     }
     if req.rid.is_empty() || req.rid.len() > 64 {
@@ -293,12 +331,20 @@ async fn offer_for(app: &AppHandle, req: pair::Request, peer: [u8; 32]) -> Resul
     let state = app.state::<AppState>();
     let session = session_of(&state).await?;
     let my_id = session.id_bytes();
-    if peer == my_id {
+    if peer == my_id || peer == session.device_id() {
         return Err("不能迁移给本机当前身份".into());
     }
+    // 同账号的普通设备也会收到请求，只由持有账号私钥的设备处理。
+    if !devices::has_account_key(app, &hex(&my_id)) {
+        return Err("本机不是管理设备".into());
+    }
+    let dk = match req.v {
+        2 => Some(pair::unhex32(&req.dk).map_err(|_| "迁移请求无效".to_string())?),
+        _ => None,
+    };
     let xpk_new = pair::unhex32(&req.xpk)?;
     let (xsec, xpk_old) = pair::keypair();
-    let s = pair::derive(&xsec, &xpk_new, &req.rid, &my_id, &peer, &xpk_new, &xpk_old)?;
+    let s = pair::derive(&xsec, &xpk_new, &req.rid, &my_id, &peer, &xpk_new, &xpk_old, dk.as_ref())?;
     {
         let mut m = state.pair.old_side.lock().unwrap();
         m.retain(|_, o| pair::fresh(o.at));
@@ -308,7 +354,17 @@ async fn offer_for(app: &AppHandle, req: pair::Request, peer: [u8; 32]) -> Resul
         if m.len() >= MAX_PENDING {
             return Err("待处理的迁移请求过多".into());
         }
-        m.insert(req.rid.clone(), OldSide { peer, key: s.key, sas: s.sas, at: pair::now_ms() });
+        m.insert(
+            req.rid.clone(),
+            OldSide {
+                peer,
+                key: s.key,
+                sas: s.sas,
+                at: pair::now_ms(),
+                dk,
+                device: clean_text(&req.device, 64),
+            },
+        );
     }
     let offer = pair::Offer { v: 1, rid: req.rid.clone(), xpk: hex(&xpk_old) };
     let body = serde_json::to_vec(&offer).map_err(|e| e.to_string())?;
@@ -319,6 +375,7 @@ async fn offer_for(app: &AppHandle, req: pair::Request, peer: [u8; 32]) -> Resul
         "device": clean_text(&req.device, 64),
         "name": clean_text(&req.name, 128),
         "me": hex(&my_id),
+        "certOnly": dk.is_some(),
     }))
 }
 
@@ -330,9 +387,16 @@ pub async fn pair_accept_ticket(app: AppHandle, ticket: String) -> Result<Value,
     offer_for(&app, t.req, peer).await
 }
 
-/// 旧设备：核对码一致后放行，把当前身份的私钥加密发给新设备。
+/// 旧设备：核对码一致后放行。v2 给新设备签设备证书，`admin` 时连同账号私钥一起加密发出；
+/// v1 新设备只能接收账号私钥。
 #[tauri::command]
-pub async fn pair_approve(app: AppHandle, state: State<'_, AppState>, rid: String, sas: String) -> Result<(), String> {
+pub async fn pair_approve(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    rid: String,
+    sas: String,
+    admin: Option<bool>,
+) -> Result<(), String> {
     let typed: String = sas.chars().filter(|c| c.is_ascii_digit()).collect();
     let pending = {
         let mut m = state.pair.old_side.lock().unwrap();
@@ -353,12 +417,33 @@ pub async fn pair_approve(app: AppHandle, state: State<'_, AppState>, rid: Strin
     let my_id = session.id_bytes();
     let vk = vk_of(&state)?;
     let mut seed = load_identity_seed(&app, &vk, &hex(&my_id))?;
-    let ct = pair::seal(&pending.key, &seed);
+    let admin = admin.unwrap_or(false);
+    let ct = match pending.dk {
+        Some(dk) => {
+            let cert = devices::certify(&seed, dk, &pending.device, admin);
+            let mut body = pair::GrantBody { cert: devices::cert_to_b64(&cert), seed: admin.then(|| hex(&seed)) };
+            let mut plain = serde_json::to_vec(&body).map_err(|e| e.to_string());
+            if let Some(s) = body.seed.as_mut() {
+                s.zeroize();
+            }
+            let ct = plain.as_ref().map_err(|e| e.clone()).and_then(|p| pair::seal(&pending.key, p));
+            if let Ok(p) = plain.as_mut() {
+                p.zeroize();
+            }
+            ct
+        }
+        None => pair::seal(&pending.key, &seed),
+    };
     seed.zeroize();
     let grant = pair::Grant { v: 1, rid, ct: ct? };
     let body = serde_json::to_vec(&grant).map_err(|e| e.to_string())?;
     session.send_typed(pending.peer, pair::T_GRANT, &body).await.map_err(|e| e.to_string())?;
-    auth::audit(&data_dir(&app)?, "pair:grant");
+    let event = match (pending.dk.is_some(), admin) {
+        (true, false) => "pair:grant-cert",
+        (true, true) => "pair:grant-admin",
+        _ => "pair:grant",
+    };
+    auth::audit(&data_dir(&app)?, event);
     Ok(())
 }
 

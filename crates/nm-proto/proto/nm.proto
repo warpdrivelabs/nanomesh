@@ -164,6 +164,35 @@ message NameOp   { string local_part = 1; }              // name.claim 参数
 message NameQuery { string name = 1; bytes pubkey = 2; } // name.resolve(name) / name.reverse(pubkey)
 message NameList { repeated NameRecord records = 1; }     // name.list / 解析结果
 
+// ── 多设备（账号密钥 AK 给每台设备的连接密钥 DK 签证书）──────────────────────
+// 设备用 DK 连接，出示证书后节点把该连接的主体视为 account；群/名字/目录仍以 account 为准。
+// 签名输入见 nm-crypto::device_cert_bytes / device_revoke_bytes（sig 清空后的编码 + 域分隔前缀）。
+message DeviceCert {
+  bytes  account   = 1;               // 账号公钥 AK
+  bytes  device    = 2;               // 设备连接公钥 DK
+  string label     = 3;               // 设备名（签发时）
+  string role      = 4;               // "admin"（持有 AK）| "member"
+  int64  issued_at = 5;               // unix ms
+  bytes  sig       = 6;               // Sign(AK)
+}
+// 吊销：by_node 为空时由 AK 签名；非空时为账号家节点凭账号口令代为冻结，由该节点签名。
+message DeviceRevoke {
+  bytes  account    = 1;
+  bytes  device     = 2;
+  int64  revoked_at = 3;              // unix ms
+  string reason     = 4;
+  bytes  by_node    = 5;
+  bytes  sig        = 6;
+}
+message DeviceInfo {
+  DeviceCert cert      = 1;
+  string     label     = 2;           // 当前设备名（可改名，覆盖证书里的 label）
+  int64      last_seen = 3;           // unix ms；在线时为最近一次上线时间
+  bool       online    = 4;
+  DeviceRevoke revoked = 5;           // 已吊销时有值
+}
+message DeviceList { repeated DeviceInfo devices = 1; }
+
 // 群/私聊/命名 联邦 gossip 信封（联邦级主题 nmspace-groups:<fed>，所有节点加入）：
 // 群状态发现(announce)、群消息扇出(msg)、私聊单播跨节点投递(direct)、命名记录复制(name)——
 // 统一取代跨节点 s2s 中继（NAT 下常不通）；origin 防自回环。
@@ -175,6 +204,7 @@ message GroupGossip {
     Gram msg = 3;                     // 群消息扇出（kind=GroupMessage，receiver=group_id）
     Gram direct = 4;                  // 私聊单播（kind=Message，receiver=对端 EntityId）；仅在本地投递不了时才广播
     NameRecord name = 5;              // 命名记录复制（home 节点签发/周期重播，各节点据此填充命名缓存）
+    DeviceRevoke revoke = 6;          // 设备吊销（自带签名，各节点验签后持久化并拒绝该设备）
   }
 }
 

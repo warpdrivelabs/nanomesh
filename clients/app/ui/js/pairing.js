@@ -12,8 +12,13 @@
 
   function show(req) {
     cur = req;
-    el("pair-desc").textContent =
-      "设备「" + (req.device || "未知设备") + "」请求把账号 " + (req.name || "（未注明）") + " 的私钥迁移过去。";
+    const who = "设备「" + (req.device || "未知设备") + "」";
+    const acct = req.name || "（未注明）";
+    el("pair-desc").textContent = req.certOnly
+      ? who + "请求加入账号 " + acct + "。放行后为它签发设备证书，账号私钥默认留在本机；以后可在「我的设备」里单独吊销。"
+      : who + "请求把账号 " + acct + " 的私钥迁移过去（旧版客户端）。";
+    el("pair-admin-row").hidden = !req.certOnly;
+    el("pair-admin").checked = false;
     el("pair-sas").value = "";
     el("pair-allow").disabled = false;
     el("pair-deny").disabled = false;
@@ -41,7 +46,8 @@
     if (sas.length !== 6) { msg("请输入 6 位核对码"); return; }
     el("pair-allow").disabled = true;
     try {
-      await NM.inv("pair_approve", { rid: cur.rid, sas });
+      const admin = cur.certOnly ? el("pair-admin").checked : null;
+      await NM.inv("pair_approve", { rid: cur.rid, sas, admin });
       msg("已发送，新设备即将完成登录。", true);
       el("pair-deny").disabled = true;
       setTimeout(next, 1200);
@@ -62,13 +68,13 @@
   async function fromTicket() {
     const ta = el("sec-pair-in");
     const ticket = (ta.value || "").trim();
-    const out = (t, ok) => (typeof secMsg === "function" ? secMsg(t, ok) : null);
+    const out = (t, ok) => (window.Devices ? Devices.say(t, ok) : null);
     if (!ticket) { out("请先粘贴迁移串"); return; }
     try {
       const req = await NM.inv("pair_accept_ticket", { ticket });
       ta.value = "";
       out("");
-      if (typeof closeSecModal === "function") closeSecModal();
+      if (window.Devices) Devices.close();
       enqueue(req);
     } catch (e) {
       out(String((e && e.message) || e));

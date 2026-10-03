@@ -22,6 +22,7 @@ use tauri::{async_runtime, AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 
 mod auth;
+mod devices;
 mod pair;
 mod pairing;
 
@@ -270,7 +271,7 @@ fn chat_log_save(app: AppHandle, user: String, data: String) -> Result<(), Strin
 fn list_identities(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<String>, String> {
     vk_of(&state)?; // 门禁：未解锁拒绝
     let dir = identities_dir(&app)?;
-    let mut out = Vec::new();
+    let mut out = devices::accounts(&app);
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
@@ -282,6 +283,7 @@ fn list_identities(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<Str
         }
     }
     out.sort();
+    out.dedup();
     Ok(out)
 }
 
@@ -330,14 +332,23 @@ async fn finish_session(
         .await
         .map_err(|e| e.to_string())?;
     let my_id = session.id_bytes();
+    let node_id = session.node_id();
 
     // 把消息流交给事件循环 → 推送到前端。
     let mut inbox = session.take_inbox().ok_or("inbox 已被占用")?;
+    let session = Arc::new(session);
+    let watch = session.clone();
     let apph = app.clone();
     async_runtime::spawn(async move {
         while let Some(gram) = inbox.recv().await {
             if let Some(p) = gram.payload.as_ref().filter(|p| p.type_url.starts_with(pair::PREFIX)) {
                 pairing::on_old_side(&apph, &p.type_url, &p.value, &gram.sender).await;
+                continue;
+            }
+            if let Some(p) = gram.payload.as_ref().filter(|p| p.type_url == devices::NODE_EVENT_TYPE) {
+                if gram.sender.as_slice() == node_id.as_slice() {
+                    devices::node_event(&apph, &p.value);
+                }
                 continue;
             }
             let (type_url, body) = match gram.payload.as_ref() {
@@ -359,11 +370,14 @@ async fn finish_session(
             });
             let _ = apph.emit("core://event", ev);
         }
+        if watch.close_reason().is_some_and(|r| r.contains("device_revoked")) {
+            let _ = apph.emit(devices::EVENT, json!({ "event": "self_revoked" }));
+        }
     });
 
     *state.conn.lock().await = Some(Conn {
         _client: client,
-        session: Arc::new(session),
+        session,
         my_id,
     });
     Ok(hex(&my_id))
@@ -391,9 +405,18 @@ async fn connect(
     if user.is_empty() {
         return Err("请先选择用户身份".into());
     }
-    let seed = load_identity_seed(&app, &vk, user)?;
-    let (client, session) = dial(seed, &mode, &node, relay_urls, pkarr_url, dns_origin).await?;
+    let (client, session) =
+        devices::dial_account(&app, &vk, user, &mode, &node, relay_urls, pkarr_url, dns_origin).await?;
     finish_session(&app, &state, client, session, &display_name).await
+}
+
+/// 上线：给了设备证书则以设备密钥连接后出示证书（账号身份收发），否则按连接密钥本身上线。
+async fn go_online(client: &Client, addr: nm_transport::Addr, cert: Option<&nm_proto::DeviceCert>) -> Result<Session, String> {
+    match cert {
+        Some(c) => client.online_as(addr, c).await,
+        None => client.online(addr).await,
+    }
+    .map_err(|e| e.to_string())
 }
 
 /// 拨号到一个节点（同网优先、穿透兜底），返回 (客户端, 会话)。connect 与 node_users 共用。
@@ -404,6 +427,7 @@ async fn dial(
     relay_urls: Vec<String>,
     pkarr_url: Option<String>,
     dns_origin: Option<String>,
+    cert: Option<&nm_proto::DeviceCert>,
 ) -> Result<(Client, Session), String> {
     let m = mode.trim().to_ascii_lowercase();
     let node = node.trim();
@@ -412,7 +436,7 @@ async fn dial(
     if matches!(m.as_str(), "lan" | "local") {
         let addr = nm_transport::addr_from_string(node).map_err(|e| e.to_string())?;
         let client = Client::bind_local(seed).await.map_err(|e| e.to_string())?;
-        let session = client.online(addr).await.map_err(|e| e.to_string())?;
+        let session = go_online(&client, addr, cert).await?;
         return Ok((client, session));
     }
 
@@ -423,10 +447,13 @@ async fn dial(
     };
     if let Some(addr) = &lan_addr {
         if let Ok(c1) = Client::bind_local(seed).await {
-            if let Ok(Ok(session)) =
-                tokio::time::timeout(std::time::Duration::from_secs(3), c1.online(addr.clone())).await
-            {
-                return Ok((c1, session));
+            match tokio::time::timeout(std::time::Duration::from_secs(3), go_online(&c1, addr.clone(), cert)).await {
+                Ok(Ok(session)) => return Ok((c1, session)),
+                // 节点已明确拒绝（证书/吊销/版本），不必再走穿透重试。
+                Ok(Err(e)) if e.contains("device_") || e.contains("unknown method") || e.contains("cert") => {
+                    return Err(e)
+                }
+                _ => {}
             }
         }
     }
@@ -442,7 +469,8 @@ async fn dial(
         }
         _ => Client::bind(seed).await.map_err(|e| e.to_string())?, // nat(N0) 默认
     };
-    let session = client.online_by_id(id).await.map_err(|e| e.to_string())?;
+    let addr = nm_transport::addr_from_id(id).map_err(|e| e.to_string())?;
+    let session = go_online(&client, addr, cert).await?;
     Ok((client, session))
 }
 
@@ -457,7 +485,7 @@ async fn node_users(
     dns_origin: Option<String>,
 ) -> Result<Vec<Value>, String> {
     let seed = nm_transport::SecretKey::generate().to_bytes();
-    let (client, session) = dial(seed, &mode, &node, relay_urls, pkarr_url, dns_origin).await?;
+    let (client, session) = dial(seed, &mode, &node, relay_urls, pkarr_url, dns_origin, None).await?;
     let entities = session
         .directory_query(DirectoryQuery { kind_prefix: String::new(), ..Default::default() })
         .await
@@ -1327,7 +1355,7 @@ async fn resolve_home_node(registry: &str, domain: &str) -> Result<String, Strin
 }
 
 async fn node_account(node: &str, seed: [u8; 32], method: &str, body: &str) -> Result<String, String> {
-    let (_client, session) = dial(seed, "nat", node, Vec::new(), None, None).await?;
+    let (_client, session) = dial(seed, "nat", node, Vec::new(), None, None, None).await?;
     let out = session.name_account(method, body).await.map_err(|e| registry_phrase(&e.to_string()))?;
     drop(session);
     Ok(out)
@@ -1389,7 +1417,7 @@ async fn account_login(
         false => load_identity_seed(&app, &vk, &user).ok(),
     }
     .unwrap_or_else(|| nm_transport::SecretKey::generate().to_bytes());
-    let (_probe_client, probe) = dial(seed, "nat", &node, Vec::new(), None, None).await?;
+    let (_probe_client, probe) = dial(seed, "nat", &node, Vec::new(), None, None, None).await?;
     let body = json!({ "local": local, "domain": domain, "password": password }).to_string();
     let got = probe.name_account("name.login", &body).await.map_err(|e| registry_phrase(&e.to_string()))?;
     drop(probe);
@@ -1397,10 +1425,7 @@ async fn account_login(
     // 名字→公钥映射只在前端 localStorage；导入备份或换了 webview 源后会缺失，按家节点返回的公钥找本机私钥。
     let user = if !user.is_empty() && got == user.to_ascii_lowercase() {
         user
-    } else if got.len() == 64
-        && got.chars().all(|c| c.is_ascii_hexdigit())
-        && identities_dir(&app)?.join(format!("{got}.enc")).exists()
-    {
+    } else if got.len() == 64 && got.chars().all(|c| c.is_ascii_hexdigit()) && devices::has_local(&app, &got) {
         got
     } else {
         return Err("not_key_owner".into());
@@ -1453,13 +1478,14 @@ async fn account_reset(
     let vk = vk_of(&state)?;
     let body = json!({ "local": local, "domain": domain, "password": password }).to_string();
     if !user.is_empty() {
-        let seed = load_identity_seed(&app, &vk, &user)?;
+        // 普通设备没有账号私钥，改密码须在管理设备上做。
+        let seed = load_identity_seed(&app, &vk, &user).map_err(|_| "not_admin_device".to_string())?;
         node_account(&node, seed, "name.reset", &body).await?;
         return Ok(user);
     }
     // 没有名字→公钥映射（例如刚导入备份）：逐个用本机身份尝试，家节点只接受登记公钥本人。
     for pk in list_identities(app.clone(), state.clone())? {
-        let seed = load_identity_seed(&app, &vk, &pk)?;
+        let Ok(seed) = load_identity_seed(&app, &vk, &pk) else { continue };
         match node_account(&node, seed, "name.reset", &body).await {
             Ok(_) => return Ok(pk),
             Err(e) if e.contains("not_key_owner") => {}
@@ -1884,6 +1910,11 @@ pub fn run() {
             pairing::pair_accept_ticket,
             pairing::pair_approve,
             pairing::pair_reject,
+            devices::device_self,
+            devices::device_list,
+            devices::device_rename,
+            devices::device_revoke,
+            devices::device_freeze,
             account_suggest,
             name_reverse,
             node_users,

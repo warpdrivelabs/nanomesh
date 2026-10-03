@@ -14,8 +14,9 @@ use dashmap::DashMap;
 use nm_entity::{pack_profile, EntityKind};
 use nm_proto::{
     now_ms, Any, BlobData, BlobPut, BlobRef, Channel, ChannelBackfillReq, ChannelList, ChannelLog,
-    ChannelMsg, ChannelOp, ChannelPub, Command, CommandResult, DirectoryQuery, Entity, EntityList,
-    Gram, GramKind, Group, GroupList, GroupOp, NameList, NameOp, NameQuery, NameRecord, PROTOCOL_VERSION,
+    ChannelMsg, ChannelOp, ChannelPub, Command, CommandResult, DeviceCert, DeviceInfo, DeviceList,
+    DeviceRevoke, DirectoryQuery, Entity, EntityList, Gram, GramKind, Group, GroupList, GroupOp,
+    NameList, NameOp, NameQuery, NameRecord, PROTOCOL_VERSION,
 };
 use nm_transport::{read_gram, write_gram, Addr, IrohConnection, NodeEndpoint};
 use prost::Message;
@@ -140,6 +141,7 @@ impl Client {
         Ok(Session {
             conn,
             my_id: self.ep.id_bytes(),
+            device_id: self.ep.id_bytes(),
             inbox: Some(in_rx),
             commands: cmd_rx,
             pending,
@@ -153,6 +155,37 @@ impl Client {
     pub async fn online_by_id(&self, node_id: [u8; 32]) -> Result<Session, ClientError> {
         let addr = nm_transport::addr_from_id(node_id).map_err(err)?;
         self.online(addr).await
+    }
+
+    /// 以设备密钥连接、以账号身份收发：连上后出示账号签发的设备证书（`device.hello`）。
+    /// 节点不支持多设备时返回的错误含 `unknown method`，调用方可回退为账号密钥直连。
+    pub async fn online_as(&self, to: impl Into<Addr>, cert: &DeviceCert) -> Result<Session, ClientError> {
+        let account: [u8; 32] =
+            cert.account.as_slice().try_into().map_err(|_| ClientError::Other("bad cert account".into()))?;
+        let mut s = self.online(to).await?;
+        let params = Any { type_url: "nmspace.v1.DeviceCert".into(), value: cert.encode_to_vec() };
+        let res = match rpc_over(&s.conn, s.device_id, "device.hello", Some(params)).await {
+            Ok(r) => r,
+            Err(e) => {
+                // 节点在连接层拒绝（如设备已吊销）时，关闭原因比流错误更有用。
+                let closed = tokio::time::timeout(Duration::from_millis(500), s.conn.closed()).await;
+                return Err(match closed {
+                    Ok(reason) => ClientError::Other(reason.to_string()),
+                    Err(_) => e,
+                });
+            }
+        };
+        if !res.ok {
+            s.conn.close(0u32.into(), b"hello rejected");
+            return Err(ClientError::Other(res.error));
+        }
+        s.my_id = account;
+        Ok(s)
+    }
+
+    pub async fn online_as_by_id(&self, node_id: [u8; 32], cert: &DeviceCert) -> Result<Session, ClientError> {
+        let addr = nm_transport::addr_from_id(node_id).map_err(err)?;
+        self.online_as(addr, cert).await
     }
 
     // ---- 短连接便捷方法（面向节点；每次自建连接）----
@@ -189,7 +222,9 @@ impl Client {
 /// 持久会话：复用同一连接收发，并后台接收节点推送。
 pub struct Session {
     conn: IrohConnection,
+    /// 账号身份（消息 sender）；`online_as` 时与连接密钥 `device_id` 不同。
     my_id: [u8; 32],
+    device_id: [u8; 32],
     inbox: Option<mpsc::UnboundedReceiver<Gram>>,
     commands: mpsc::UnboundedReceiver<(Gram, Command)>,
     pending: Arc<DashMap<u64, oneshot::Sender<Gram>>>,
@@ -200,6 +235,58 @@ pub struct Session {
 impl Session {
     pub fn id_bytes(&self) -> [u8; 32] {
         self.my_id
+    }
+
+    pub fn device_id(&self) -> [u8; 32] {
+        self.device_id
+    }
+
+    /// 所连节点的公钥（用于认定节点发来的系统事件）。
+    pub fn node_id(&self) -> [u8; 32] {
+        *self.conn.remote_id().as_bytes()
+    }
+
+    /// 连接被节点关闭时的原因（如 `device_revoked`）；仍在线返回 None。
+    pub fn close_reason(&self) -> Option<String> {
+        self.conn.close_reason().map(|r| r.to_string())
+    }
+
+    // ---- 多设备 ----
+
+    pub async fn device_list(&self) -> Result<Vec<DeviceInfo>, ClientError> {
+        let res = rpc_over(&self.conn, self.my_id, "device.list", None).await?;
+        if !res.ok {
+            return Err(ClientError::Other(res.error));
+        }
+        let p = res.result.ok_or_else(|| ClientError::Other("no payload".into()))?;
+        Ok(DeviceList::decode(p.value.as_slice()).map_err(err)?.devices)
+    }
+
+    pub async fn device_rename(&self, device: [u8; 32], label: &str) -> Result<(), ClientError> {
+        let hex: String = device.iter().map(|b| format!("{b:02x}")).collect();
+        let body = serde_json::json!({ "device": hex, "label": label }).to_string();
+        self.name_account("device.rename", &body).await.map(|_| ())
+    }
+
+    /// 提交账号私钥签好的吊销记录。
+    pub async fn device_revoke(&self, revoke: &DeviceRevoke) -> Result<(), ClientError> {
+        let params = Any { type_url: "nmspace.v1.DeviceRevoke".into(), value: revoke.encode_to_vec() };
+        let res = rpc_over(&self.conn, self.my_id, "device.revoke", Some(params)).await?;
+        if res.ok { Ok(()) } else { Err(ClientError::Other(res.error)) }
+    }
+
+    /// 紧急冻结：凭账号口令请家节点代签吊销。`device` 为 None 时冻结该账号全部设备；返回冻结台数。
+    pub async fn device_freeze(
+        &self,
+        local: &str,
+        domain: &str,
+        password: &str,
+        device: Option<[u8; 32]>,
+    ) -> Result<usize, ClientError> {
+        let hex: String = device.map(|d| d.iter().map(|b| format!("{b:02x}")).collect()).unwrap_or_default();
+        let body = serde_json::json!({ "local": local, "domain": domain, "password": password, "device": hex }).to_string();
+        let n = self.name_account("device.freeze", &body).await?;
+        Ok(n.trim().parse().unwrap_or(0))
     }
 
     /// 等待下一条节点推送的消息（如别人发来的 Message）。

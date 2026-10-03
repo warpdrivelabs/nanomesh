@@ -11,8 +11,8 @@ use dashmap::{DashMap, DashSet};
 use nm_core::Directory;
 use nm_proto::{
     now_ms, Any, BlobData, BlobPut, BlobRef, Channel, ChannelBackfillReq, ChannelGram, ChannelList,
-    ChannelLog, ChannelMsg, ChannelOp, ChannelPub, Command, CommandResult, DirectoryQuery, Entity,
-    EntityList, FedSyncResp, Gram, GramKind, Group, GroupGossip, GroupList, GroupOp, NameList,
+    ChannelLog, ChannelMsg, ChannelOp, ChannelPub, Command, CommandResult, DeviceCert, DeviceInfo,
+    DeviceList, DeviceRevoke, DirectoryQuery, Entity, EntityList, FedSyncResp, Gram, GramKind, Group, GroupGossip, GroupList, GroupOp, NameList,
     NameOp, NameQuery, NameRecord, PROTOCOL_VERSION,
 };
 use nm_store::RedbStore;
@@ -31,6 +31,17 @@ pub enum NodeError {
 
 type Sessions = DashMap<Vec<u8>, IrohConnection>;
 type Peers = DashMap<Vec<u8>, nm_transport::Addr>;
+/// 设备连接 → 账号（`device.hello` 成功后登记）。未登记的连接以连接公钥本身为账号（老客户端）。
+type Principals = DashMap<Vec<u8>, Vec<u8>>;
+/// 设备公钥 → 登记信息（证书 + 改名 + 最近在线）。
+type Devices = DashMap<Vec<u8>, DeviceInfo>;
+/// 设备公钥 → 吊销记录。
+type Revoked = DashMap<Vec<u8>, DeviceRevoke>;
+
+/// 离线信箱保留期：超期未取走的消息清理掉。
+const INBOX_RETENTION_MS: u64 = 30 * 24 * 3600 * 1000;
+/// 节点推给账号设备的系统事件（吊销等）的 type_url。
+const DEVICE_EVENT_TYPE: &str = "nmspace.v1/device.event";
 
 /// 内容寻址 blob 体量上限（头像等小媒体）；超限拒绝，避免撑爆节点存储/带宽。大媒体应分块（后续）。
 const MAX_BLOB: usize = 1024 * 1024; // 1 MiB
@@ -226,6 +237,9 @@ struct Ctx {
     names: Arc<DashMap<String, NameRecord>>,  // 命名缓存 local@domain → NameRecord
     /// 注册中心审批结果：域名 → (是否通过, 时间)。
     domain_notices: Arc<DashMap<String, (bool, u64)>>,
+    principals: Arc<Principals>,
+    devices: Arc<Devices>,
+    revoked: Arc<Revoked>,
 }
 
 /// 内存实体目录：`entity_id → Entity`，支持 kind 前缀 / 能力 / 属性过滤。
@@ -325,6 +339,10 @@ pub struct Node {
     domains: Arc<std::sync::RwLock<Vec<String>>>,
     names: Arc<DashMap<String, NameRecord>>,
     domain_notices: Arc<DashMap<String, (bool, u64)>>,
+    // 多设备：连接 → 账号映射、已登记设备、吊销表。
+    principals: Arc<Principals>,
+    devices: Arc<Devices>,
+    revoked: Arc<Revoked>,
 }
 
 impl Node {
@@ -453,11 +471,21 @@ impl Node {
         // 命名缓存：回填本节点持久化的命名记录（重启恢复）。
         let names: Arc<DashMap<String, NameRecord>> = Arc::new(DashMap::new());
         let mut owned_domains: Vec<String> = Vec::new();
+        let devices: Arc<Devices> = Arc::new(DashMap::new());
+        let revoked: Arc<Revoked> = Arc::new(DashMap::new());
         if let Some(s) = &store {
             for r in s.all_names().unwrap_or_default() {
                 names.insert(format!("{}@{}", r.local_part, r.domain), r);
             }
             owned_domains = s.all_domains().unwrap_or_default();
+            for d in s.all_devices().unwrap_or_default() {
+                if let Some(c) = &d.cert {
+                    devices.insert(c.device.clone(), d.clone());
+                }
+            }
+            for r in s.all_revokes().unwrap_or_default() {
+                revoked.insert(r.device.clone(), r);
+            }
         }
         Ok(Self {
             ep,
@@ -478,7 +506,35 @@ impl Node {
             domains: Arc::new(std::sync::RwLock::new(owned_domains)),
             names,
             domain_notices: Arc::new(DashMap::new()),
+            principals: Arc::new(DashMap::new()),
+            devices,
+            revoked,
         })
+    }
+
+    fn ctx(&self) -> Ctx {
+        Ctx {
+            ep: self.ep.clone(),
+            dir: self.dir.clone(),
+            sessions: self.sessions.clone(),
+            groups: self.groups.clone(),
+            store: self.store.clone(),
+            peers: self.peers.clone(),
+            node_id: self.ep.id_bytes(),
+            blacklist: self.blacklist.clone(),
+            sessions_meta: self.sessions_meta.clone(),
+            presence: self.presence.clone(),
+            status_intent: self.status_intent.clone(),
+            channels: self.channels.clone(),
+            gossip: self.gossip.clone(),
+            group_pub: self.group_pub.clone(),
+            domains: self.domains.clone(),
+            names: self.names.clone(),
+            domain_notices: self.domain_notices.clone(),
+            principals: self.principals.clone(),
+            devices: self.devices.clone(),
+            revoked: self.revoked.clone(),
+        }
     }
 
     /// 添加联邦对等节点（bootstrap）。之后本节点会周期性拉取其目录、并向其转发跨节点消息。
@@ -515,11 +571,14 @@ impl Node {
                 tracing::warn!("persist ban failed: {e}");
             }
         }
-        // 立即切断在线会话（若有），并主动关闭连接。
-        if let Some((_, conn)) = self.sessions.remove(&pubkey[..]) {
-            self.sessions_meta.remove(&pubkey[..]);
-            conn.close(0u32.into(), b"banned");
-            tracing::info!(online = self.sessions.len(), "banned peer session cut");
+        // 立即切断在线会话（若有，含该账号下所有设备连接），并主动关闭连接。
+        for rid in online_rids(&self.sessions, &self.principals, &pubkey) {
+            if let Some((_, conn)) = self.sessions.remove(&rid) {
+                self.sessions_meta.remove(&rid);
+                self.principals.remove(&rid);
+                conn.close(0u32.into(), b"banned");
+                tracing::info!(online = self.sessions.len(), "banned peer session cut");
+            }
         }
     }
 
@@ -715,27 +774,19 @@ impl Node {
     /// `/iroh-gossip/1` 走 gossip 频道；二者共用同一 endpoint。阻塞至进程结束。
     pub async fn serve(&self) -> Result<(), NodeError> {
         tracing::info!(node = %self.ep.id().fmt_short(), "nm-node serving");
-        let nmspace = ImspaceProto {
-            ctx: Ctx {
-                ep: self.ep.clone(),
-                dir: self.dir.clone(),
-                sessions: self.sessions.clone(),
-                groups: self.groups.clone(),
-                store: self.store.clone(),
-                peers: self.peers.clone(),
-                node_id: self.ep.id_bytes(),
-                blacklist: self.blacklist.clone(),
-                sessions_meta: self.sessions_meta.clone(),
-                presence: self.presence.clone(),
-                status_intent: self.status_intent.clone(),
-                channels: self.channels.clone(),
-                gossip: self.gossip.clone(),
-                group_pub: self.group_pub.clone(),
-                domains: self.domains.clone(),
-                names: self.names.clone(),
-                domain_notices: self.domain_notices.clone(),
-            },
-        };
+        let nmspace = ImspaceProto { ctx: self.ctx() };
+        if let Some(store) = self.store.clone() {
+            tokio::spawn(async move {
+                loop {
+                    match store.prune_inbox(now_ms().saturating_sub(INBOX_RETENTION_MS)) {
+                        Ok(n) if n > 0 => tracing::info!(count = n, "pruned expired inbox"),
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!("prune inbox failed: {e}"),
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(6 * 3600)).await;
+                }
+            });
+        }
         let gossip_gate = GossipGate {
             gossip: self.gossip.clone(),
             blacklist: self.blacklist.clone(),
@@ -1167,22 +1218,17 @@ impl Node {
         if gg.origin.as_slice() == self.ep.id_bytes().as_slice() {
             return; // 自回环忽略
         }
+        let ctx = self.ctx();
         match gg.body {
             Some(nm_proto::pb::group_gossip::Body::Announce(g)) => self.merge_group_lww(g),
             Some(nm_proto::pb::group_gossip::Body::Msg(gram)) => {
                 let Some(group) = self.groups.get(&gram.receiver).map(|g| g.clone()) else {
                     return; // 尚未学到该群（announce 未到）→ 跳过；周期公告后续会补
                 };
+                // 每个成员仅由本节点负责的部分投递：在线设备直投；本节点为其 home 则离线设备入库。
                 for m in &group.members {
-                    if self.sessions.contains_key(m.as_slice()) {
-                        try_push(m, &gram, &self.sessions).await;
-                    } else if let Ok(Some(e)) = self.dir.get(m).await {
-                        if e.home_node == self.ep.id_bytes().as_slice() {
-                            if let Some(s) = &self.store {
-                                let _ = s.push_inbox(m, &gram);
-                            }
-                        }
-                    }
+                    let home_here = is_home_here(&ctx, m);
+                    deliver_account(m, &gram, &ctx, home_here, None).await;
                 }
             }
             Some(nm_proto::pb::group_gossip::Body::Direct(gram)) => {
@@ -1191,15 +1237,12 @@ impl Node {
                     apply_domain_decision(&gram, &self.domains, &self.store, &self.domain_notices);
                     return;
                 }
-                // 私聊单播：仅当本节点负责该收件人时投递（在线直投 / 本节点为其 home 则离线入库）。
-                if self.sessions.contains_key(to.as_slice()) {
-                    try_push(to, &gram, &self.sessions).await;
-                } else if let Ok(Some(e)) = self.dir.get(to).await {
-                    if e.home_node == self.ep.id_bytes().as_slice() {
-                        if let Some(s) = &self.store {
-                            let _ = s.push_inbox(to, &gram);
-                        }
-                    }
+                let home_here = is_home_here(&ctx, to);
+                deliver_account(to, &gram, &ctx, home_here, None).await;
+            }
+            Some(nm_proto::pb::group_gossip::Body::Revoke(r)) => {
+                if let Err(e) = apply_revoke(&ctx, r, false) {
+                    tracing::debug!("gossip revoke rejected: {e}");
                 }
             }
             Some(nm_proto::pb::group_gossip::Body::Name(rec)) => {
@@ -1269,6 +1312,24 @@ impl Node {
                         };
                         let _ = topic.publish(gg.encode_to_vec()).await;
                     }
+                    // 重播本节点登记过的设备的吊销记录，令晚加入节点也拒绝这些设备。
+                    let my_revokes: Vec<DeviceRevoke> = self
+                        .revoked
+                        .iter()
+                        .filter(|r| {
+                            self.devices
+                                .get(r.key())
+                                .is_some_and(|d| d.cert.as_ref().is_some_and(|c| c.account == r.account))
+                        })
+                        .map(|r| r.clone())
+                        .collect();
+                    for r in my_revokes {
+                        let gg = GroupGossip {
+                            origin: me.to_vec(),
+                            body: Some(nm_proto::pb::group_gossip::Body::Revoke(r)),
+                        };
+                        let _ = topic.publish(gg.encode_to_vec()).await;
+                    }
                     last_announce = tokio::time::Instant::now();
                 }
                 match tokio::time::timeout(std::time::Duration::from_millis(300), topic.recv()).await {
@@ -1311,7 +1372,7 @@ impl Node {
         } else {
             self.status_intent.insert(entity.to_vec(), s.to_string());
         }
-        if self.sessions.contains_key(entity) {
+        if account_online(&self.sessions, &self.principals, entity) {
             self.presence.insert(
                 entity.to_vec(),
                 PresenceRec {
@@ -1325,7 +1386,7 @@ impl Node {
 
     /// 计算某实体对外状态（管理台/自查用）。
     pub fn presence_of(&self, entity: &[u8]) -> String {
-        presence_status(&self.sessions, &self.presence, &self.status_intent, entity)
+        presence_status(&self.sessions, &self.principals, &self.presence, &self.status_intent, entity)
     }
 
     /// 处理收到的 presence 广播：验签(按 home_node) → 反陈旧 → LWW 入缓存；不覆盖本地在线。
@@ -1353,7 +1414,7 @@ impl Node {
         if ann.ts + 300 < now || ann.ts > now + 300 {
             return; // 反陈旧/未来
         }
-        if self.sessions.contains_key(&entity[..]) {
+        if account_online(&self.sessions, &self.principals, &entity) {
             return; // 本地在线会话权威，不被远端覆盖
         }
         if let Some(cur) = self.presence.get(&entity[..]) {
@@ -1384,8 +1445,14 @@ impl Node {
                 if last_bcast.elapsed() >= interval {
                     let home = self.ep.id_bytes();
                     let ts = now_secs();
-                    // 守卫不跨 await：先收集本地会话公钥。
-                    let entities: Vec<Vec<u8>> = self.sessions.iter().map(|e| e.key().clone()).collect();
+                    // 守卫不跨 await：先收集本地在线账号（设备连接折算到账号，去重）。
+                    let mut entities: Vec<Vec<u8>> = self
+                        .sessions
+                        .iter()
+                        .map(|e| self.principals.get(e.key()).map(|p| p.clone()).unwrap_or_else(|| e.key().clone()))
+                        .collect();
+                    entities.sort();
+                    entities.dedup();
                     for ent in entities {
                         let status = self
                             .status_intent
@@ -1475,8 +1542,14 @@ fn session_row_from_conn(id: [u8; 32], since_unix_ms: u64, conn: &IrohConnection
 }
 
 /// 计算实体对外状态：本地在线会话优先（权威，取状态意图或 online）；否则查 presence 缓存并按 TTL 判离线。
-fn presence_status(sessions: &Sessions, presence: &PresenceMap, intent: &StatusIntent, entity: &[u8]) -> String {
-    if sessions.contains_key(entity) {
+fn presence_status(
+    sessions: &Sessions,
+    principals: &Principals,
+    presence: &PresenceMap,
+    intent: &StatusIntent,
+    entity: &[u8],
+) -> String {
+    if account_online(sessions, principals, entity) {
         return intent.get(entity).map(|s| s.clone()).unwrap_or_else(|| "online".to_string());
     }
     if let Some(r) = presence.get(entity) {
@@ -1673,6 +1746,11 @@ impl ProtocolHandler for ImspaceProto {
             conn.close(0u32.into(), b"banned");
             return Ok(());
         }
+        if is_revoked(&self.ctx, &rid_arr, None) {
+            tracing::info!(peer = %conn.remote_id().fmt_short(), "rejected revoked device");
+            conn.close(0u32.into(), b"device_revoked");
+            return Ok(());
+        }
         let rid = rid_arr.to_vec();
         self.ctx.sessions.insert(rid.clone(), conn.clone());
         self.ctx
@@ -1683,6 +1761,7 @@ impl ProtocolHandler for ImspaceProto {
         // 连接关闭事件驱动地清理会话表（仅当表中仍是「这条」连接时移除，避免误删重连后的新会话）。
         {
             let sessions = self.ctx.sessions.clone();
+            let principals = self.ctx.principals.clone();
             let watch_conn = conn.clone();
             let watch_rid = rid.clone();
             let closed_sid = watch_conn.stable_id();
@@ -1694,28 +1773,14 @@ impl ProtocolHandler for ImspaceProto {
                     .unwrap_or(false);
                 if stale {
                     sessions.remove(&watch_rid);
+                    principals.remove(&watch_rid);
                     tracing::info!(online = sessions.len(), "session closed");
                 }
             });
         }
 
-        // 上线补投：把该实体的离线消息经 uni 流推送后清空。
-        if let Some(store) = &self.ctx.store {
-            if let Ok(pending) = store.drain_inbox(&rid) {
-                if !pending.is_empty() {
-                    let c = conn.clone();
-                    tracing::info!(count = pending.len(), "delivering offline inbox");
-                    tokio::spawn(async move {
-                        for g in pending {
-                            if let Ok(mut s) = c.open_uni().await {
-                                let _ = write_gram(&mut s, &g).await;
-                                let _ = s.finish();
-                            }
-                        }
-                    });
-                }
-            }
-        }
+        // 上线补投：把该连接（设备）的离线消息经 uni 流推送后清空。
+        drain_inbox_to(&self.ctx, &rid, &conn);
 
         // 运行该连接的 gram 处理循环，直到连接关闭（handle_conn 内部会清理会话表）。
         handle_conn(conn, self.ctx.clone(), rid).await;
@@ -1766,7 +1831,8 @@ async fn handle_conn(conn: IrohConnection, ctx: Ctx, rid: Vec<u8>) {
             }
         };
         tracing::info!(kind = ?gram.kind(), gram_id = gram.gram_id, "recv gram");
-        if let Some(reply) = handle_gram(&gram, &ctx, &rid).await {
+        let principal = ctx.principals.get(&rid).map(|p| p.clone()).unwrap_or_else(|| rid.clone());
+        if let Some(reply) = handle_gram(&gram, &ctx, &principal, &rid).await {
             if let Err(e) = write_gram(&mut send, &reply).await {
                 tracing::warn!("write reply failed: {e}");
             }
@@ -1777,23 +1843,32 @@ async fn handle_conn(conn: IrohConnection, ctx: Ctx, rid: Vec<u8>) {
     let stale = ctx.sessions.get(&rid).map(|c| c.stable_id() == my_sid).unwrap_or(false);
     if stale {
         ctx.sessions.remove(&rid);
+        ctx.principals.remove(&rid);
         tracing::info!(online = ctx.sessions.len(), "session down");
     }
 }
 
-async fn handle_gram(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
+/// `caller` 是账号身份（设备连接 hello 后为账号公钥，否则等于连接公钥）；`rid` 是连接公钥。
+async fn handle_gram(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Option<Gram> {
     // 黑名单（纵深防御）：连接建立后才被拉黑的对端，其后续 gram 一律丢弃。
-    if let Ok(c) = <[u8; 32]>::try_from(caller) {
-        if ctx.blacklist.contains(&c) {
-            return None;
+    for k in [caller, rid] {
+        if let Ok(c) = <[u8; 32]>::try_from(k) {
+            if ctx.blacklist.contains(&c) {
+                return None;
+            }
         }
+    }
+    // 防冒名：聊天消息的 sender 必须是本连接的账号身份。
+    if matches!(gram.kind(), GramKind::Message | GramKind::GroupMessage) && gram.sender.as_slice() != caller {
+        tracing::warn!("message sender != connection principal; dropped");
+        return None;
     }
     // 群消息：receiver 是 group_id，由节点扇出（不是直接路由目标）。
     // 扇出可能对每个离线/跨节点成员做目录查询/中继（各带网络超时），若同步等待会
     // 阻塞给发送方的 ack → 前端「发送很迟钝」。故后台扇出、立即回执（存转发语义）。
     if matches!(gram.kind(), GramKind::GroupMessage) {
-        let (g, c, who) = (gram.clone(), ctx.clone(), caller.to_vec());
-        tokio::spawn(async move { fanout_group(&g, &c, &who).await });
+        let (g, c, who, r) = (gram.clone(), ctx.clone(), caller.to_vec(), rid.to_vec());
+        tokio::spawn(async move { fanout_group(&g, &c, &who, &r).await });
         return Some(receipt_for(gram));
     }
     // Relay 信封（来自对等节点的跨节点转发）：解出内层 gram，按本地投递。
@@ -1813,7 +1888,7 @@ async fn handle_gram(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
                 if target.attributes.get("require_grant").map(String::as_str) == Some("true") {
                     if let Err(reason) = authorize_routed(gram, caller, &target) {
                         tracing::warn!(%reason, "routed command denied");
-                        push_command_denied(gram, caller, &ctx.sessions, &reason);
+                        push_command_denied(gram, rid, &ctx.sessions, &reason);
                         return Some(reply_gram(gram, GramKind::Receipt, None));
                     }
                 }
@@ -1822,20 +1897,27 @@ async fn handle_gram(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
         // Message 可离线暂存；Command/CommandResult 仅在线路由。
         // 单播私聊改走 gossip（本地投递不了则联邦广播，对端节点投递）——取代 NAT 下常不通的 s2s 中继。
         if matches!(gram.kind(), GramKind::Message) {
-            let (g, c) = (gram.clone(), ctx.clone());
-            tokio::spawn(async move { deliver_direct(&g, &c).await });
+            let (g, c, who, r) = (gram.clone(), ctx.clone(), caller.to_vec(), rid.to_vec());
+            tokio::spawn(async move {
+                deliver_direct(&g, &c).await;
+                // 已发同步：同账号的其它设备也收到一份（客户端按 sender==自己 归入会话）。
+                if g.receiver != who {
+                    deliver_account(&who, &g, &c, true, Some(&r)).await;
+                }
+            });
         } else {
-            try_push(to, gram, &ctx.sessions).await;
+            deliver_account(to, gram, ctx, false, None).await;
         }
         return Some(reply_gram(gram, GramKind::Receipt, None)); // 给发送方回 ack
     }
     // 面向节点本身的请求。
     match gram.kind() {
-        GramKind::Command => handle_command(gram, ctx, caller).await,
+        GramKind::Command => handle_command(gram, ctx, caller, rid).await,
         GramKind::Message => Some(receipt_for(gram)),
         GramKind::Login => Some(login_ok(gram)),
         GramKind::Logout => {
-            ctx.sessions.remove(caller); // 显式下线：同步移除会话
+            ctx.sessions.remove(rid); // 显式下线：同步移除会话
+            ctx.principals.remove(rid);
             tracing::info!(online = ctx.sessions.len(), "session logout");
             Some(reply_gram(gram, GramKind::Reply, None))
         }
@@ -1844,7 +1926,7 @@ async fn handle_gram(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
 }
 
 /// 群消息扇出：`receiver` 为 group_id；对每个成员(除发送方)——在线则路由、离线则入库。
-async fn fanout_group(gram: &Gram, ctx: &Ctx, caller: &[u8]) {
+async fn fanout_group(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) {
     let Some(group) = ctx.groups.get(&gram.receiver).map(|g| g.clone()) else {
         tracing::warn!("group message to unknown group");
         return;
@@ -1855,7 +1937,7 @@ async fn fanout_group(gram: &Gram, ctx: &Ctx, caller: &[u8]) {
         return;
     }
     // 本地投递：本节点在线成员直投；本节点为其 home 的离线成员入库补投。
-    deliver_group_here(gram, &group.members, caller, ctx).await;
+    deliver_group_here(gram, &group.members, rid, ctx).await;
     // 跨节点：发布到群联邦 gossip，各成员节点收到后各自投递「本地成员」。
     // 取代此前的 s2s 中继（NAT 下常超时不通）——与频道同走 gossip 叠加网。
     let gg = GroupGossip {
@@ -1865,23 +1947,102 @@ async fn fanout_group(gram: &Gram, ctx: &Ctx, caller: &[u8]) {
     let _ = ctx.group_pub.send(gg.encode_to_vec());
 }
 
-/// 把群消息投递给「本节点负责的成员」：在线本地会话直投；否则若本节点是其 home 则入离线库。
-/// 每个成员仅由其所在/归属节点处理——无需依赖联邦目录同步（各节点权威掌握本地实体）。
-async fn deliver_group_here(gram: &Gram, members: &[Vec<u8>], skip: &[u8], ctx: &Ctx) {
+/// 把群消息投递给「本节点负责的成员」：在线设备直投；本节点是其 home 则离线设备入库。
+/// 发送方自己的其它设备也会收到（已发同步），只跳过发出这条消息的连接 `skip_rid`。
+async fn deliver_group_here(gram: &Gram, members: &[Vec<u8>], skip_rid: &[u8], ctx: &Ctx) {
     for m in members {
-        if m.as_slice() == skip {
+        let home_here = is_home_here(ctx, m);
+        deliver_account(m, gram, ctx, home_here, Some(skip_rid)).await;
+    }
+}
+
+/// 本节点是否为该账号的 home（目录登记 home_node 为本节点，或有设备在本节点登记）。
+fn is_home_here(ctx: &Ctx, account: &[u8]) -> bool {
+    if let Some(e) = ctx.dir.entities.get(account) {
+        if e.home_node == ctx.node_id.as_slice() {
+            return true;
+        }
+    }
+    ctx.devices.iter().any(|d| d.cert.as_ref().is_some_and(|c| c.account == account))
+}
+
+/// 账号当前在本节点的在线连接：账号公钥直连（老客户端）+ hello 过的设备连接。
+fn online_rids(sessions: &Sessions, principals: &Principals, account: &[u8]) -> Vec<Vec<u8>> {
+    let mut v: Vec<Vec<u8>> = principals
+        .iter()
+        .filter(|e| e.value().as_slice() == account && sessions.contains_key(e.key()))
+        .map(|e| e.key().clone())
+        .collect();
+    if sessions.contains_key(account) {
+        v.push(account.to_vec());
+    }
+    v
+}
+
+fn account_online(sessions: &Sessions, principals: &Principals, account: &[u8]) -> bool {
+    sessions.contains_key(account)
+        || principals.iter().any(|e| e.value().as_slice() == account && sessions.contains_key(e.key()))
+}
+
+/// 账号离线消息的存放对象：有效（未吊销）设备各一份；从未登记设备的老账号存在账号公钥下。
+fn inbox_targets(ctx: &Ctx, account: &[u8]) -> Vec<Vec<u8>> {
+    let devs: Vec<Vec<u8>> = ctx
+        .devices
+        .iter()
+        .filter(|d| d.cert.as_ref().is_some_and(|c| c.account == account) && !ctx.revoked.contains_key(d.key()))
+        .map(|d| d.key().clone())
+        .collect();
+    if devs.is_empty() {
+        vec![account.to_vec()]
+    } else {
+        devs
+    }
+}
+
+/// 投递给账号：所有在线连接直推；`store_offline` 时给没收到的有效设备各存一份。
+/// `skip` 为不需要回送的连接（发送方自己）。返回是否至少推到一台在线设备。
+async fn deliver_account(account: &[u8], gram: &Gram, ctx: &Ctx, store_offline: bool, skip: Option<&[u8]>) -> bool {
+    let mut reached: Vec<Vec<u8>> = Vec::new();
+    for r in online_rids(&ctx.sessions, &ctx.principals, account) {
+        if skip == Some(r.as_slice()) {
             continue;
         }
-        if ctx.sessions.contains_key(m.as_slice()) {
-            try_push(m, gram, &ctx.sessions).await;
-        } else if let Ok(Some(e)) = ctx.dir.get(m).await {
-            if e.home_node == ctx.node_id.as_slice() {
-                if let Some(s) = &ctx.store {
-                    let _ = s.push_inbox(m, gram);
+        if try_push(&r, gram, &ctx.sessions).await {
+            reached.push(r);
+        }
+    }
+    if store_offline {
+        if let Some(s) = &ctx.store {
+            for d in inbox_targets(ctx, account) {
+                if skip == Some(d.as_slice()) || reached.contains(&d) {
+                    continue;
+                }
+                if let Err(e) = s.push_inbox(&d, gram) {
+                    tracing::warn!("push_inbox failed: {e}");
                 }
             }
         }
     }
+    !reached.is_empty()
+}
+
+/// 取走某连接名下的离线消息并推送给它。
+fn drain_inbox_to(ctx: &Ctx, rid: &[u8], conn: &IrohConnection) {
+    let Some(store) = &ctx.store else { return };
+    let Ok(pending) = store.drain_inbox(rid) else { return };
+    if pending.is_empty() {
+        return;
+    }
+    let c = conn.clone();
+    tracing::info!(count = pending.len(), "delivering offline inbox");
+    tokio::spawn(async move {
+        for g in pending {
+            if let Ok(mut s) = c.open_uni().await {
+                let _ = write_gram(&mut s, &g).await;
+                let _ = s.finish();
+            }
+        }
+    });
 }
 
 /// 立即向联邦广播某群当前状态（发现 + 成员表）。群变更后调用，避免等周期公告。
@@ -2146,6 +2307,268 @@ fn reset_name_account(ctx: &Ctx, caller: &[u8], cmd: &Command) -> (bool, Option<
     }
 }
 
+// ── 多设备：证书登记 / 列表 / 改名 / 吊销 / 紧急冻结 ──
+
+/// 账号公钥直连（老客户端或持有账号私钥的连接）或 admin 设备连接。
+fn is_admin_conn(ctx: &Ctx, caller: &[u8], rid: &[u8]) -> bool {
+    rid == caller
+        || ctx.devices.get(rid).is_some_and(|d| {
+            d.cert.as_ref().is_some_and(|c| c.account == caller && c.role == nm_crypto::DEVICE_ROLE_ADMIN)
+        })
+}
+
+/// 设备是否已被其账号吊销。`account` 未知时以本节点登记的证书账号为准。
+fn is_revoked(ctx: &Ctx, device: &[u8], account: Option<&[u8]>) -> bool {
+    let Some(r) = ctx.revoked.get(device) else { return false };
+    match account {
+        Some(a) => r.account == a,
+        None => ctx
+            .devices
+            .get(device)
+            .and_then(|d| d.cert.as_ref().map(|c| c.account == r.account))
+            .unwrap_or(false),
+    }
+}
+
+/// 设备连接出示账号签发的证书，登记后该连接以账号身份收发。
+fn device_hello(ctx: &Ctx, rid: &[u8], cmd: &Command) -> (bool, Option<Any>, String) {
+    let Some(cert) = cmd.params.as_ref().and_then(|p| DeviceCert::decode(p.value.as_slice()).ok()) else {
+        return acct_fail("invalid_cert");
+    };
+    if nm_crypto::verify_device_cert(&cert).is_err() {
+        return acct_fail("bad_cert");
+    }
+    if cert.device != rid {
+        return acct_fail("device_mismatch");
+    }
+    if is_revoked(ctx, rid, Some(&cert.account)) {
+        if let Some(conn) = ctx.sessions.get(rid).map(|c| c.clone()) {
+            conn.close(0u32.into(), b"device_revoked");
+        }
+        return acct_fail("device_revoked");
+    }
+    if <[u8; 32]>::try_from(cert.account.as_slice()).is_ok_and(|a| ctx.blacklist.contains(&a)) {
+        return acct_fail("banned");
+    }
+    let mut info = ctx.devices.get(rid).map(|d| d.clone()).unwrap_or_default();
+    let keep_old = info
+        .cert
+        .as_ref()
+        .is_some_and(|old| old.account == cert.account && old.issued_at > cert.issued_at);
+    if !keep_old {
+        if info.cert.as_ref().is_some_and(|old| old.account != cert.account) {
+            info.label = String::new();
+        }
+        info.cert = Some(cert.clone());
+    }
+    if info.label.is_empty() {
+        info.label = cert.label.clone();
+    }
+    info.last_seen = now_ms() as i64;
+    info.online = false;
+    info.revoked = None;
+    if let Some(s) = &ctx.store {
+        if let Err(e) = s.put_device(&info) {
+            tracing::warn!("persist device failed: {e}");
+        }
+    }
+    let account = info.cert.as_ref().map(|c| c.account.clone()).unwrap_or_default();
+    ctx.devices.insert(rid.to_vec(), info.clone());
+    ctx.principals.insert(rid.to_vec(), account.clone());
+    tracing::info!(device = %hex_encode(&rid[..4]), account = %hex_encode(&account[..4]), "device hello");
+    // 补投 hello 之前按设备存下的消息，以及登记设备前按账号存下的旧消息。
+    if let Some(conn) = ctx.sessions.get(rid).map(|c| c.clone()) {
+        drain_inbox_to(ctx, rid, &conn);
+        drain_inbox_to(ctx, &account, &conn);
+    }
+    info.online = true;
+    (true, Some(Any { type_url: "nmspace.v1.DeviceInfo".into(), value: info.encode_to_vec() }), String::new())
+}
+
+fn device_list(ctx: &Ctx, caller: &[u8]) -> (bool, Option<Any>, String) {
+    let mut devices: Vec<DeviceInfo> = ctx
+        .devices
+        .iter()
+        .filter(|d| d.cert.as_ref().is_some_and(|c| c.account == caller))
+        .map(|d| {
+            let mut i = d.clone();
+            i.online = ctx.sessions.contains_key(d.key())
+                && ctx.principals.get(d.key()).is_some_and(|p| p.as_slice() == caller);
+            i.revoked = ctx.revoked.get(d.key()).filter(|r| r.account == caller).map(|r| r.clone());
+            i
+        })
+        .collect();
+    devices.sort_by_key(|d| d.cert.as_ref().map(|c| c.issued_at).unwrap_or(0));
+    (
+        true,
+        Some(Any { type_url: "nmspace.v1.DeviceList".into(), value: DeviceList { devices }.encode_to_vec() }),
+        String::new(),
+    )
+}
+
+fn device_rename(ctx: &Ctx, caller: &[u8], cmd: &Command) -> (bool, Option<Any>, String) {
+    let v = account_params(cmd);
+    let Some(dev) = v.get("device").and_then(|x| x.as_str()).and_then(hex_decode_n::<32>) else {
+        return acct_fail("invalid_device");
+    };
+    let label = v.get("label").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    if label.is_empty() || label.chars().count() > 64 {
+        return acct_fail("invalid_label");
+    }
+    let Some(mut info) = ctx.devices.get(&dev[..]).map(|d| d.clone()) else {
+        return acct_fail("no_such_device");
+    };
+    if !info.cert.as_ref().is_some_and(|c| c.account == caller) {
+        return acct_fail("not_owner");
+    }
+    info.label = label;
+    if let Some(s) = &ctx.store {
+        if s.put_device(&info).is_err() {
+            return acct_fail("no_store");
+        }
+    }
+    ctx.devices.insert(dev.to_vec(), info);
+    acct_text("ok")
+}
+
+/// 紧急冻结：凭账号口令由家节点代签吊销（无管理设备在手时用）。
+fn device_freeze(ctx: &Ctx, cmd: &Command) -> (bool, Option<Any>, String) {
+    let req = match parse_acct(cmd) {
+        Ok(r) => r,
+        Err(code) => return acct_fail(code),
+    };
+    let v = account_params(cmd);
+    let dev_hex = v.get("device").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    let only = if dev_hex.is_empty() {
+        None
+    } else {
+        match hex_decode_n::<32>(&dev_hex) {
+            Some(d) => Some(d),
+            None => return acct_fail("invalid_device"),
+        }
+    };
+    let account = match ctx.names.get(&req.full) {
+        Some(r) if r.home_node == ctx.node_id.as_slice() => r.client_pubkey.clone(),
+        Some(_) => return acct_fail("not_home_node"),
+        None => return acct_fail("no_such_user"),
+    };
+    let Some(store) = ctx.store.as_ref() else {
+        return acct_fail("no_store");
+    };
+    match store.name_secret(&req.full) {
+        Ok(Some(phc)) if verify_account_password(&phc, &req.password) => {}
+        Ok(Some(_)) => return acct_fail("bad_password"),
+        Ok(None) => return acct_fail("no_password"),
+        Err(_) => return acct_fail("no_store"),
+    }
+    let Ok(account_arr) = <[u8; 32]>::try_from(account.as_slice()) else {
+        return acct_fail("no_such_user");
+    };
+    // 指定设备只冻结它；不指定则冻结该账号全部有效设备（找不到设备公钥时的兜底）。
+    let targets: Vec<[u8; 32]> = ctx
+        .devices
+        .iter()
+        .filter(|d| d.cert.as_ref().is_some_and(|c| c.account == account))
+        .filter(|d| !is_revoked(ctx, d.key(), Some(&account)))
+        .filter_map(|d| <[u8; 32]>::try_from(d.key().as_slice()).ok())
+        .filter(|d| only.is_none_or(|o| o == *d))
+        .collect();
+    if targets.is_empty() {
+        return acct_fail("no_such_device");
+    }
+    let now = now_ms() as i64;
+    for dev in &targets {
+        let r = nm_crypto::sign_device_revoke(ctx.ep.secret_key(), account_arr, *dev, now, "freeze", true);
+        if let Err(e) = apply_revoke(ctx, r, true) {
+            return acct_fail(e);
+        }
+    }
+    acct_text(&targets.len().to_string())
+}
+
+/// 节点能否代该账号冻结设备：须是该账号的家节点（目录或命名记录登记）。
+fn node_may_freeze(ctx: &Ctx, account: &[u8], node: &[u8]) -> bool {
+    node == ctx.node_id.as_slice()
+        || ctx.dir.entities.get(account).is_some_and(|e| e.home_node == node)
+        || ctx.names.iter().any(|n| n.client_pubkey == account && n.home_node == node)
+}
+
+/// 校验并落地一条吊销：断开该设备连接、丢弃其信箱、通知同账号在线设备，可选联邦广播。
+/// 返回是否为新吊销（重复的返回 false）。
+fn apply_revoke(ctx: &Ctx, r: DeviceRevoke, broadcast: bool) -> Result<bool, &'static str> {
+    nm_crypto::verify_device_revoke(&r).map_err(|_| "bad_signature")?;
+    if !r.by_node.is_empty() && !node_may_freeze(ctx, &r.account, &r.by_node) {
+        return Err("node_not_home");
+    }
+    let registered_account = ctx.devices.get(&r.device).and_then(|d| d.cert.as_ref().map(|c| c.account.clone()));
+    if registered_account.as_ref().is_some_and(|a| *a != r.account) {
+        return Err("not_owner");
+    }
+    if let Some(old) = ctx.revoked.get(&r.device) {
+        // 同账号已吊销则幂等；他人抢占的记录仅在本条属于登记账号时覆盖。
+        if old.account == r.account || registered_account.is_none() {
+            return Ok(false);
+        }
+    }
+    if let Some(s) = &ctx.store {
+        s.put_revoke(&r).map_err(|_| "no_store")?;
+    }
+    ctx.revoked.insert(r.device.clone(), r.clone());
+    if let Some((_, conn)) = ctx.sessions.remove(&r.device) {
+        ctx.sessions_meta.remove(&r.device);
+        conn.close(0u32.into(), b"device_revoked");
+    }
+    ctx.principals.remove(&r.device);
+    if let Some(s) = &ctx.store {
+        let _ = s.drain_inbox(&r.device);
+    }
+    tracing::info!(device = %hex_encode(&r.device[..4]), by_node = !r.by_node.is_empty(), "device revoked");
+    notify_account(
+        ctx,
+        &r.account,
+        serde_json::json!({
+            "event": "revoked",
+            "device": hex_encode(&r.device),
+            "reason": r.reason,
+            "by_node": !r.by_node.is_empty(),
+        }),
+    );
+    if broadcast {
+        let gg = GroupGossip {
+            origin: ctx.node_id.to_vec(),
+            body: Some(nm_proto::pb::group_gossip::Body::Revoke(r)),
+        };
+        let _ = ctx.group_pub.send(gg.encode_to_vec());
+    }
+    Ok(true)
+}
+
+/// 向账号所有在线设备推一条设备事件（客户端按 type_url 拦截，不进聊天）。
+fn notify_account(ctx: &Ctx, account: &[u8], event: serde_json::Value) {
+    let rids = online_rids(&ctx.sessions, &ctx.principals, account);
+    if rids.is_empty() {
+        return;
+    }
+    let now = now_ms();
+    let gram = Gram {
+        version: PROTOCOL_VERSION,
+        kind: GramKind::Message as i32,
+        gram_id: now,
+        ref_gram_id: None,
+        sender: ctx.node_id.to_vec(),
+        receiver: account.to_vec(),
+        timestamp_ms: now,
+        payload: Some(Any { type_url: DEVICE_EVENT_TYPE.into(), value: event.to_string().into_bytes() }),
+        crc: Vec::new(),
+    };
+    let sessions = ctx.sessions.clone();
+    tokio::spawn(async move {
+        for r in rids {
+            try_push(&r, &gram, &sessions).await;
+        }
+    });
+}
+
 fn valid_local_part(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 63
@@ -2194,27 +2617,12 @@ fn apply_domain_decision(
 /// 4) 完全未知 → 本地离线库兜底(可能连来本节点) + 联邦 gossip 广播(可能在远端)。
 async fn deliver_direct(gram: &Gram, ctx: &Ctx) {
     let to = &gram.receiver;
-    // 1) 本地在线会话直投。
-    if ctx.sessions.contains_key(to.as_slice()) {
-        try_push(to, gram, &ctx.sessions).await;
+    let home_here = is_home_here(ctx, to);
+    let known_remote = !home_here && ctx.dir.entities.contains_key(to.as_slice());
+    // 1) 本地在线设备直投；2) home 在本节点 → 离线设备入库；4) 完全未知 → 本地兜底入库（可能连来本节点）。
+    let online = deliver_account(to, gram, ctx, !known_remote, None).await;
+    if online || home_here {
         return;
-    }
-    let known_remote = match ctx.dir.get(to).await {
-        Ok(Some(e)) if e.home_node == ctx.node_id.as_slice() => {
-            // 2) 收件人 home 在本节点、当前离线 → 入本地离线库，重连补投。
-            if let Some(s) = &ctx.store {
-                let _ = s.push_inbox(to, gram);
-            }
-            return;
-        }
-        Ok(Some(_)) => true, // 3) 已知远端
-        _ => false,          // 4) 完全未知
-    };
-    if !known_remote {
-        // 未知收件人：本地兜底入库（可能连来本节点），同时下面再联邦广播（可能在远端）。
-        if let Some(s) = &ctx.store {
-            let _ = s.push_inbox(to, gram);
-        }
     }
     // 远端 / 未知：经联邦 gossip 广播；对端节点收到后投递（取代 s2s 中继）。
     let gg = GroupGossip {
@@ -2251,8 +2659,9 @@ async fn try_push(to: &[u8], gram: &Gram, sessions: &Sessions) -> bool {
 
 /// 投递一份 gram 给目标实体：在线且推送成功→直达；否则落离线队列(若有 store)。
 async fn deliver_or_store(to: &[u8], gram: &Gram, ctx: &Ctx) {
-    // 1) 本地在线会话直投。
-    if try_push(to, gram, &ctx.sessions).await {
+    // 1) 本地在线设备直投（同时给离线的有效设备各存一份）。
+    if account_online(&ctx.sessions, &ctx.principals, to) {
+        deliver_account(to, gram, ctx, true, None).await;
         return;
     }
     // 2) 跨节点：目标实体归属其它节点 → Relay 转发给其归属节点。
@@ -2268,18 +2677,15 @@ async fn deliver_or_store(to: &[u8], gram: &Gram, ctx: &Ctx) {
         }
     }
     // 3) 离线：入库，重连补投。
-    if let Some(s) = &ctx.store {
-        if let Err(e) = s.push_inbox(to, gram) {
-            tracing::warn!("push_inbox failed: {e}");
-        } else {
-            tracing::info!("target offline; stored to inbox");
-        }
+    if ctx.store.is_some() {
+        deliver_account(to, gram, ctx, true, None).await;
+        tracing::info!("target offline; stored to inbox");
     } else {
         tracing::warn!("target offline; no store; dropping");
     }
 }
 
-async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
+async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Option<Gram> {
     let dir = &*ctx.dir;
     let groups = &*ctx.groups;
     let store = &ctx.store;
@@ -2331,7 +2737,7 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
                 .map(|r| (r.client_pubkey.clone(), format!("{}@{}", r.local_part, r.domain)))
                 .collect();
             for e in list.iter_mut() {
-                let p = presence_status(&ctx.sessions, &ctx.presence, &ctx.status_intent, &e.entity_id);
+                let p = presence_status(&ctx.sessions, &ctx.principals, &ctx.presence, &ctx.status_intent, &e.entity_id);
                 e.attributes.insert("presence".to_string(), p);
                 if let Some(n) = name_by_pk.get(&e.entity_id) {
                     e.attributes.insert("name".to_string(), n.clone());
@@ -2359,7 +2765,7 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
             } else {
                 ctx.status_intent.insert(caller.to_vec(), status.clone());
             }
-            if ctx.sessions.contains_key(caller) {
+            if account_online(&ctx.sessions, &ctx.principals, caller) {
                 ctx.presence.insert(
                     caller.to_vec(),
                     PresenceRec {
@@ -2495,8 +2901,22 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
         "name.register" => register_name_account(ctx, caller, &cmd),
         "name.login" => login_name_account(ctx, caller, &cmd),
         "name.lookup" => lookup_name_account(ctx, &cmd),
+        "name.passwd" | "name.reset" if !is_admin_conn(ctx, caller, rid) => acct_fail("not_admin_device"),
         "name.passwd" => passwd_name_account(ctx, caller, &cmd),
         "name.reset" => reset_name_account(ctx, caller, &cmd),
+        // ── 多设备 ──
+        "device.hello" => device_hello(ctx, rid, &cmd),
+        "device.list" => device_list(ctx, caller),
+        "device.rename" => device_rename(ctx, caller, &cmd),
+        "device.revoke" => match cmd.params.as_ref().and_then(|p| DeviceRevoke::decode(p.value.as_slice()).ok()) {
+            Some(r) if !r.by_node.is_empty() => acct_fail("by_node_not_allowed"),
+            Some(r) => match apply_revoke(ctx, r, true) {
+                Ok(_) => acct_text("ok"),
+                Err(e) => acct_fail(e),
+            },
+            None => acct_fail("invalid_revoke"),
+        },
+        "device.freeze" => device_freeze(ctx, &cmd),
         // ── 频道 / 主题（P4）──
         "channel.create" => match cmd.params.as_ref().and_then(|p| ChannelOp::decode(p.value.as_slice()).ok()) {
             Some(op) if op.channel_id.len() == 32 => {
@@ -2507,7 +2927,7 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
                 };
                 ensure_channel(ctx, &op.channel_id, Some(meta)).await;
                 if let Some(e) = ctx.channels.get(&op.channel_id) {
-                    e.subs.insert(caller.to_vec());
+                    e.subs.insert(rid.to_vec());
                     let _ = e.pub_tx.send(ChannelOut::Meta(e.meta.lock().unwrap().clone())); // 广播元信息
                 }
                 (true, None, String::new())
@@ -2518,7 +2938,7 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
             Some(op) if op.channel_id.len() == 32 => {
                 let meta = Channel { channel_id: op.channel_id.clone(), name: op.name, topic: op.topic, ..Default::default() };
                 if ensure_channel(ctx, &op.channel_id, Some(meta)).await {
-                    if let Some(e) = ctx.channels.get(&op.channel_id) { e.subs.insert(caller.to_vec()); }
+                    if let Some(e) = ctx.channels.get(&op.channel_id) { e.subs.insert(rid.to_vec()); }
                     (true, None, String::new())
                 } else {
                     (false, None, "channel join failed".into())
@@ -2528,7 +2948,7 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8]) -> Option<Gram> {
         },
         "channel.unsub" => match cmd.params.as_ref().and_then(|p| ChannelOp::decode(p.value.as_slice()).ok()) {
             Some(op) => {
-                if let Some(e) = ctx.channels.get(&op.channel_id) { e.subs.remove(caller); }
+                if let Some(e) = ctx.channels.get(&op.channel_id) { e.subs.remove(rid); }
                 (true, None, String::new())
             }
             None => (false, None, "invalid channel op".into()),

@@ -32,6 +32,17 @@ pub struct Request {
     #[serde(default)]
     pub name: String,
     pub ts: u64,
+    /// v2：新设备的设备公钥。旧设备为它签证书，不再交出账号私钥（除非勾选设为管理设备）。
+    #[serde(default)]
+    pub dk: String,
+}
+
+/// v2 授权正文（加密后放进 Grant.ct）。v1 的正文是 32 字节账号种子。
+#[derive(Serialize, Deserialize)]
+pub struct GrantBody {
+    pub cert: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<String>,
 }
 
 /// 迁移串：与 Request 相同，外加新设备一次性身份，旧设备据此回信。
@@ -94,7 +105,9 @@ pub struct Session {
 }
 
 /// 由 ECDH 共享密钥与完整转录派生会话密钥和核对码。双方必须以相同顺序传入参数：
-/// `owner` 旧设备身份、`newdev` 新设备一次性身份、`xpk_new`/`xpk_old` 双方临时公钥。
+/// `owner` 旧设备身份、`newdev` 新设备一次性身份、`xpk_new`/`xpk_old` 双方临时公钥、
+/// `dk` 新设备的设备公钥（v2；纳入转录，中间人替换后核对码不一致）。
+#[allow(clippy::too_many_arguments)]
 pub fn derive(
     my: &StaticSecret,
     peer_xpk: &[u8; 32],
@@ -103,6 +116,7 @@ pub fn derive(
     newdev: &[u8; 32],
     xpk_new: &[u8; 32],
     xpk_old: &[u8; 32],
+    dk: Option<&[u8; 32]>,
 ) -> Result<Session, String> {
     let shared = my.diffie_hellman(&PublicKey::from(*peer_xpk));
     if !shared.was_contributory() {
@@ -115,6 +129,10 @@ pub fn derive(
     th.update(newdev);
     th.update(xpk_new);
     th.update(xpk_old);
+    if let Some(dk) = dk {
+        th.update(b"dk");
+        th.update(dk);
+    }
     let th = th.finalize();
     let hk = Hkdf::<Sha256>::new(Some(&th), shared.as_bytes());
     let mut key = [0u8; 32];
@@ -186,12 +204,22 @@ mod tests {
         let (so, po) = keypair();
         let owner = [1u8; 32];
         let newdev = [2u8; 32];
-        let a = derive(&sn, &po, "r", &owner, &newdev, &pn, &po).unwrap();
-        let b = derive(&so, &pn, "r", &owner, &newdev, &pn, &po).unwrap();
+        let a = derive(&sn, &po, "r", &owner, &newdev, &pn, &po, None).unwrap();
+        let b = derive(&so, &pn, "r", &owner, &newdev, &pn, &po, None).unwrap();
         assert_eq!(a.key, b.key);
         assert_eq!(a.sas, b.sas);
         let ct = seal(&b.key, b"seed").unwrap();
         assert_eq!(open(&a.key, &ct).unwrap(), b"seed");
+    }
+
+    #[test]
+    fn swapped_device_key_changes_sas() {
+        let (sn, pn) = keypair();
+        let (so, po) = keypair();
+        let (owner, newdev) = ([1u8; 32], [2u8; 32]);
+        let a = derive(&sn, &po, "r", &owner, &newdev, &pn, &po, Some(&[7u8; 32])).unwrap();
+        let b = derive(&so, &pn, "r", &owner, &newdev, &pn, &po, Some(&[8u8; 32])).unwrap();
+        assert_ne!(a.sas, b.sas);
     }
 
     #[test]
@@ -201,20 +229,29 @@ mod tests {
         let (_sm, pm) = keypair();
         let owner = [1u8; 32];
         let newdev = [2u8; 32];
-        let a = derive(&sn, &po, "r", &owner, &newdev, &pn, &po).unwrap();
-        let b = derive(&so, &pm, "r", &owner, &newdev, &pm, &po).unwrap();
+        let a = derive(&sn, &po, "r", &owner, &newdev, &pn, &po, None).unwrap();
+        let b = derive(&so, &pm, "r", &owner, &newdev, &pm, &po, None).unwrap();
         assert_ne!(a.sas, b.sas);
     }
 
     #[test]
     fn ticket_roundtrip() {
         let t = Ticket {
-            req: Request { v: 1, rid: "ab".into(), xpk: "cd".into(), device: "mac".into(), name: "a@b".into(), ts: 1 },
+            req: Request {
+                v: 2,
+                rid: "ab".into(),
+                xpk: "cd".into(),
+                device: "mac".into(),
+                name: "a@b".into(),
+                ts: 1,
+                dk: "ee".into(),
+            },
             eph: "ef".into(),
         };
         let s = encode_ticket(&t).unwrap();
         let back = decode_ticket(&s).unwrap();
         assert_eq!(back.eph, "ef");
         assert_eq!(back.req.rid, "ab");
+        assert_eq!(back.req.dk, "ee");
     }
 }

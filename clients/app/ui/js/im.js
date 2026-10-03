@@ -508,9 +508,11 @@ async function sendRich(media) {
 function onCoreEvent(ev) {
   if (!ev || ev.type !== "message" || !ev.msg) return;
   const m = ev.msg;
-  const key = (m.group || m.channel) ? m.to : m.from; // 群/频道按其 id 归会话；私聊按发送方
+  const mine = m.from === MY_ID; // 本账号其它设备发出的（已发同步）
+  // 群/频道按其 id 归会话；私聊按对方：别人发来按发送方，自己其它设备发出按接收方
+  const key = (m.group || m.channel || mine) ? m.to : m.from;
   const fresh = pushMsg(key, m);
-  if (fresh && key !== ACTIVE) UNREAD[key] = (UNREAD[key] || 0) + 1;
+  if (fresh && !mine && key !== ACTIVE) UNREAD[key] = (UNREAD[key] || 0) + 1;
   if (fresh) scheduleChatSave();
   renderPanels();
 }

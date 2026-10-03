@@ -41,55 +41,94 @@
   </div>
   <!-- 用户切换下拉（标题栏 tb-user 触发；position:fixed，DOM 位置无关） -->
   <div class="user-menu" id="user-menu"></div>
-  <!-- 安全设置弹窗（P2）：自动锁定 / 改主口令 / 加密备份 -->
+  <!-- 安全设置：左侧导航 + 右侧面板 -->
   <div class="sec-overlay" id="sec-modal">
-    <div class="sec-box">
-      <div class="sec-head"><span class="ico" data-ico="shield"></span>安全设置 <button class="sec-x" id="sec-close" title="关闭"><span class="ico" data-ico="close"></span></button></div>
-      <div class="sec-body">
-        <div class="sec-sec">
-          <div class="sec-t">自动锁定</div>
+    <div class="dlg">
+      <div class="dlg-head"><span class="ico" data-ico="shield"></span><span class="dlg-title">安全设置</span><span class="dlg-sub">本机密钥库的保护与找回</span><button class="sec-x" id="sec-close" title="关闭"><span class="ico" data-ico="close"></span></button></div>
+      <div class="dlg-main">
+        <nav class="dlg-nav">
+          <button class="on" data-pane="lock"><span data-ico="clock"></span>自动锁定</button>
+          <button data-pane="master"><span data-ico="lock"></span>主口令</button>
+          <button data-pane="backup"><span data-ico="file"></span>加密备份</button>
+          <button data-pane="recovery"><span data-ico="edit"></span>恢复码</button>
+          <button data-pane="audit"><span data-ico="ticker"></span>安全日志</button>
+          <div class="dlg-nav-sep"></div>
+          <button id="sec-dev-open"><span data-ico="device"></span>我的设备</button>
+        </nav>
+        <section class="dlg-pane" data-pane="lock">
+          <div class="pane-head"><div><div class="pane-t">自动锁定</div><div class="pane-d">离开电脑时自动锁住本机密钥库，解锁需要主口令。</div></div>
+            <button class="ns-btn ns-primary" id="sec-al-save">保存</button></div>
           <div class="sec-row"><label>空闲多少分钟后自动锁定</label><input id="sec-al-min" type="number" min="1" value="10" /></div>
-          <label class="sec-check"><input id="sec-al-blur" type="checkbox" /> 切到后台 / 最小化即锁</label>
-          <div class="sec-actions"><button class="ns-btn ns-primary" id="sec-al-save">保存</button></div>
-        </div>
-        <div class="sec-sec">
-          <div class="sec-t">修改主口令</div>
-          <input id="sec-old" type="password" class="sec-input" placeholder="旧主口令" autocomplete="current-password" />
-          <input id="sec-new" type="password" class="sec-input" placeholder="新主口令（≥8 + 大小写 + 数字 + 特殊字符）" autocomplete="new-password" />
-          <input id="sec-new2" type="password" class="sec-input" placeholder="确认新主口令" autocomplete="new-password" />
-          <div class="sec-actions"><button class="ns-btn ns-primary" id="sec-cm-save">修改</button></div>
-        </div>
-        <div class="sec-sec">
-          <div class="sec-t">加密备份（换机 / 找回）</div>
-          <div class="sec-hint">用一个<b>独立备份口令</b>把全部身份导出为加密串；换机粘回即可恢复。主口令 + 备份全丢将<b>无法找回</b>。</div>
-          <input id="sec-exp-pw" type="password" class="sec-input" placeholder="备份口令（导出用，请另行牢记）" autocomplete="new-password" />
-          <div class="sec-actions"><button class="ns-btn" id="sec-exp-go">导出</button><button class="ns-btn" id="sec-exp-copy">复制</button></div>
-          <textarea id="sec-exp-out" class="sec-ta" readonly placeholder="导出的备份串会出现在这里"></textarea>
-          <div class="sec-div"></div>
-          <textarea id="sec-imp-in" class="sec-ta" placeholder="粘贴备份串以导入"></textarea>
-          <input id="sec-imp-pw" type="password" class="sec-input" placeholder="该备份的口令" autocomplete="off" />
-          <div class="sec-actions"><button class="ns-btn ns-primary" id="sec-imp-go">导入</button></div>
-        </div>
-        <div class="sec-sec">
-          <div class="sec-t">设备迁移</div>
-          <div class="sec-hint">新设备在登录页选「迁移串」生成一段文字，粘贴到这里，核对后即可把当前账号的私钥发给那台设备。</div>
-          <textarea id="sec-pair-in" class="sec-ta" spellcheck="false" placeholder="粘贴新设备上的迁移串（nmpair1:…）"></textarea>
-          <div class="sec-actions"><button class="ns-btn ns-primary" id="sec-pair-go">处理迁移串</button></div>
-        </div>
-        <div class="sec-sec">
-          <div class="sec-t">恢复码（找回主口令）</div>
-          <div class="sec-hint">生成一段 24 词恢复码，<b>离线抄写保存</b>；忘记主口令时在解锁页用它重置。生成新码会覆盖旧码。</div>
-          <div class="sec-actions"><button class="ns-btn ns-primary" id="sec-rec-go">生成恢复码</button></div>
-          <textarea id="sec-rec-out" class="sec-ta" readonly placeholder="生成的 24 词恢复码会出现在这里（仅此一次显示，请立即抄写）"></textarea>
-          <div id="sec-rec-status" class="sec-hint"></div>
-        </div>
-        <div class="sec-sec">
-          <div class="sec-t">安全日志</div>
-          <div class="sec-actions"><button class="ns-btn" id="sec-audit-go">查看最近记录</button></div>
+          <label class="sec-check"><input id="sec-al-blur" type="checkbox" /> 切到后台或最小化时立即锁定</label>
+        </section>
+        <section class="dlg-pane" data-pane="master" hidden>
+          <div class="pane-head"><div><div class="pane-t">修改主口令</div><div class="pane-d">主口令只用来加密本机密钥库，不会上传。新口令需 <b>≥8 位</b>，含大小写字母、数字和特殊字符。</div></div>
+            <button class="ns-btn ns-primary" id="sec-cm-save">修改</button></div>
+          <div class="fm-grid">
+            <label for="sec-old">旧主口令</label><input id="sec-old" type="password" class="sec-input" autocomplete="current-password" />
+            <label for="sec-new">新主口令</label><input id="sec-new" type="password" class="sec-input" autocomplete="new-password" />
+            <label for="sec-new2">确认</label><input id="sec-new2" type="password" class="sec-input" placeholder="再输入一次" autocomplete="new-password" />
+          </div>
+        </section>
+        <section class="dlg-pane" data-pane="backup" hidden>
+          <div class="pane-head"><div><div class="pane-t">加密备份</div><div class="pane-d">用一个<b>独立的备份口令</b>把全部身份导出为加密串，换机时粘回即可恢复。主口令和备份都丢失将<b>无法找回</b>。</div></div></div>
+          <div class="pane-cols">
+            <div class="pane-card">
+              <div class="card-head"><span class="pane-t">导出</span><button class="ns-btn" id="sec-exp-copy">复制</button><button class="ns-btn ns-primary" id="sec-exp-go">导出</button></div>
+              <input id="sec-exp-pw" type="password" class="sec-input" placeholder="设置备份口令（请另行牢记）" autocomplete="new-password" />
+              <textarea id="sec-exp-out" class="sec-ta" readonly placeholder="导出的备份串会出现在这里"></textarea>
+            </div>
+            <div class="pane-card">
+              <div class="card-head"><span class="pane-t">导入</span><button class="ns-btn ns-primary" id="sec-imp-go">导入</button></div>
+              <input id="sec-imp-pw" type="password" class="sec-input" placeholder="该备份的口令" autocomplete="off" />
+              <textarea id="sec-imp-in" class="sec-ta" placeholder="粘贴备份串"></textarea>
+            </div>
+          </div>
+        </section>
+        <section class="dlg-pane" data-pane="recovery" hidden>
+          <div class="pane-head"><div><div class="pane-t">恢复码</div><div class="pane-d">生成一段 24 词恢复码并<b>离线抄写保存</b>，忘记主口令时在解锁页用它重置。生成新码会使旧码失效。</div></div>
+            <button class="ns-btn ns-primary" id="sec-rec-go">生成恢复码</button></div>
+          <textarea id="sec-rec-out" class="sec-ta" readonly placeholder="生成的 24 词恢复码会出现在这里（只显示这一次，请立即抄写）"></textarea>
+          <div id="sec-rec-status" class="pane-d"></div>
+        </section>
+        <section class="dlg-pane" data-pane="audit" hidden>
+          <div class="pane-head"><div><div class="pane-t">安全日志</div><div class="pane-d">本机最近的解锁、导出、迁移、吊销等敏感操作记录。</div></div>
+            <button class="ns-btn" id="sec-audit-go">刷新</button></div>
           <div id="sec-audit-out" class="sec-audit"></div>
-        </div>
-        <div class="sec-msg" id="sec-msg"></div>
+        </section>
       </div>
+      <div class="dlg-foot"><div class="sec-msg" id="sec-msg"></div><button class="ns-btn" data-close="sec-modal">完成</button></div>
+    </div>
+  </div>
+  <!-- 我的设备 -->
+  <div class="sec-overlay" id="dev-modal">
+    <div class="dlg">
+      <div class="dlg-head"><span class="ico" data-ico="device"></span><span class="dlg-title">我的设备</span><span class="dlg-sub" id="dev-sub">每台设备独立密钥，可单独吊销</span><button class="sec-x" id="dev-close" title="关闭"><span class="ico" data-ico="close"></span></button></div>
+      <div class="dlg-main">
+        <nav class="dlg-nav">
+          <button class="on" data-pane="list"><span data-ico="device"></span>设备列表</button>
+          <button data-pane="freeze"><span data-ico="lock"></span>紧急冻结</button>
+          <button data-pane="grant"><span data-ico="plus"></span>授权新设备</button>
+        </nav>
+        <section class="dlg-pane" data-pane="list">
+          <div class="pane-head"><div><div class="pane-t">设备列表</div><div class="pane-d" id="sec-dev-hint">每台设备有自己的设备密钥。丢了一台只需吊销它，账号和其它设备不受影响。</div></div>
+            <button class="ns-btn" id="sec-dev-refresh">刷新</button></div>
+          <div class="dev-list" id="sec-dev-list"></div>
+        </section>
+        <section class="dlg-pane" data-pane="freeze" hidden>
+          <div class="pane-head"><div><div class="pane-t">紧急冻结</div><div class="pane-d">手边没有管理设备时，用<b>登录密码</b>让家节点冻结设备。在设备列表里点「冻结」只冻结那一台；「冻结全部」之后需要用持有账号私钥的设备或备份串重新登录。</div></div>
+            <button class="ns-btn dev-danger-btn" id="sec-frz-all">冻结全部</button></div>
+          <div class="fm-grid">
+            <label for="sec-frz-pw">登录密码</label><input id="sec-frz-pw" type="password" class="sec-input" placeholder="家节点上的登录密码" autocomplete="off" />
+          </div>
+        </section>
+        <section class="dlg-pane" data-pane="grant" hidden>
+          <div class="pane-head"><div><div class="pane-t">授权新设备</div><div class="pane-d">新设备在登录页选「迁移串」生成一段文字，粘贴到这里，核对后为它签发设备证书（可选同时交出账号私钥）。只有<b>管理设备</b>能处理。</div></div>
+            <button class="ns-btn ns-primary" id="sec-pair-go">处理</button></div>
+          <textarea id="sec-pair-in" class="sec-ta" spellcheck="false" placeholder="粘贴新设备上的迁移串（nmpair1:…）"></textarea>
+        </section>
+      </div>
+      <div class="dlg-foot"><div class="sec-msg" id="dev-msg"></div><button class="ns-btn" data-close="dev-modal">完成</button></div>
     </div>
   </div>
   <div class="sec-overlay" id="pair-modal">
@@ -99,6 +138,7 @@
         <p class="pair-desc" id="pair-desc"></p>
         <div class="sec-hint">只有你本人正在那台设备上操作时才继续。请输入那台设备上显示的 6 位核对码；陌生请求请直接拒绝。</div>
         <input id="pair-sas" class="sec-input pair-sas" inputmode="numeric" maxlength="7" placeholder="000 000" autocomplete="off" />
+        <label class="sec-check" id="pair-admin-row" hidden><input id="pair-admin" type="checkbox" /> 同时设为管理设备（交出账号私钥，那台设备也能授权和吊销其它设备）</label>
         <div class="sec-actions"><button class="ns-btn ns-primary" id="pair-allow">允许</button><button class="ns-btn" id="pair-deny">拒绝</button></div>
         <div class="sec-msg" id="pair-msg"></div>
       </div>
@@ -383,5 +423,6 @@
 <script src="js/main.js" defer></script>
 <script src="js/auth.js" defer></script>
 <script src="js/pairing.js" defer></script>
+<script src="js/devices.js" defer></script>
 </body>
 </html>

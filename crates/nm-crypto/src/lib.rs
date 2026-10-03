@@ -6,8 +6,9 @@
 //! 「entity_id == 连接公钥」。本模块聚焦 Grant：谁(issuer)授权谁(audience)在
 //! `expires` 前对 `resource` 执行 `action`，可校验、可过期。
 
-use nm_proto::Grant;
-use iroh::{PublicKey, SecretKey, Signature};
+use nm_proto::{DeviceCert, DeviceRevoke, Grant};
+pub use iroh::SecretKey;
+use iroh::{PublicKey, Signature};
 
 /// 逐 gram 完整性校验：blake3(payload)。
 pub fn content_hash(bytes: &[u8]) -> [u8; 32] {
@@ -118,6 +119,98 @@ pub fn verify_bytes(pubkey: &[u8; 32], msg: &[u8], sig: &[u8; 64]) -> Result<()>
         .map_err(|_| CryptoError::BadSignature)
 }
 
+// ── 多设备证书 / 吊销 ──
+
+pub const DEVICE_ROLE_ADMIN: &str = "admin";
+pub const DEVICE_ROLE_MEMBER: &str = "member";
+
+fn push_field(b: &mut Vec<u8>, f: &[u8]) {
+    b.extend_from_slice(&(f.len() as u32).to_be_bytes());
+    b.extend_from_slice(f);
+}
+
+/// 设备证书签名字节：域分隔前缀 + 各字段长度前缀拼接（不含 sig）。
+pub fn device_cert_bytes(c: &DeviceCert) -> Vec<u8> {
+    let mut b = b"nmspace-devcert-v1".to_vec();
+    push_field(&mut b, &c.account);
+    push_field(&mut b, &c.device);
+    push_field(&mut b, c.label.as_bytes());
+    push_field(&mut b, c.role.as_bytes());
+    b.extend_from_slice(&c.issued_at.to_be_bytes());
+    b
+}
+
+/// 吊销记录签名字节（不含 sig）。
+pub fn device_revoke_bytes(r: &DeviceRevoke) -> Vec<u8> {
+    let mut b = b"nmspace-devrevoke-v1".to_vec();
+    push_field(&mut b, &r.account);
+    push_field(&mut b, &r.device);
+    b.extend_from_slice(&r.revoked_at.to_be_bytes());
+    push_field(&mut b, r.reason.as_bytes());
+    push_field(&mut b, &r.by_node);
+    b
+}
+
+/// 账号私钥给设备签证书。
+pub fn sign_device_cert(account_sk: &SecretKey, device: [u8; 32], label: &str, role: &str, issued_at: i64) -> DeviceCert {
+    let mut c = DeviceCert {
+        account: account_sk.public().as_bytes().to_vec(),
+        device: device.to_vec(),
+        label: label.to_string(),
+        role: role.to_string(),
+        issued_at,
+        sig: Vec::new(),
+    };
+    c.sig = account_sk.sign(&device_cert_bytes(&c)).to_bytes().to_vec();
+    c
+}
+
+/// 校验证书：字段合法且由 `account` 签名。
+pub fn verify_device_cert(c: &DeviceCert) -> Result<()> {
+    if c.device.len() != 32 || c.account.len() != 32 || c.device == c.account {
+        return Err(CryptoError::BadBytes);
+    }
+    if c.role != DEVICE_ROLE_ADMIN && c.role != DEVICE_ROLE_MEMBER {
+        return Err(CryptoError::Scope);
+    }
+    let pk = pubkey_from(&c.account)?;
+    pk.verify(&device_cert_bytes(c), &signature_from(&c.sig)?)
+        .map_err(|_| CryptoError::BadSignature)
+}
+
+/// 签发吊销。`by_node` 为 None 时 `signer_sk` 必须是账号私钥；为 Some 时是代为冻结的家节点私钥。
+pub fn sign_device_revoke(
+    signer_sk: &SecretKey,
+    account: [u8; 32],
+    device: [u8; 32],
+    revoked_at: i64,
+    reason: &str,
+    by_node: bool,
+) -> DeviceRevoke {
+    let mut r = DeviceRevoke {
+        account: account.to_vec(),
+        device: device.to_vec(),
+        revoked_at,
+        reason: reason.to_string(),
+        by_node: if by_node { signer_sk.public().as_bytes().to_vec() } else { Vec::new() },
+        sig: Vec::new(),
+    };
+    r.sig = signer_sk.sign(&device_revoke_bytes(&r)).to_bytes().to_vec();
+    r
+}
+
+/// 校验吊销签名：by_node 为空时验账号签名，否则验 by_node 签名。
+/// by_node 是否真是该账号的家节点由调用方判断。
+pub fn verify_device_revoke(r: &DeviceRevoke) -> Result<()> {
+    if r.device.len() != 32 || r.account.len() != 32 {
+        return Err(CryptoError::BadBytes);
+    }
+    let signer = if r.by_node.is_empty() { &r.account } else { &r.by_node };
+    let pk = pubkey_from(signer)?;
+    pk.verify(&device_revoke_bytes(r), &signature_from(&r.sig)?)
+        .map_err(|_| CryptoError::BadSignature)
+}
+
 fn pubkey_from(b: &[u8]) -> Result<PublicKey> {
     let arr: [u8; 32] = b.try_into().map_err(|_| CryptoError::BadBytes)?;
     PublicKey::from_bytes(&arr).map_err(|_| CryptoError::BadBytes)
@@ -160,6 +253,30 @@ mod tests {
         let mut tampered = g.clone();
         tampered.action = "evil".into();
         assert!(matches!(verify_grant(&tampered, 10), Err(CryptoError::BadSignature)));
+    }
+
+    #[test]
+    fn device_cert_and_revoke() {
+        let ak = SecretKey::from_bytes(&[11u8; 32]);
+        let dk = *SecretKey::from_bytes(&[12u8; 32]).public().as_bytes();
+        let c = sign_device_cert(&ak, dk, "MacBook", DEVICE_ROLE_MEMBER, 1000);
+        assert!(verify_device_cert(&c).is_ok());
+        let mut bad = c.clone();
+        bad.role = DEVICE_ROLE_ADMIN.into();
+        assert!(matches!(verify_device_cert(&bad), Err(CryptoError::BadSignature)));
+        let mut wrong_role = c.clone();
+        wrong_role.role = "root".into();
+        assert!(verify_device_cert(&wrong_role).is_err());
+
+        let account = *ak.public().as_bytes();
+        let r = sign_device_revoke(&ak, account, dk, 2000, "lost", false);
+        assert!(verify_device_revoke(&r).is_ok());
+        let node = SecretKey::from_bytes(&[13u8; 32]);
+        let f = sign_device_revoke(&node, account, dk, 2000, "freeze", true);
+        assert!(verify_device_revoke(&f).is_ok());
+        let mut forged = f.clone();
+        forged.by_node = Vec::new();
+        assert!(verify_device_revoke(&forged).is_err());
     }
 
     #[test]

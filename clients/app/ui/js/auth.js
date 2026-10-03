@@ -180,6 +180,7 @@ function openSecModal() {
   });
   document.getElementById("sec-audit-out").innerHTML = "";
   secMsg("");
+  dlgShowPane(document.querySelector("#sec-modal .dlg"), "lock");
   // 恢复码状态
   NM.inv("auth_status").then((st) => {
     const el = document.getElementById("sec-rec-status");
@@ -239,6 +240,24 @@ async function doViewAudit() {
     }).join("");
   } catch (e) { secMsg("读取失败：" + (e && e.message ? e.message : e)); }
 }
+function dlgShowPane(dlg, name) {
+  dlg.querySelectorAll(".dlg-nav button[data-pane]").forEach((b) => b.classList.toggle("on", b.dataset.pane === name));
+  dlg.querySelectorAll(".dlg-pane").forEach((p) => { p.hidden = p.dataset.pane !== name; });
+}
+window.dlgShowPane = dlgShowPane;
+document.addEventListener("click", (e) => {
+  const tab = e.target.closest(".dlg-nav button[data-pane]");
+  if (tab) { dlgShowPane(tab.closest(".dlg"), tab.dataset.pane); return; }
+  const shut = e.target.closest("[data-close]");
+  if (shut) { const m = document.getElementById(shut.dataset.close); if (m) m.classList.remove("on"); }
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  const open = [...document.querySelectorAll(".sec-overlay.on")].filter((m) => m.querySelector(".dlg"));
+  const top = open[open.length - 1];
+  if (top) { if (top.dataset.dynamic) top.remove(); else top.classList.remove("on"); }
+});
+
 function initSec() {
   const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener("click", fn); };
   on("sec-close", closeSecModal);
@@ -248,6 +267,8 @@ function initSec() {
   on("sec-imp-go", doImport);
   on("sec-rec-go", doGenerateRecovery);
   on("sec-audit-go", doViewAudit);
+  const auditTab = document.querySelector('#sec-modal .dlg-nav button[data-pane="audit"]');
+  if (auditTab) auditTab.addEventListener("click", doViewAudit);
   on("sec-exp-copy", async () => {
     const v = document.getElementById("sec-exp-out").value;
     if (!v) return;

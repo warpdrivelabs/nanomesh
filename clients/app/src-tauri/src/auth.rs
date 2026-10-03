@@ -99,6 +99,12 @@ fn hexstr(b: &[u8]) -> String {
 pub fn encrypt_seed(vk: &[u8; 32], seed: &[u8; 32]) -> Result<Vec<u8>, String> {
     seal(vk, seed)
 }
+pub fn encrypt_blob(vk: &[u8; 32], pt: &[u8]) -> Result<Vec<u8>, String> {
+    seal(vk, pt)
+}
+pub fn decrypt_blob(vk: &[u8; 32], data: &[u8]) -> Result<Vec<u8>, String> {
+    open(vk, data)
+}
 pub fn decrypt_seed(vk: &[u8; 32], data: &[u8]) -> Result<[u8; 32], String> {
     let pt = open(vk, data)?;
     if pt.len() != 32 {

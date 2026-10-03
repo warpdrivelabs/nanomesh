@@ -6,7 +6,7 @@
 //!   前缀 range 扫描即可取某实体的全部离线消息，`gram_id` 单调保证 FIFO。
 //! - `ENTITIES`：key = `entity_id(32)`，value = prost 编码的 `Entity`（目录持久化）。
 
-use nm_proto::{BlobData, Entity, Gram, Group, NameRecord};
+use nm_proto::{BlobData, DeviceInfo, DeviceRevoke, Entity, Gram, Group, NameRecord};
 use prost::Message;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
@@ -25,6 +25,10 @@ const NAMES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("names");
 const NAME_SECRETS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("name_secrets");
 // 本节点拥有的域名（N1，TOFU）：key = 域名字节，value = 占位（申请时间戳字符串）。
 const DOMAINS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("domains");
+/// 已登记设备：key = 设备公钥(32)，value = DeviceInfo 编码（证书 + 改名 + 最近在线）。
+const DEVICES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("devices");
+/// 已吊销设备：key = 设备公钥(32)，value = DeviceRevoke 编码。只增不删。
+const REVOKED: TableDefinition<&[u8], &[u8]> = TableDefinition::new("revoked");
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -61,6 +65,8 @@ impl RedbStore {
             wtx.open_table(NAMES).map_err(db_err)?;
             wtx.open_table(NAME_SECRETS).map_err(db_err)?;
             wtx.open_table(DOMAINS).map_err(db_err)?;
+            wtx.open_table(DEVICES).map_err(db_err)?;
+            wtx.open_table(REVOKED).map_err(db_err)?;
         }
         wtx.commit().map_err(db_err)?;
         Ok(Self { db })
@@ -117,6 +123,73 @@ impl RedbStore {
 
     pub fn inbox_len(&self, receiver: &[u8]) -> Result<usize> {
         Ok(self.peek_inbox(receiver)?.len())
+    }
+
+    /// 删除所有收件人中 `timestamp_ms` 早于 `before_ms` 的离线消息，返回删除条数。
+    pub fn prune_inbox(&self, before_ms: u64) -> Result<usize> {
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        let mut n = 0usize;
+        {
+            let mut t = wtx.open_table(INBOX).map_err(db_err)?;
+            for item in t
+                .extract_if(|_, v| Gram::decode(v).map(|g| g.timestamp_ms < before_ms).unwrap_or(true))
+                .map_err(db_err)?
+            {
+                item.map_err(db_err)?;
+                n += 1;
+            }
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(n)
+    }
+
+    // ---- 多设备 ----
+
+    pub fn put_device(&self, info: &DeviceInfo) -> Result<()> {
+        let Some(cert) = info.cert.as_ref() else {
+            return Err(StoreError::Db("device info without cert".into()));
+        };
+        let val = info.encode_to_vec();
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        {
+            let mut t = wtx.open_table(DEVICES).map_err(db_err)?;
+            t.insert(cert.device.as_slice(), val.as_slice()).map_err(db_err)?;
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+
+    pub fn all_devices(&self) -> Result<Vec<DeviceInfo>> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(DEVICES).map_err(db_err)?;
+        let mut out = Vec::new();
+        for item in t.iter().map_err(db_err)? {
+            let (_k, v) = item.map_err(db_err)?;
+            out.push(DeviceInfo::decode(v.value()).map_err(|e| StoreError::Decode(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
+    pub fn put_revoke(&self, r: &DeviceRevoke) -> Result<()> {
+        let val = r.encode_to_vec();
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        {
+            let mut t = wtx.open_table(REVOKED).map_err(db_err)?;
+            t.insert(r.device.as_slice(), val.as_slice()).map_err(db_err)?;
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+
+    pub fn all_revokes(&self) -> Result<Vec<DeviceRevoke>> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(REVOKED).map_err(db_err)?;
+        let mut out = Vec::new();
+        for item in t.iter().map_err(db_err)? {
+            let (_k, v) = item.map_err(db_err)?;
+            out.push(DeviceRevoke::decode(v.value()).map_err(|e| StoreError::Decode(e.to_string()))?);
+        }
+        Ok(out)
     }
 
     // ---- 目录持久化 ----
@@ -456,6 +529,39 @@ mod tests {
         assert_eq!(s.inbox_len(&r).unwrap(), 0);
         // 未触及 other。
         assert_eq!(s.inbox_len(&other).unwrap(), 1);
+    }
+
+    #[test]
+    fn inbox_prune_by_age() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = RedbStore::open(dir.path().join("t.redb")).unwrap();
+        let r = [7u8; 32];
+        let mut old = msg(r, 1, "old");
+        old.timestamp_ms = 1_000;
+        s.push_inbox(&r, &old).unwrap();
+        s.push_inbox(&r, &msg(r, 2, "new")).unwrap();
+        assert_eq!(s.prune_inbox(10_000).unwrap(), 1);
+        let left = s.peek_inbox(&r).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].gram_id, 2);
+    }
+
+    #[test]
+    fn devices_and_revokes_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.redb");
+        let cert = nm_proto::DeviceCert { account: vec![1; 32], device: vec![2; 32], role: "member".into(), ..Default::default() };
+        {
+            let s = RedbStore::open(&path).unwrap();
+            s.put_device(&DeviceInfo { cert: Some(cert.clone()), label: "a".into(), ..Default::default() }).unwrap();
+            s.put_device(&DeviceInfo { cert: Some(cert.clone()), label: "b".into(), ..Default::default() }).unwrap();
+            s.put_revoke(&DeviceRevoke { account: vec![1; 32], device: vec![2; 32], ..Default::default() }).unwrap();
+        }
+        let s = RedbStore::open(&path).unwrap();
+        let devs = s.all_devices().unwrap();
+        assert_eq!(devs.len(), 1);
+        assert_eq!(devs[0].label, "b");
+        assert_eq!(s.all_revokes().unwrap().len(), 1);
     }
 
     #[test]

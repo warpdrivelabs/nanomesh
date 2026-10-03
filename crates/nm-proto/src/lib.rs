@@ -15,7 +15,7 @@ pub mod pb {
 pub use pb::{
     Any, BlobData, BlobPut, BlobRef, Capability, Channel, ChannelBackfillReq, ChannelGram,
     ChannelList, ChannelLog, ChannelMsg, ChannelOp, ChannelPub, Command, CommandResult,
-    DirectoryQuery, Entity, EntityList, Grant, Gram, FedSyncReq, FedSyncResp, GramKind, Group,
+    DeviceCert, DeviceInfo, DeviceList, DeviceRevoke, DirectoryQuery, Entity, EntityList, Grant, Gram, FedSyncReq, FedSyncResp, GramKind, Group,
     GroupGossip, GroupList, GroupOp, JobSpec, NameList, NameOp, NameQuery, NameRecord,
 };
 

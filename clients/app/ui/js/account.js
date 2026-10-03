@@ -16,6 +16,8 @@
     not_key_owner: "本机没有该账号的私钥。若在其他设备注册过，请先导入那台设备导出的备份串。",
     no_password: "该账号未设置密码",
     no_store: "家节点暂时无法保存口令",
+    device_revoked: "本设备已被吊销。若这是你自己的设备，请点「换了设备？」重新授权本机。",
+    not_admin_device: "本机是普通设备（没有账号私钥），请在管理设备上操作。",
   };
 
   function map() {
@@ -48,6 +50,8 @@
     if (msg === "name_taken" || msg.indexOf("已被占用") >= 0 || msg.indexOf("该账号已注册") >= 0) return "name_taken";
     if (msg === "bad_password" || msg.indexOf("密码不正确") >= 0) return "bad_password";
     if (msg === "domain_not_owned" || msg.indexOf("不拥有该域名") >= 0) return "domain_not_owned";
+    if (msg.indexOf("device_revoked") >= 0) return "device_revoked";
+    if (msg.indexOf("not_admin_device") >= 0) return "not_admin_device";
     if (msg.indexOf("域名未登记") >= 0) return "domain_unknown";
     if (msg.indexOf("域名已停用") >= 0) return "domain_disabled";
     return msg;
@@ -143,12 +147,13 @@
       pairRid = "";
       document.getElementById("acct-ticket-out").value = "";
       saveKey(ev.name, ev.user);
+      const what = ev.admin ? "本机已获授权（管理设备）" : "本机已获授权（普通设备）";
       if (document.getElementById("acct-password").value && mode === "login") {
-        pairStatus("私钥已迁移到本机，正在登录…", "");
+        pairStatus(what + "，正在登录…", "");
         showImport(false);
         await submit();
       } else {
-        pairStatus("私钥已迁移到本机。请输入密码登录；忘记密码可点「忘记密码」重新设置。", "");
+        pairStatus(what + "。请输入密码登录。", "");
       }
     } else if (ev.type === "denied") {
       pairRid = "";
@@ -347,24 +352,36 @@
       if (window.toast) toast("当前账号不是从登录页进入的，无法修改登录密码");
       return;
     }
+    const ico = (n) => (typeof nmIcon === "function" ? nmIcon(n) : "");
     const old = document.createElement("div");
     old.className = "sec-overlay on";
+    old.dataset.dynamic = "1";
     old.innerHTML = `
-      <div class="sec-box">
-        <div class="sec-head">修改登录密码<button class="sec-x" type="button">${typeof nmIcon === "function" ? nmIcon("close") : "×"}</button></div>
-        <div class="sec-body">
-          <p class="acct-hint" style="color:var(--ink2)">账号 ${escapeHtml(last.local)}@${escapeHtml(last.domain)}。新密码只以哈希写在家节点。</p>
-          <div class="login-form__item"><label>旧密码</label><input id="ap-old" type="password" /></div>
-          <div class="login-form__item"><label>新密码</label><input id="ap-new" type="password" placeholder="至少 8 位" /></div>
-          <div class="login-form__item"><label>确认新密码</label><input id="ap-new2" type="password" /></div>
-          <p class="error" id="ap-err"></p>
-          <button class="login-submit" id="ap-save" type="button">保存</button>
+      <div class="dlg">
+        <div class="dlg-head"><span class="ico">${ico("lock")}</span><span class="dlg-title">修改登录密码</span><span class="dlg-sub">用于在家节点登录</span><button class="sec-x" type="button" title="关闭">${ico("close") || "×"}</button></div>
+        <div class="dlg-main">
+          <aside class="dlg-aside">
+            <span class="aside-ico">${ico("lock")}</span>
+            <div class="aside-t">${escapeHtml(last.local)}@${escapeHtml(last.domain)}</div>
+            <div class="aside-d">新密码只以 <b>Argon2 哈希</b>保存在家节点，本机不留存。修改后其它设备下次登录需用新密码。</div>
+          </aside>
+          <div class="dlg-form">
+            <div class="fm-grid">
+              <label for="ap-old">旧密码</label><input id="ap-old" class="sec-input" type="password" autocomplete="current-password" />
+              <label for="ap-new">新密码</label><input id="ap-new" class="sec-input" type="password" placeholder="至少 8 位" autocomplete="new-password" />
+              <label for="ap-new2">确认</label><input id="ap-new2" class="sec-input" type="password" placeholder="再输入一次" autocomplete="new-password" />
+            </div>
+          </div>
         </div>
+        <div class="dlg-foot"><div class="sec-msg" id="ap-err"></div><button class="ns-btn" type="button" id="ap-cancel">取消</button><button class="ns-btn ns-primary" type="button" id="ap-save">保存</button></div>
       </div>`;
     document.body.appendChild(old);
     const close = () => old.remove();
     old.querySelector(".sec-x").addEventListener("click", close);
+    old.querySelector("#ap-cancel").addEventListener("click", close);
     old.addEventListener("click", (ev) => { if (ev.target === old) close(); });
+    old.querySelectorAll("input").forEach((i) => i.addEventListener("keydown", (ev) => { if (ev.key === "Enter") old.querySelector("#ap-save").click(); }));
+    setTimeout(() => old.querySelector("#ap-old").focus(), 30);
     old.querySelector("#ap-save").addEventListener("click", async () => {
       const a = old.querySelector("#ap-old").value;
       const b = old.querySelector("#ap-new").value;

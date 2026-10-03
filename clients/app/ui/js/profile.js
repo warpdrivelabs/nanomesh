@@ -192,27 +192,33 @@
     m = document.createElement("div");
     m.className = "sec-overlay"; m.id = "profile-modal";
     m.innerHTML = `
-      <div class="sec-box">
-        <div class="sec-head"><span class="ico">${nmIcon("contacts")}</span>编辑资料 <button class="sec-x" id="pf-close" title="关闭">${nmIcon("close")}</button></div>
-        <div class="sec-body"><div class="sec-sec">
-          <div class="sec-row" style="align-items:center">
-            <label>头像</label>
-            <div style="display:flex;align-items:center;gap:10px">
-              <span id="pf-av-prev"></span>
-              <button class="ns-btn" id="pf-av-pick">选择图片</button>
+      <div class="dlg">
+        <div class="dlg-head"><span class="ico">${nmIcon("contacts")}</span><span class="dlg-title">编辑资料</span><span class="dlg-sub">保存后同步给联系人</span><button class="sec-x" id="pf-close" title="关闭">${nmIcon("close")}</button></div>
+        <div class="dlg-main">
+          <aside class="dlg-aside">
+            <span id="pf-av-prev" class="pf-av"></span>
+            <div class="aside-ops">
+              <button class="ns-btn" id="pf-av-pick">更换头像</button>
               <button class="ns-btn" id="pf-av-clear">移除</button>
-              <input type="file" id="pf-av-file" accept="image/*" style="display:none">
+            </div>
+            <input type="file" id="pf-av-file" accept="image/*" style="display:none">
+            <div class="aside-d">头像存放在你的家节点，资料里只带内容哈希，其他节点按需拉取并缓存。</div>
+          </aside>
+          <div class="dlg-form">
+            <div class="fm-grid">
+              <label for="pf-name">昵称</label><input id="pf-name" class="sec-input" placeholder="显示名">
+              <label for="pf-status">状态</label>
+              <div class="fm-pair">
+                <select id="pf-status" class="sec-input">${STATUS_OPTS.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>
+                <input id="pf-stext" class="sec-input" placeholder="状态文本，如：在开会">
+              </div>
+              <label for="pf-bio">简介</label><input id="pf-bio" class="sec-input" placeholder="一句话介绍自己">
+              <label for="pf-links">链接</label><input id="pf-links" class="sec-input" placeholder="主页 / 社交，逗号分隔">
+              <label for="pf-locale">语言</label><input id="pf-locale" class="sec-input" placeholder="如 zh-CN">
             </div>
           </div>
-          <div class="sec-row"><label>昵称</label><input id="pf-name" class="sec-input" placeholder="显示名"></div>
-          <div class="sec-row"><label>状态</label><select id="pf-status" class="sec-input">${STATUS_OPTS.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select></div>
-          <div class="sec-row"><label>状态文本</label><input id="pf-stext" class="sec-input" placeholder="如：在开会 / 摸鱼中"></div>
-          <div class="sec-row"><label>简介</label><input id="pf-bio" class="sec-input" placeholder="一句话介绍自己"></div>
-          <div class="sec-row"><label>链接</label><input id="pf-links" class="sec-input" placeholder="主页 / 社交，逗号分隔"></div>
-          <div class="sec-row"><label>语言</label><input id="pf-locale" class="sec-input" placeholder="如 zh-CN"></div>
-          <div class="sec-hint">头像以<b>内容寻址 blob</b>存到你的家节点，档案只带 <code>b3:&lt;hash&gt;</code>（不内联，联邦按需拉取+缓存）。其余资料经目录 <b>LWW</b> 收敛后其他人可见。</div>
-          <div class="sec-actions"><button class="ns-btn" id="pf-cancel">取消</button><button class="ns-btn ns-primary" id="pf-save">保存并发布</button></div>
-        </div></div>
+        </div>
+        <div class="dlg-foot"><div class="sec-msg"></div><button class="ns-btn" id="pf-cancel">取消</button><button class="ns-btn ns-primary" id="pf-save">保存并发布</button></div>
       </div>`;
     document.body.appendChild(m);
     const close = () => m.classList.remove("on");
@@ -235,7 +241,12 @@
     return m;
   }
 
-  function renderPreview(av) { const box = document.getElementById("pf-av-prev"); if (box) box.innerHTML = avatarHtml(av, "?", 48); }
+  function renderPreview(av) {
+    const box = document.getElementById("pf-av-prev");
+    if (!box) return;
+    const name = (document.getElementById("pf-name") || {}).value || "?";
+    box.innerHTML = avatarHtml(av, name.slice(0, 1), 96);
+  }
 
   async function onSave() {
     const pk = window.Identity && Identity.current();
