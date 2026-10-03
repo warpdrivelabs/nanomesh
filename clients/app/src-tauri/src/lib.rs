@@ -1341,7 +1341,7 @@ fn registry_phrase(err: &str) -> String {
     } else if err.contains("域名已停用") {
         "这个域名已停用。".into()
     } else if err == "domain_not_owned" {
-        "域名已登记，家节点尚未同步，请稍后再试。".into()
+        "域名已登记，Home Node 尚未同步，请稍后再试。".into()
     } else {
         err.to_string()
     }

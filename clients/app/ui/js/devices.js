@@ -35,7 +35,7 @@
     if (d.revoked) tags.push('<span class="dev-tag off">已吊销</span>');
     else if (d.online) tags.push('<span class="dev-tag on">在线</span>');
     const sub = d.revoked
-      ? "吊销于 " + fmtTime(d.revoked.at) + (d.revoked.byNode ? "（家节点冻结）" : "") +
+      ? "吊销于 " + fmtTime(d.revoked.at) + (d.revoked.byNode ? "（Home Node 冻结）" : "") +
         (d.revoked.reason ? " · " + escapeHtml(REASON[d.revoked.reason] || d.revoked.reason) : "")
       : "授权于 " + fmtTime(d.issuedAt) + " · 最近在线 " + (d.online ? "现在" : fmtTime(d.lastSeen));
     const ops = [];
@@ -73,7 +73,7 @@
           : "本机是普通设备，只持有自己的设备密钥。吊销其它设备需在管理设备上操作；紧急时可用下方登录密码冻结。";
       }
       if (!self.multiDevice) {
-        box.innerHTML = '<div class="au-empty">家节点不支持多设备，当前直接使用账号私钥连接。</div>';
+        box.innerHTML = '<div class="au-empty">Home Node 不支持多设备，当前直接使用账号私钥连接。</div>';
         return;
       }
       const list = await NM.inv("device_list");
@@ -176,7 +176,7 @@
       return;
     }
     if (ev.event === "revoked") {
-      if (window.toast) toast(ev.by_node ? "家节点已冻结一台设备" : "一台设备已被吊销");
+      if (window.toast) toast(ev.by_node ? "Home Node 已冻结一台设备" : "一台设备已被吊销");
       if (el("dev-modal").classList.contains("on")) refresh();
     }
   }

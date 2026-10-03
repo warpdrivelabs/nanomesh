@@ -116,10 +116,10 @@
           <div class="dev-list" id="sec-dev-list"></div>
         </section>
         <section class="dlg-pane" data-pane="freeze" hidden>
-          <div class="pane-head"><div><div class="pane-t">紧急冻结</div><div class="pane-d">手边没有管理设备时，用<b>登录密码</b>让家节点冻结设备。在设备列表里点「冻结」只冻结那一台；「冻结全部」之后需要用持有账号私钥的设备或备份串重新登录。</div></div>
+          <div class="pane-head"><div><div class="pane-t">紧急冻结</div><div class="pane-d">手边没有管理设备时，用<b>登录密码</b>让 Home Node 冻结设备。在设备列表里点「冻结」只冻结那一台；「冻结全部」之后需要用持有账号私钥的设备或备份串重新登录。</div></div>
             <button class="ns-btn dev-danger-btn" id="sec-frz-all">冻结全部</button></div>
           <div class="fm-grid">
-            <label for="sec-frz-pw">登录密码</label><input id="sec-frz-pw" type="password" class="sec-input" placeholder="家节点上的登录密码" autocomplete="off" />
+            <label for="sec-frz-pw">登录密码</label><input id="sec-frz-pw" type="password" class="sec-input" placeholder="Home Node 上的登录密码" autocomplete="off" />
           </div>
         </section>
         <section class="dlg-pane" data-pane="grant" hidden>
@@ -191,7 +191,7 @@
             <img src="nanomesh-logo.png" alt="" class="about-logo" />
             <div class="about-name">NANO MESH</div>
             <div class="about-ver" id="tp-ver"></div>
-            <div class="pane-d">去中心化的即时通讯与协作网络。<br />每台设备独立密钥，消息经家节点与联邦转发。</div>
+            <div class="pane-d">去中心化的即时通讯与协作网络。<br />每台设备独立密钥，消息经 Home Node 与联邦转发。</div>
           </div>
         </section>
       </div>
@@ -364,7 +364,7 @@
         <div class="form-card">
           <div class="form-card__head">
             <h2 class="form-title" id="acct-title">登录</h2>
-            <p class="form-subtitle" id="acct-sub">使用用户名@域名和密码登录家节点</p>
+            <p class="form-subtitle" id="acct-sub">使用用户名@域名和密码登录 Home Node</p>
           </div>
           <form id="account-form" class="login-form" autocomplete="off">
             <div class="login-form__item" id="acct-nick-row" style="display:none">

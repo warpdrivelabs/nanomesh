@@ -158,7 +158,7 @@ pub async fn dial_account(
             match dial(dev.seed, mode, node, relay_urls.clone(), pkarr_url.clone(), dns_origin.clone(), Some(&dev.cert)).await {
                 Err(e) if e.contains("unknown method") => match &ak {
                     Some(seed) => dial(*seed, mode, node, relay_urls, pkarr_url, dns_origin, None).await,
-                    None => Err("家节点版本过旧，暂不支持用设备密钥登录".into()),
+                    None => Err("Home Node 版本过旧，暂不支持用设备密钥登录".into()),
                 },
                 Err(e) if e.contains("device_revoked") => {
                     remove(app, account);

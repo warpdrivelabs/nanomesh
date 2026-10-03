@@ -202,7 +202,7 @@
               <button class="ns-btn" id="pf-av-clear">移除</button>
             </div>
             <input type="file" id="pf-av-file" accept="image/*" style="display:none">
-            <div class="aside-d">头像存放在你的家节点，资料里只带内容哈希，其他节点按需拉取并缓存。</div>
+            <div class="aside-d">头像存放在你的 Home Node，资料里只带内容哈希，其他节点按需拉取并缓存。</div>
           </aside>
           <div class="dlg-form">
             <div class="fm-grid">

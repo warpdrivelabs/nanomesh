@@ -6,16 +6,16 @@
   let suggestTimer = null;
 
   const MSG = {
-    domain_not_owned: "域名已登记，家节点尚未同步，请稍后再试。",
+    domain_not_owned: "域名已登记，Home Node 尚未同步，请稍后再试。",
     invalid_name: "用户名或域名不合法",
     password_short: "密码至少 8 位",
     name_taken: "这个用户名已经注册。",
-    no_such_user: "家节点上没有这个用户。",
+    no_such_user: "Home Node 上没有这个用户。",
     bad_password: "密码不正确",
     same_password: "新密码不能与旧密码相同",
     not_key_owner: "本机没有该账号的私钥。若在其他设备注册过，请先导入那台设备导出的备份串。",
     no_password: "该账号未设置密码",
-    no_store: "家节点暂时无法保存口令",
+    no_store: "Home Node 暂时无法保存口令",
     device_revoked: "本设备已被吊销。若这是你自己的设备，请点「换了设备？」重新授权本机。",
     not_admin_device: "本机是普通设备（没有账号私钥），请在管理设备上操作。",
   };
@@ -200,10 +200,10 @@
     const reset = next === "reset";
     document.getElementById("acct-title").textContent = reg ? "注册" : reset ? "重置密码" : "登录";
     document.getElementById("acct-sub").textContent = reg
-      ? "在域名对应的家节点上登记名字。口令只以哈希保存在该节点。"
+      ? "在域名对应的 Home Node 上登记名字。口令只以哈希保存在该节点。"
       : reset
         ? "本机持有该账号私钥时，可以设置新密码。"
-        : "使用用户名@域名和密码登录家节点";
+        : "使用用户名@域名和密码登录 Home Node";
     document.getElementById("acct-nick-row").style.display = reg ? "" : "none";
     document.getElementById("acct-pass2-row").style.display = (reg || reset) ? "" : "none";
     document.getElementById("acct-submit").textContent = reg ? "注册" : reset ? "设置新密码" : "登录";
@@ -302,7 +302,7 @@
         document.getElementById("acct-password").value = "";
         document.getElementById("acct-pass2").value = "";
         setMode("login");
-        box.textContent = "新密码已写入家节点，请登录。";
+        box.textContent = "新密码已写入 Home Node，请登录。";
         return;
       }
       let r;
@@ -321,7 +321,7 @@
       const code = codeOf(err);
       if (mode === "login" && code === "no_such_user") {
         const name = fullName();
-        const yes = await ask("家节点上没有用户「" + name + "」。是否现在注册？", "注册");
+        const yes = await ask("Home Node 上没有用户「" + name + "」。是否现在注册？", "注册");
         if (yes) {
           document.getElementById("acct-password").value = "";
           document.getElementById("acct-pass2").value = "";
@@ -358,12 +358,12 @@
     old.dataset.dynamic = "1";
     old.innerHTML = `
       <div class="dlg">
-        <div class="dlg-head"><span class="ico">${ico("lock")}</span><span class="dlg-title">修改登录密码</span><span class="dlg-sub">用于在家节点登录</span><button class="sec-x" type="button" title="关闭">${ico("close") || "×"}</button></div>
+        <div class="dlg-head"><span class="ico">${ico("lock")}</span><span class="dlg-title">修改登录密码</span><span class="dlg-sub">用于在 Home Node 登录</span><button class="sec-x" type="button" title="关闭">${ico("close") || "×"}</button></div>
         <div class="dlg-main">
           <aside class="dlg-aside">
             <span class="aside-ico">${ico("lock")}</span>
             <div class="aside-t">${escapeHtml(last.local)}@${escapeHtml(last.domain)}</div>
-            <div class="aside-d">新密码只以 <b>Argon2 哈希</b>保存在家节点，本机不留存。修改后其它设备下次登录需用新密码。</div>
+            <div class="aside-d">新密码只以 <b>Argon2 哈希</b>保存在 Home Node，本机不留存。修改后其它设备下次登录需用新密码。</div>
           </aside>
           <div class="dlg-form">
             <div class="fm-grid">

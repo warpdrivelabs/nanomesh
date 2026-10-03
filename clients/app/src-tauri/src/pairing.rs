@@ -99,7 +99,7 @@ async fn start_new(
             let body = json!({ "local": local, "domain": domain, "password": pw }).to_string();
             let got = session.name_account("name.login", &body).await.map_err(|e| registry_phrase(&e.to_string()))?;
             let got = got.trim().to_ascii_lowercase();
-            let pk = pair::unhex32(&got).map_err(|_| "家节点返回的公钥无效".to_string())?;
+            let pk = pair::unhex32(&got).map_err(|_| "Home Node 返回的公钥无效".to_string())?;
             if devices::has_local(&app, &got) {
                 return Ok(json!({ "have": true, "user": got }));
             }
