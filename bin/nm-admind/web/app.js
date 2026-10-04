@@ -1,5 +1,37 @@
 // nm-admind 前端：纯 Web Components 标准（自定义元素 + 原生 DOM，无框架、无构建）。
 
+const I18N = {
+  "zh-CN": {
+    "login.title": "nmd 管理控制台", "login.lead": "请登录以继续", "login.user": "用户名", "login.pass": "密码", "login.submit": "登录",
+    "change.title": "修改初始密码", "change.lead": "首次登录，请设置新密码后进入", "change.save": "保存并进入",
+    "shell.brand": "nmd 控制台", "shell.logout": "退出登录", "shell.refreshed": "刷新于 ",
+    "tab.overview": "总览", "tab.connections": "连接监控", "tab.users": "用户管理", "tab.peers": "对等节点",
+    "tab.names": "域名管理", "tab.storage": "存储管理", "tab.traffic": "流量监控", "tab.system": "系统资源",
+    "tab.identity": "服务标识", "tab.password": "修改密码", "lang": "English",
+  },
+  en: {
+    "login.title": "nmd console", "login.lead": "Sign in to continue", "login.user": "Username", "login.pass": "Password", "login.submit": "Sign in",
+    "change.title": "Change the initial password", "change.lead": "First sign-in. Set a new password to continue.", "change.save": "Save and continue",
+    "shell.brand": "nmd console", "shell.logout": "Sign out", "shell.refreshed": "Updated ",
+    "tab.overview": "Overview", "tab.connections": "Connections", "tab.users": "Users", "tab.peers": "Peers",
+    "tab.names": "Names", "tab.storage": "Storage", "tab.traffic": "Traffic", "tab.system": "System",
+    "tab.identity": "Identity", "tab.password": "Password", "lang": "中文",
+  },
+};
+function admLocale() {
+  const saved = localStorage.getItem("admind-locale") || "";
+  if (I18N[saved]) return saved;
+  return (navigator.language || "").toLowerCase().startsWith("en") ? "en" : "zh-CN";
+}
+let ADM_LOCALE = admLocale();
+function t(key) { return (I18N[ADM_LOCALE] && I18N[ADM_LOCALE][key]) || I18N["zh-CN"][key] || key; }
+function toggleAdmLocale() {
+  ADM_LOCALE = ADM_LOCALE === "en" ? "zh-CN" : "en";
+  localStorage.setItem("admind-locale", ADM_LOCALE);
+  location.reload();
+}
+document.documentElement.lang = ADM_LOCALE === "en" ? "en" : "zh-CN";
+
 /* ---------------- helpers ---------------- */
 const TOKEN_KEY = "admind-token";
 function authHeaders(extra) {
@@ -139,16 +171,16 @@ const ICONS = {
   password: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v2" stroke-linecap="round"/></svg>',
 };
 const TABS = [
-  { k: "overview", label: "总览" },
-  { k: "connections", label: "连接监控" },
-  { k: "users", label: "用户管理" },
-  { k: "peers", label: "对等节点" },
-  { k: "names", label: "域名管理" },
-  { k: "storage", label: "存储管理" },
-  { k: "traffic", label: "流量监控" },
-  { k: "system", label: "系统资源" },
-  { k: "identity", label: "服务标识" },
-  { k: "password", label: "修改密码" },
+  { k: "overview", key: "tab.overview" },
+  { k: "connections", key: "tab.connections" },
+  { k: "users", key: "tab.users" },
+  { k: "peers", key: "tab.peers" },
+  { k: "names", key: "tab.names" },
+  { k: "storage", key: "tab.storage" },
+  { k: "traffic", key: "tab.traffic" },
+  { k: "system", key: "tab.system" },
+  { k: "identity", key: "tab.identity" },
+  { k: "password", key: "tab.password" },
 ];
 // 无需轮询的静态面板（表单/稳定信息）——渲染一次即可，避免定时重渲染打断输入。
 const STATIC_TABS = new Set(["identity", "password", "names"]);
@@ -178,15 +210,17 @@ class AdminLogin extends HTMLElement {
   connectedCallback() {
     this.innerHTML = `
     <div class="screen"><div class="card auth">
-      <div class="brand"><img class="logo" src="/nanomesh-logo.png" alt="NANO MESH" /><div><h1>nmd 管理控制台</h1><p>请登录以继续</p></div></div>
+      <div class="brand"><img class="logo" src="/nanomesh-logo.png" alt="NANO MESH" /><div><h1>${t("login.title")}</h1><p>${t("login.lead")}</p></div></div>
       <form>
-        <label class="field"><span>用户名</span><input name="u" value="admin" autocomplete="username"></label>
-        <label class="field"><span>密码</span><input name="p" type="password" autocomplete="current-password"></label>
+        <label class="field"><span>${t("login.user")}</span><input name="u" value="admin" autocomplete="username"></label>
+        <label class="field"><span>${t("login.pass")}</span><input name="p" type="password" autocomplete="current-password"></label>
         <div class="err" hidden></div>
-        <button class="btn btn--primary btn--block" type="submit">登录</button>
+        <button class="btn btn--primary btn--block" type="submit">${t("login.submit")}</button>
       </form>
+      <button class="btn btn--ghost btn--block" type="button" id="adm-lang">${t("lang")}</button>
     </div></div>`;
     const form = this.querySelector("form"), err = this.querySelector(".err");
+    this.querySelector("#adm-lang").onclick = () => toggleAdmLocale();
     form.addEventListener("submit", async (e) => {
       e.preventDefault(); err.hidden = true;
       try {
@@ -230,9 +264,12 @@ class AdminShell extends HTMLElement {
     this.innerHTML = `
     <div class="admin">
       <aside class="side">
-        <div class="side__brand"><img class="logo" src="/nanomesh-logo.png" alt="NANO MESH" /><span>nmd 控制台</span></div>
+        <div class="side__brand"><img class="logo" src="/nanomesh-logo.png" alt="NANO MESH" /><span>${t("shell.brand")}</span></div>
         <nav class="side__nav"></nav>
-        <div class="side__foot"><button class="btn btn--ghost btn--block side__logout">退出登录</button></div>
+        <div class="side__foot">
+          <button class="btn btn--ghost btn--block" type="button" id="adm-lang">${t("lang")}</button>
+          <button class="btn btn--ghost btn--block side__logout">${t("shell.logout")}</button>
+        </div>
       </aside>
       <main class="main">
         <header class="top"><h2 class="top__title"></h2><span class="top__meta muted"></span></header>
@@ -240,13 +277,14 @@ class AdminShell extends HTMLElement {
       </main>
     </div>`;
     const nav = this.querySelector(".side__nav");
-    TABS.forEach((t) => {
+    TABS.forEach((tab) => {
       const b = document.createElement("button");
-      b.className = "navitem"; b.dataset.k = t.k;
-      b.innerHTML = `${ICONS[t.k] || ""}<span>${t.label}</span>`;
-      b.onclick = () => this.select(t.k);
+      b.className = "navitem"; b.dataset.k = tab.k;
+      b.innerHTML = `${ICONS[tab.k] || ""}<span>${t(tab.key)}</span>`;
+      b.onclick = () => this.select(tab.k);
       nav.appendChild(b);
     });
+    this.querySelector("#adm-lang").onclick = () => toggleAdmLocale();
     this.querySelector(".side__logout").onclick = async () => {
       try { await api("/api/logout", { method: "POST" }); } catch {}
       sessionStorage.removeItem(TOKEN_KEY);
@@ -258,7 +296,8 @@ class AdminShell extends HTMLElement {
   select(k) {
     this.tab = k;
     this.querySelectorAll(".navitem").forEach((b) => b.classList.toggle("is-active", b.dataset.k === k));
-    this.querySelector(".top__title").textContent = TABS.find((t) => t.k === k).label;
+    const tab = TABS.find((item) => item.k === k);
+    this.querySelector(".top__title").textContent = tab ? t(tab.key) : k;
     clearInterval(this.timer);
     this.refresh();
     // 自动刷新（3s）会整块重渲染面板，若用户正在「对等节点」表单里输入/编辑会被刷掉。
@@ -291,7 +330,7 @@ class AdminShell extends HTMLElement {
           api("/api/names/list"),
           api("/api/names/pending").catch((ex) => ({ items: [], error: ex.message })),
         ]);
-        meta.textContent = "刷新于 " + new Date().toLocaleTimeString();
+        meta.textContent = t("shell.refreshed") + new Date().toLocaleTimeString();
         renderNames(host, dom, names, pending, () => this.refresh());
       } catch (ex) {
         host.innerHTML = `<div class="err">${esc(ex.message)}</div>`;
@@ -300,7 +339,7 @@ class AdminShell extends HTMLElement {
     }
     try {
       const data = await api("/api/" + this.tab);
-      meta.textContent = "刷新于 " + new Date().toLocaleTimeString();
+      meta.textContent = t("shell.refreshed") + new Date().toLocaleTimeString();
       renderPanel(this.tab, host, data, () => this.refresh());
     } catch (ex) {
       host.innerHTML = `<div class="err">${esc(ex.message)}</div>`;

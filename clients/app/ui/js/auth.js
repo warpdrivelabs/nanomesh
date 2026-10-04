@@ -261,7 +261,10 @@ document.addEventListener("keydown", (e) => {
 function initSec() {
   const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener("click", fn); };
   on("sec-close", closeSecModal);
-  on("sec-al-save", saveAutolock);
+  const alMin = document.getElementById("sec-al-min");
+  const alBlur = document.getElementById("sec-al-blur");
+  if (alMin) alMin.addEventListener("change", saveAutolock);
+  if (alBlur) alBlur.addEventListener("change", saveAutolock);
   on("sec-cm-save", doChangeMaster);
   on("sec-exp-go", doExport);
   on("sec-imp-go", doImport);
@@ -279,7 +282,12 @@ function initSec() {
 }
 initSec();
 async function routeStart() {
-  if (window.UIStore) await window.UIStore.hydrate();
+  if (window.UIStore) {
+    await window.UIStore.hydrate();
+    window.UIStore.dropDomainJson();
+  }
+  if (window.NodeSvc && NodeSvc.load) await NodeSvc.load();
+  if (window.Profile && Profile.load) await Profile.load();
   if (typeof window.renderNodeSvcList === "function") window.renderNodeSvcList();
   try { await NM.inv("ensure_device"); } catch (_) {}
   const lock = document.getElementById("lock-view");

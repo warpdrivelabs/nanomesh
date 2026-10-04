@@ -25,8 +25,6 @@
     </div>
     <div class="tb-ctrls">
       <button class="tb-btn" data-act="toggleSidebar" title="隐藏/显示左侧栏"><span class="ico" id="tb-side-ico" data-ico="sidebar-close"></span></button>
-      <button class="tb-btn" data-act="toggleTheme" title="浅色/深色主题"><span class="ico" id="tb-theme-ico" data-ico="sun"></span></button>
-      <button class="tb-btn" data-act="disconnect" title="断开 / 切换服务器"><span class="ico" data-ico="disconnect"></span></button>
     </div>
     <div class="tabbar" id="tabbar" style="display:none">
       <div class="tabstrip" id="tabstrip"></div>
@@ -50,16 +48,15 @@
           <button class="on" data-pane="lock"><span data-ico="clock"></span>自动锁定</button>
           <button data-pane="master"><span data-ico="lock"></span>主口令</button>
           <button data-pane="backup"><span data-ico="file"></span>加密备份</button>
-          <button data-pane="recovery"><span data-ico="edit"></span>恢复码</button>
-          <button data-pane="audit"><span data-ico="ticker"></span>安全日志</button>
+          <button data-pane="recovery"><span data-ico="key"></span>恢复码</button>
+          <button data-pane="audit"><span data-ico="list"></span>安全日志</button>
           <div class="dlg-nav-sep"></div>
           <button id="sec-dev-open"><span data-ico="device"></span>我的设备</button>
         </nav>
         <section class="dlg-pane" data-pane="lock">
-          <div class="pane-head"><div><div class="pane-t">自动锁定</div><div class="pane-d">离开电脑时自动锁住本机密钥库，解锁需要主口令。</div></div>
-            <button class="ns-btn ns-primary" id="sec-al-save">保存</button></div>
+          <div class="pane-head"><div><div class="pane-t">自动锁定</div><div class="pane-d">离开电脑时自动锁住本机密钥库，解锁需要主口令。改动立即生效。</div></div></div>
           <div class="sec-row"><label>空闲多少分钟后自动锁定</label><input id="sec-al-min" type="number" min="1" value="10" /></div>
-          <label class="sec-check"><input id="sec-al-blur" type="checkbox" /> 切到后台或最小化时立即锁定</label>
+          <label class="set-row"><span class="set-txt"><b>切到后台时锁定</b><small>最小化或切换到其他应用时立即锁定</small></span><input id="sec-al-blur" class="tg" type="checkbox" /></label>
         </section>
         <section class="dlg-pane" data-pane="master" hidden>
           <div class="pane-head"><div><div class="pane-t">修改主口令</div><div class="pane-d">主口令只用来加密本机密钥库，不会上传。新口令需 <b>≥8 位</b>，含大小写字母、数字和特殊字符。</div></div>
@@ -238,41 +235,47 @@
     <!-- 左侧栏：消息会话 / 实体目录 / 节点服务（同时只显示一个 .panel.on）-->
     <aside>
       <div class="panel im-panel on" id="panel-im">
-        <div class="brand"><span class="uname">消息</span><button class="brand-refresh" data-act="imRefresh" title="刷新目录"><span class="ico" data-ico="refresh"></span></button></div>
-        <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="im-search-input" type="text" placeholder="搜索会话" /></div>
+        <div class="brand"><span class="uname" data-i18n="panel.im">消息</span><span class="brand-tools"><button class="brand-refresh" data-act="imRefresh" title="刷新目录"><span class="ico" data-ico="refresh"></span></button></span></div>
+        <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="im-search-input" type="text" placeholder="搜索会话" data-i18n-ph="search.im" /></div>
         <div class="im-list" id="im-list"></div>
       </div>
       <div class="panel entities-panel" id="panel-entities">
-        <div class="brand"><span class="uname">实体目录</span>
-          <button class="brand-refresh" id="name-claim-btn" title="认领名字 local@域名">@</button>
-          <button class="brand-refresh" id="ent-add-btn" title="添加实体"><span class="ico" data-ico="plus"></span></button>
-          <button class="brand-refresh" data-act="imRefresh" title="刷新目录"><span class="ico" data-ico="refresh"></span></button>
+        <div class="brand"><span class="uname" data-i18n="panel.entities">实体目录</span>
+          <span class="brand-tools">
+            <button class="brand-refresh" id="name-claim-btn" title="认领名字 local@域名">@</button>
+            <button class="brand-refresh" id="ent-add-btn" title="添加实体"><span class="ico" data-ico="plus"></span></button>
+            <button class="brand-refresh" data-act="imRefresh" title="刷新目录"><span class="ico" data-ico="refresh"></span></button>
+          </span>
         </div>
-        <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="entity-search-input" type="text" placeholder="搜索实体" /></div>
+        <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="entity-search-input" type="text" placeholder="搜索实体" data-i18n-ph="search.entities" /></div>
         <div class="nodesvc-form entity-form" id="entity-form" style="display:none"></div>
         <div class="entity-list" id="entity-list"></div>
       </div>
       <div class="panel nodesvc-panel" id="panel-nodesvc">
-        <div class="brand"><span class="uname">节点服务</span></div>
-        <div class="nodesvc-actions">
-          <button class="ns-btn ns-primary" id="ns-new"><span class="ico" data-ico="plus"></span> 新增节点服务</button>
-        </div>
+        <div class="brand"><span class="uname" data-i18n="panel.nodes">节点服务</span><span class="brand-tools"><button class="brand-refresh" id="ns-new" title="新增节点服务"><span class="ico" data-ico="plus"></span></button></span></div>
+        <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="ns-search" type="text" placeholder="搜索节点服务" data-i18n-ph="search.nodes" /></div>
         <div class="nodesvc-form" id="nodesvc-form" style="display:none"></div>
         <div class="nodesvc-list" id="nodesvc-list"></div>
       </div>
       <div class="panel groups-panel" id="panel-groups">
-        <div class="brand"><span class="uname">群组</span>
-          <button class="brand-refresh" id="grp-new-btn" title="新建群"><span class="ico" data-ico="plus"></span></button>
-          <button class="brand-refresh" id="grp-refresh-btn" title="刷新"><span class="ico" data-ico="refresh"></span></button>
+        <div class="brand"><span class="uname" data-i18n="panel.groups">群组</span>
+          <span class="brand-tools">
+            <button class="brand-refresh" id="grp-new-btn" title="新建群"><span class="ico" data-ico="plus"></span></button>
+            <button class="brand-refresh" id="grp-refresh-btn" title="刷新"><span class="ico" data-ico="refresh"></span></button>
+          </span>
         </div>
+        <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="grp-search" type="text" placeholder="搜索群组" data-i18n-ph="search.groups" /></div>
         <div class="im-list" id="groups-list"></div>
       </div>
       <div class="panel channels-panel" id="panel-channels">
-        <div class="brand"><span class="uname">频道</span>
-          <button class="brand-refresh" id="chn-new-btn" title="新建频道"><span class="ico" data-ico="plus"></span></button>
-          <button class="brand-refresh" id="chn-sub-btn" title="粘贴频道 id 订阅"><span class="ico" data-ico="subscribe"></span></button>
-          <button class="brand-refresh" id="chn-refresh-btn" title="刷新"><span class="ico" data-ico="refresh"></span></button>
+        <div class="brand"><span class="uname" data-i18n="panel.channels">频道</span>
+          <span class="brand-tools">
+            <button class="brand-refresh" id="chn-new-btn" title="新建频道"><span class="ico" data-ico="plus"></span></button>
+            <button class="brand-refresh" id="chn-sub-btn" title="粘贴频道 id 订阅"><span class="ico" data-ico="subscribe"></span></button>
+            <button class="brand-refresh" id="chn-refresh-btn" title="刷新"><span class="ico" data-ico="refresh"></span></button>
+          </span>
         </div>
+        <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="chn-search" type="text" placeholder="搜索频道" data-i18n-ph="search.channels" /></div>
         <div class="im-list" id="channels-list"></div>
       </div>
     </aside>
@@ -469,6 +472,7 @@
   </div>
 </div>
 
+<script src="js/i18n.js" defer></script>
 <script src="js/icons.js" defer></script>
 <script src="js/bridge.js" defer></script>
 <script src="js/store.js" defer></script>
@@ -486,6 +490,8 @@
 <script src="js/channels.js" defer></script>
 <script src="js/naming.js" defer></script>
 <script src="js/composer.js" defer></script>
+<script src="js/listcache.js" defer></script>
+<script src="js/chatlog.js" defer></script>
 <script src="js/im.js" defer></script>
 <script src="js/main.js" defer></script>
 <script src="js/auth.js" defer></script>

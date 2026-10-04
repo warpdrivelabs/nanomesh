@@ -1,11 +1,22 @@
-// ── 节点服务：统一的「可连接节点」记录，登录页与「节点服务」面板共用（localStorage）。
+// ── 节点服务：统一的「可连接节点」记录，登录页与「节点服务」面板共用（本机 SQLite）。
 //    一条服务 = { id, name, mode, node, relayUrls, pkarrUrl, dnsOrigin }。
 //    node 可为 64 位公钥 hex 或 NM_NODE_ADDR(JSON)；mode = nat|lan|selfhost。
 (function () {
-  const KEY = "nmspace-node-services";
-  function load() { try { return JSON.parse(localStorage.getItem(KEY) || "[]"); } catch (_) { return []; } }
-  function save(list) { try { localStorage.setItem(KEY, JSON.stringify(list.slice(0, 50))); } catch (_) {} }
+  let LIST = [];
   function uid() { return "s" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+  async function load() {
+    LIST = [];
+    if (!window.NM) return LIST;
+    try {
+      const arr = JSON.parse((await NM.inv("server_load")) || "[]");
+      LIST = Array.isArray(arr) ? arr.slice(0, 50) : [];
+    } catch (_) {}
+    return LIST;
+  }
+  function save(list) {
+    LIST = list.slice(0, 50);
+    if (window.NM) NM.inv("server_save", { data: JSON.stringify(LIST) }).catch(() => {});
+  }
 
   /** 从 node 值提取 64 位公钥（裸 hex 或 NM_NODE_ADDR 的 id）；取不到返回 null。 */
   function pubkeyOf(node) {
@@ -29,34 +40,18 @@
     };
   }
 
-  function list() { return load(); }
-  function get(id) { return load().find((s) => s.id === id) || null; }
+  function list() { return LIST.slice(); }
+  function get(id) { return LIST.find((s) => s.id === id) || null; }
   /** 新增或更新（按 node+mode 去重）。返回落库后的服务。 */
   function put(svc) {
     const s = norm(svc);
-    const l = load();
+    const l = LIST.slice();
     const i = l.findIndex((x) => x.id === s.id || (x.node === s.node && x.mode === s.mode));
     if (i >= 0) { s.id = l[i].id; l[i] = s; } else { l.unshift(s); }
     save(l);
     return s;
   }
-  function remove(id) { save(load().filter((s) => s.id !== id)); }
+  function remove(id) { save(LIST.filter((s) => s.id !== id)); }
 
-  /** 一次性把旧的 nmspace-servers / nmspace-pubkeys 迁入服务表（仅当服务表为空时）。 */
-  function migrate() {
-    if (load().length) return;
-    const seeded = [];
-    try {
-      JSON.parse(localStorage.getItem("nmspace-servers") || "[]").forEach((s) =>
-        seeded.push(norm({ name: s.name, mode: s.mode, node: s.node, relayUrls: s.relayUrls, pkarrUrl: s.pkarrUrl, dnsOrigin: s.dnsOrigin })));
-    } catch (_) {}
-    try {
-      JSON.parse(localStorage.getItem("nmspace-pubkeys") || "[]").forEach((p) => {
-        if (!seeded.some((s) => pubkeyOf(s.node) === p.key)) seeded.push(norm({ name: p.label, mode: "nat", node: p.key }));
-      });
-    } catch (_) {}
-    if (seeded.length) save(seeded);
-  }
-
-  window.NodeSvc = { list, get, put, remove, migrate, pubkeyOf };
+  window.NodeSvc = { list, get, put, remove, load, pubkeyOf };
 })();

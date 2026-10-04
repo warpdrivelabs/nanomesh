@@ -7,7 +7,6 @@ function showLoginView() {
   document.getElementById("login-view").style.display = "block";
   const starsFar = document.getElementById("space-stars-far");
   if (starsFar && !starsFar.childElementCount) seedLoginSpace();
-  NodeSvc.migrate();
   renderServiceOptions();
   renderUserOptions();
 }
@@ -31,10 +30,10 @@ function paintHomeNode() {
   const pk = window.NodeSvc ? NodeSvc.pubkeyOf(svc.node) : "";
   const short = pk ? pk.slice(0, 8) : "";
   const mode = svc.mode === "nat" ? "穿透" : svc.mode === "lan" ? "同网" : svc.mode === "selfhost" ? "自建" : (svc.mode || "");
-  const who = svc.name || "已连接";
-  text.textContent = ["Home Node", who, short, mode].filter(Boolean).join("  ");
+  const who = svc.name || "Home Node";
+  text.textContent = [who, mode].filter(Boolean).join(" · ");
   if (dot) dot.classList.add("on");
-  if (host) host.title = pk || String(svc.node);
+  if (host) host.title = [pk || String(svc.node), short].filter(Boolean).join("\n");
 }
 window.paintHomeNode = paintHomeNode;
 window.showLoginView = showLoginView;
@@ -177,7 +176,6 @@ function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&a
 // ── 装配 ──
 (function initConnect() {
   const y = document.getElementById("year"); if (y) y.textContent = String(new Date().getFullYear());
-  NodeSvc.migrate();
   renderServiceOptions();
   renderUserOptions();
   const bind = (id, ev, fn) => { const el = document.getElementById(id); if (el) el.addEventListener(ev, fn); };

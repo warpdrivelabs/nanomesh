@@ -6,10 +6,21 @@
   const byId = (id) => CHANNELS.find((c) => c.id === id) || null;
   const isOwner = (id) => { const c = byId(id); return !!(c && MYID && c.owner === MYID); };
 
+  function slimChannel(c) {
+    const o = Object.assign({}, c);
+    if (typeof o.avatar === "string" && o.avatar.indexOf("data:") === 0) delete o.avatar;
+    return o;
+  }
+  function hydrate(list) { CHANNELS = Array.isArray(list) ? list.slice() : []; paintChannelsList(); }
   async function refresh() {
-    if (!window.NM || !NM.hasTauri || !NM.hasTauri()) { CHANNELS = []; return; }
+    if (!window.NM || !NM.hasTauri || !NM.hasTauri()) return;
     try { MYID = MYID || (await NM.inv("my_id").catch(() => "")); } catch (_) {}
-    try { CHANNELS = await NM.inv("channel_list"); } catch (_) { CHANNELS = []; }
+    try {
+      CHANNELS = (await NM.inv("channel_list")) || [];
+      if (window.ListCache) ListCache.put({ channels: CHANNELS.map(slimChannel) });
+    } catch (_) {
+      if (!CHANNELS.length && window.toast) toast("频道列表刷新失败");
+    }
   }
 
   // 频道头像：已解析为 data:URI → 图；否则 📡 底色块。
@@ -27,8 +38,10 @@
   function paintChannelsList() {
     const box = document.getElementById("channels-list");
     if (!box) return;
-    if (!CHANNELS.length) { box.innerHTML = '<div class="ns-empty">还没有频道。点上方加号新建，或订阅按钮粘贴频道 id。</div>'; return; }
-    box.innerHTML = CHANNELS.map((c) => `
+    const q = ((document.getElementById("chn-search") || {}).value || "").trim().toLowerCase();
+    const list = CHANNELS.filter((c) => !q || (c.name || "").toLowerCase().includes(q) || (c.topic || "").toLowerCase().includes(q));
+    if (!list.length) { box.innerHTML = `<div class="ns-empty">${CHANNELS.length ? (window.t ? t("list.noChannelHit") : "没有匹配的频道") : (window.t ? t("list.noChannel") : "还没有频道。点上方加号新建，或用订阅按钮粘贴频道 id。")}</div>`; return; }
+    box.innerHTML = list.map((c) => `
       <div class="im-item" data-cid="${c.id}" title="${escapeHtml(c.id)}">
         ${channelAv(c)}
         <span class="mid"><span class="r1"><span class="nm">${escapeHtml(c.name || "(未命名频道)")}</span></span>
@@ -36,6 +49,9 @@
       </div>`).join("");
     box.querySelectorAll(".im-item").forEach((el) => el.addEventListener("click", () => { if (window.openChannel) openChannel(el.dataset.cid); }));
     syncSelection();
+    if (window.Tabs && Tabs.retitle && Tabs.has) {
+      CHANNELS.forEach((c) => { if (Tabs.has("c:" + c.id)) Tabs.retitle("c:" + c.id, c.name || "频道", "channels"); });
+    }
   }
 
   function currentChannelId() {
@@ -105,7 +121,9 @@
   async function primeOne(cid, name) {
     try {
       await NM.inv("channel_sub", { channelId: cid, name });
-      const msgs = await NM.inv("channel_backfill", { channelId: cid, sinceSeq: 0 });
+      const last = window.ChatLog ? ChatLog.meta(cid).last : null;
+      const since = last && last.seq ? last.seq : 0;
+      const msgs = await NM.inv("channel_backfill", { channelId: cid, sinceSeq: since });
       if (window.imBackfill) window.imBackfill(cid, (msgs || []).map((m) => ({ id: "c" + m.seq, from: m.from, body: m.body, ts: m.ts, channel: true, to: cid })));
     } catch (_) {}
   }
@@ -132,8 +150,9 @@
     const nw = document.getElementById("chn-new-btn"); if (nw) nw.addEventListener("click", createChannel);
     const sb = document.getElementById("chn-sub-btn"); if (sb) sb.addEventListener("click", subscribeByPaste);
     const rf = document.getElementById("chn-refresh-btn"); if (rf) rf.addEventListener("click", renderChannelsList);
+    const se = document.getElementById("chn-search"); if (se) se.addEventListener("input", paintChannelsList);
   })();
 
-  window.Channels = { refresh, byId, isOwner, editChannel, list: () => CHANNELS, primeChannels, syncSelection };
+  window.Channels = { refresh, hydrate, byId, isOwner, editChannel, list: () => CHANNELS, primeChannels, syncSelection };
   window.renderChannelsList = renderChannelsList;
 })();

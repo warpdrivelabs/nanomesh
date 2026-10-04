@@ -45,36 +45,37 @@ function prepare(id, room) {
 
 function markup() {
   const d = viewId ? draft() : { text: "", pending: [] };
-  const who = viewRoom ? "提及成员" : "发送名片";
+  const tr = (key, fallback) => (window.t ? t(key) : fallback);
+  const who = viewRoom ? tr("conv.mention", "提及成员") : tr("conv.card", "发送名片");
   return `<div class="im-composer">
     <div class="im-history" id="conv-history">
-      <input id="conv-history-q" type="text" placeholder="搜索当前会话" autocomplete="off" />
+      <input id="conv-history-q" type="text" placeholder="${tr("conv.historyPh", "搜索当前会话")}" autocomplete="off" />
       <div class="im-history-list" id="conv-history-list"></div>
     </div>
     <div class="im-tools">
-      <button type="button" class="im-tool" data-act="emoji" title="表情">${nmIcon("smile")}</button>
+      <button type="button" class="im-tool" data-act="emoji" title="${tr("conv.emoji", "表情")}">${nmIcon("smile")}</button>
       <span class="im-split">
-        <button type="button" class="im-tool" data-act="shot" title="截图">${nmIcon("scissors")}</button>
-        <button type="button" class="im-caret" data-menu="shot" title="截图方式">${nmIcon("chevron")}</button>
+        <button type="button" class="im-tool" data-act="shot" title="${tr("conv.shot", "截图")}">${nmIcon("scissors")}</button>
+        <button type="button" class="im-caret" data-menu="shot" title="${tr("conv.shotHow", "截图方式")}">${nmIcon("chevron")}</button>
       </span>
       <span class="im-split">
-        <button type="button" class="im-tool" data-act="windows" title="截取窗口">${nmIcon("crop")}</button>
-        <button type="button" class="im-caret" data-menu="windows" title="选择窗口">${nmIcon("chevron")}</button>
+        <button type="button" class="im-tool" data-act="windows" title="${tr("conv.window", "截取窗口")}">${nmIcon("crop")}</button>
+        <button type="button" class="im-caret" data-menu="windows" title="${tr("conv.pickWindow", "选择窗口")}">${nmIcon("chevron")}</button>
       </span>
-      <button type="button" class="im-tool" data-act="image" title="图片">${nmIcon("image")}</button>
-      <button type="button" class="im-tool" data-act="video" title="视频">${nmIcon("video")}</button>
-      <button type="button" class="im-tool" data-act="file" title="文件">${nmIcon("file")}</button>
-      <button type="button" class="im-tool" id="conv-mic" data-act="mic" title="语音">${nmIcon("mic")}</button>
+      <button type="button" class="im-tool" data-act="image" title="${tr("conv.image", "图片")}">${nmIcon("image")}</button>
+      <button type="button" class="im-tool" data-act="video" title="${tr("conv.video", "视频")}">${nmIcon("video")}</button>
+      <button type="button" class="im-tool" data-act="file" title="${tr("conv.file", "文件")}">${nmIcon("file")}</button>
+      <button type="button" class="im-tool" id="conv-mic" data-act="mic" title="${tr("conv.voice", "语音")}">${nmIcon("mic")}</button>
       <span class="im-split">
         <button type="button" class="im-tool" data-act="people" title="${who}">${nmIcon("at")}</button>
         <button type="button" class="im-caret" data-menu="people" title="${who}">${nmIcon("chevron")}</button>
       </span>
-      <button type="button" class="im-tool im-tool--end" data-act="history" title="会话记录">${nmIcon("clock")}</button>
+      <button type="button" class="im-tool im-tool--end" data-act="history" title="${tr("conv.history", "会话记录")}">${nmIcon("clock")}</button>
     </div>
     <div class="im-pending${d.pending.length ? " is-on" : ""}" id="conv-pending">${pendingHtml(d.pending)}</div>
     <div class="im-write">
-      <textarea id="conv-input" rows="3" aria-label="消息">${escapeHtml(d.text || "")}</textarea>
-      <button type="button" class="im-send" id="conv-send" data-act="send" title="发送">${nmIcon("send")}</button>
+      <textarea id="conv-input" rows="3" aria-label="${tr("conv.send", "发送")}" placeholder="${tr("conv.placeholder", "Enter 发送，Shift+Enter 换行")}">${escapeHtml(d.text || "")}</textarea>
+      <button type="button" class="im-send" id="conv-send" data-act="send" title="${tr("conv.send", "发送")}">${nmIcon("send")}</button>
     </div>
     <div class="im-pop" id="conv-pop" hidden></div>
     <input type="file" id="conv-pick-image" accept="image/*" multiple hidden />
@@ -460,19 +461,29 @@ function toggleHistory() {
   if (box.classList.contains("is-on")) { paintHistory(); const q = document.getElementById("conv-history-q"); if (q) q.focus(); }
 }
 
-function paintHistory() {
+async function paintHistory() {
   const list = document.getElementById("conv-history-list");
   if (!list || !api || !api.messages) return;
   const q = ((document.getElementById("conv-history-q") || {}).value || "").trim().toLowerCase();
-  const rows = api.messages().filter((m) => {
-    const text = (preview(m) + " " + (m.text || "") + " " + ((m.media && m.media.name) || "")).toLowerCase();
-    return !q || text.includes(q);
-  }).slice(-80).reverse();
-  list.innerHTML = rows.length ? rows.map((m) => `<button type="button" data-act="hist-jump" data-mid="${escapeHtml(m.id)}"><span>${escapeHtml(msgClockSafe(m.ts))}</span><b>${escapeHtml(preview(m))}</b></button>`).join("") : `<div class="im-history-empty">没有匹配的记录</div>`;
+  let rows;
+  if (q && api.search) {
+    try { rows = (await api.search(q) || []).slice().reverse(); } catch (_) { rows = []; }
+  } else {
+    rows = api.messages().filter((m) => {
+      const text = (preview(m) + " " + (m.text || "") + " " + ((m.media && m.media.name) || "")).toLowerCase();
+      return !q || text.includes(q);
+    }).slice(-80).reverse();
+  }
+  const emptyHist = window.t ? t("conv.noHistory") : "没有匹配的记录";
+  list.innerHTML = rows.length ? rows.map((m) => `<button type="button" data-act="hist-jump" data-mid="${escapeHtml(m.id)}"><span>${escapeHtml(msgClockSafe(m.ts))}</span><b>${escapeHtml(preview(m))}</b></button>`).join("") : `<div class="im-history-empty">${emptyHist}</div>`;
 }
 
-function jump(id) {
-  const el = document.querySelector(`.im-msg[data-mid="${CSS.escape(id)}"]`);
+async function jump(id) {
+  let el = document.querySelector(`.im-msg[data-mid="${CSS.escape(id)}"]`);
+  if (!el && api && api.reveal) {
+    await api.reveal(id);
+    el = document.querySelector(`.im-msg[data-mid="${CSS.escape(id)}"]`);
+  }
   if (!el) return;
   el.scrollIntoView({ block: "center" });
   el.classList.add("im-flash");
@@ -564,8 +575,12 @@ function imageSize(url) {
   });
 }
 
-const KIND_LABEL = { image: "[图片]", voice: "[语音]", video: "[视频]", file: "[文件]", card: "[名片]" };
-function kindLabel(kind) { return KIND_LABEL[kind] || "[消息]"; }
+const KIND_LABEL = { image: 1, voice: 1, video: 1, file: 1, card: 1 };
+function kindLabel(kind) {
+  const key = { image: "media.image", voice: "media.voice", video: "media.video", file: "media.file", card: "media.card" }[kind];
+  if (key && window.t) return t(key);
+  return { image: "[图片]", voice: "[语音]", video: "[视频]", file: "[文件]", card: "[名片]" }[kind] || (window.t ? t("media.msg") : "[消息]");
+}
 function fmtDur(ms) {
   const s = Math.max(0, Math.round((ms || 0) / 1000));
   return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
@@ -634,18 +649,18 @@ function bubble(m) {
     const parts = (media.parts || []).join(",");
     return {
       cls: "im-bubble--media",
-      html: `<button type="button" class="im-file" data-act="save-file" data-home="${escapeHtml(media.home || "")}" data-parts="${escapeHtml(parts)}" data-name="${escapeHtml(media.name || "文件")}" data-size="${media.size || 0}"><span>${nmIcon("file")}</span><span><b>${escapeHtml(media.name || "文件")}</b><small>${fmtSize(media.size)} · 点击下载</small></span></button>`,
+      html: `<button type="button" class="im-file" data-act="save-file" data-home="${escapeHtml(media.home || "")}" data-parts="${escapeHtml(parts)}" data-name="${escapeHtml(media.name || (window.t ? t("conv.file") : "文件"))}" data-size="${media.size || 0}"><span>${nmIcon("file")}</span><span><b>${escapeHtml(media.name || (window.t ? t("conv.file") : "文件"))}</b><small>${fmtSize(media.size)} · ${window.t ? t("media.download") : "点击下载"}</small></span></button>`,
     };
   }
   if (media.kind === "card") {
-    const who = media.name || "名片";
+    const who = media.name || (window.t ? t("media.cardName") : "名片");
     const face = window.Profile ? Profile.faceHtml(media.card || "", who, 32) : "";
     return {
       cls: "im-bubble--media",
-      html: `<button type="button" class="im-card" data-act="open-card" data-id="${escapeHtml(media.card || "")}">${face}<span><b>${escapeHtml(who)}</b><small>名片</small></span></button>`,
+      html: `<button type="button" class="im-card" data-act="open-card" data-id="${escapeHtml(media.card || "")}">${face}<span><b>${escapeHtml(who)}</b><small>${window.t ? t("media.cardName") : "名片"}</small></span></button>`,
     };
   }
-  return { cls: "", html: escapeHtml(media.text || "不支持的消息") };
+  return { cls: "", html: escapeHtml(media.text || (window.t ? t("media.unsupported") : "不支持的消息")) };
 }
 
 const urlCache = new Map();
@@ -657,7 +672,7 @@ function fetchHtml(kind, name, size, dur) {
   const ico = kind === "voice" ? "mic" : kind === "video" ? "video" : kind === "file" ? "file" : "image";
   const title = kind === "voice" ? "语音 " + fmtDur(dur) : kind === "video" ? (name || "视频") : kind === "file" ? (name || "文件") : "图片";
   const extra = kind === "voice" ? "" : fmtSize(size);
-  return `<button type="button" class="im-fetch" data-act="fetch-media"><span>${nmIcon(ico)}</span><span><b>点击下载</b><small>${escapeHtml(title)}${extra && extra !== "0 B" ? " · " + extra : ""}</small></span></button>`;
+  return `<button type="button" class="im-fetch" data-act="fetch-media"><span>${nmIcon(ico)}</span><span><b>${window.t ? t("media.download") : "点击下载"}</b><small>${escapeHtml(title)}${extra && extra !== "0 B" ? " · " + extra : ""}</small></span></button>`;
 }
 function urisToUrl(parts, uris, mime) {
   const key = parts.join("|");
@@ -831,4 +846,4 @@ document.addEventListener("click", (e) => {
   else if (e.target.closest && (e.target.closest(".im-media") || e.target.closest(".im-file") || e.target.closest(".im-card") || e.target.closest(".im-lightbox"))) onMediaClick(e);
 });
 
-window.Composer = { prepare, markup, attach, snapshot, absorb, preview, bubble, hydrate, encode, channelBody };
+window.Composer = { prepare, markup, attach, snapshot, absorb, preview, bubble, hydrate, encode, channelBody, toggleHistory };

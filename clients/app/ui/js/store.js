@@ -24,7 +24,19 @@
       for (const [k, v] of Object.entries(obj)) if (v != null) origSet.call(localStorage, k, v);
     } catch (_) {}
   }
-  window.UIStore = { hydrate };
+  function dropDomainJson() {
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k) keys.push(k);
+    }
+    keys.forEach((k) => {
+      if (k === "nmspace-entities" || k === "nmspace-node-services" || k === "nmspace-servers" || k === "nmspace-pubkeys" || k.indexOf("nmspace:profile:") === 0) {
+        localStorage.removeItem(k);
+      }
+    });
+  }
+  window.UIStore = { hydrate, dropDomainJson };
 
   // 诊断：捕获未处理 JS 错误，落到后端(nm-lasterror)便于排查。
   window.addEventListener("error", function (e) {

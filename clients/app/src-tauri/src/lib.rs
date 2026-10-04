@@ -2,8 +2,8 @@
 //! 原生端(desktop / iOS / android)运行本模块；Web 端改走 nm-gateway。
 //! 前端资源在 ../ui（静态壳，generate_context! 编译期内嵌；build.rs 声明 rerun-if-changed）。
 //! App 图标源 ../../nanomesh-app.png（tauri icon 生成 icons/*，generate_context! 内嵌为窗口图标）。
-//! 实体目录：点实体看详情(可复制公钥) + 手动添加实体（前端本地，按身份隔离；用户菜单可复制当前用户 id）。
-//! UI 状态(节点服务/身份名/偏好)经 ui_kv_* 持久化到 app_data_dir/ui-state.json，跨 webview 源不丢。
+//! 实体目录、手动添加的实体、群、频道、节点服务和资料存在 app_data_dir/catalog.db。
+//! 界面偏好（主题、语言、身份昵称）仍经 ui_kv_* 写到 app_data_dir/ui-state.json。
 //! 本地访问认证见 auth.rs / docs/CLIENT_AUTH_SECURITY.md（P1：主口令门 + 身份私钥信封加密；P2：自动锁定 + 加密备份；P3：恢复码 + 失败冷却 + 审计日志）。
 //!
 //! 连接策略 **同网优先、穿透兜底**：
@@ -237,35 +237,470 @@ fn ui_kv_set(app: AppHandle, key: String, value: Option<String>) -> Result<(), S
     Ok(())
 }
 
-fn chat_log_path(app: &AppHandle, user: &str) -> Result<std::path::PathBuf, String> {
+fn identity_key(user: &str) -> Result<String, String> {
     let user = user.trim().to_ascii_lowercase();
     if user.is_empty() || user.len() > 128 || !user.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err("身份无效".into());
+        return Err("bad_user".into());
     }
+    Ok(user)
+}
+
+fn conv_key(conv: &str) -> Result<String, String> {
+    let conv = conv.trim().to_ascii_lowercase();
+    if conv.is_empty() || conv.len() > 128 || !conv.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("bad_conv".into());
+    }
+    Ok(conv)
+}
+
+fn record_id(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() || s.len() > 128 || !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':' || c == '.') {
+        return None;
+    }
+    if s.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(s.to_ascii_lowercase())
+    } else {
+        Some(s.to_string())
+    }
+}
+
+fn open_catalog(app: &AppHandle) -> Result<rusqlite::Connection, String> {
+    let path = data_dir(app)?.join("catalog.db");
+    let conn = rusqlite::Connection::open(path).map_err(|e| e.to_string())?;
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA synchronous=NORMAL;
+         CREATE TABLE IF NOT EXISTS record (
+           user TEXT NOT NULL,
+           kind TEXT NOT NULL,
+           id TEXT NOT NULL,
+           ord INTEGER NOT NULL,
+           body TEXT NOT NULL,
+           PRIMARY KEY (user, kind, id)
+         );
+         CREATE TABLE IF NOT EXISTS server (
+           id TEXT PRIMARY KEY,
+           ord INTEGER NOT NULL,
+           body TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS profile (
+           id TEXT PRIMARY KEY,
+           body TEXT NOT NULL
+         );",
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(conn)
+}
+
+fn rows_of(conn: &rusqlite::Connection, user: &str, kind: &str) -> Result<Vec<Value>, String> {
+    let mut stmt = conn
+        .prepare("SELECT body FROM record WHERE user=?1 AND kind=?2 ORDER BY ord")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![user, kind], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        if let Ok(v) = serde_json::from_str::<Value>(&row.map_err(|e| e.to_string())?) {
+            out.push(v);
+        }
+    }
+    Ok(out)
+}
+
+fn catalog_kind(kind: &str) -> Result<&'static str, String> {
+    match kind {
+        "directory" => Ok("directory"),
+        "added" => Ok("added"),
+        "groups" => Ok("groups"),
+        "channels" => Ok("channels"),
+        _ => Err("bad_kind".into()),
+    }
+}
+
+/// 读出某个身份的实体目录、手动添加的实体、群和频道。
+#[tauri::command]
+fn catalog_load(app: AppHandle, user: String) -> Result<String, String> {
+    let user = identity_key(&user)?;
+    let conn = open_catalog(&app)?;
+    serde_json::to_string(&json!({
+        "directory": rows_of(&conn, &user, "directory")?,
+        "added": rows_of(&conn, &user, "added")?,
+        "groups": rows_of(&conn, &user, "groups")?,
+        "channels": rows_of(&conn, &user, "channels")?,
+    }))
+    .map_err(|e| e.to_string())
+}
+
+/// 按种类整表替换。kind = directory | added | groups | channels。
+#[tauri::command]
+fn catalog_save(app: AppHandle, user: String, kind: String, data: String) -> Result<(), String> {
+    if data.len() > 8 * 1024 * 1024 {
+        return Err("too_large".into());
+    }
+    let user = identity_key(&user)?;
+    let kind = catalog_kind(&kind)?;
+    let items: Vec<Value> = serde_json::from_str(&data).map_err(|_| "bad_json".to_string())?;
+    let conn = open_catalog(&app)?;
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM record WHERE user=?1 AND kind=?2", rusqlite::params![user, kind]).map_err(|e| e.to_string())?;
+    for (ord, item) in items.iter().take(8000).enumerate() {
+        let Some(id) = item.get("id").and_then(|v| v.as_str()).and_then(record_id) else { continue };
+        let body = serde_json::to_string(item).map_err(|e| e.to_string())?;
+        if body.len() > 256 * 1024 {
+            continue;
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO record(user, kind, id, ord, body) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![user, kind, id, ord as i64, body],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())
+}
+
+/// 节点服务（登录页和节点服务面板共用，不按身份拆分）。
+#[tauri::command]
+fn server_load(app: AppHandle) -> Result<String, String> {
+    let conn = open_catalog(&app)?;
+    let mut stmt = conn.prepare("SELECT body FROM server ORDER BY ord").map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        if let Ok(v) = serde_json::from_str::<Value>(&row.map_err(|e| e.to_string())?) {
+            out.push(v);
+        }
+    }
+    serde_json::to_string(&out).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn server_save(app: AppHandle, data: String) -> Result<(), String> {
+    if data.len() > 1024 * 1024 {
+        return Err("too_large".into());
+    }
+    let items: Vec<Value> = serde_json::from_str(&data).map_err(|_| "bad_json".to_string())?;
+    let conn = open_catalog(&app)?;
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM server", []).map_err(|e| e.to_string())?;
+    for (ord, item) in items.iter().take(50).enumerate() {
+        let Some(id) = item.get("id").and_then(|v| v.as_str()).and_then(record_id) else { continue };
+        let body = serde_json::to_string(item).map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT OR REPLACE INTO server(id, ord, body) VALUES (?1, ?2, ?3)",
+            rusqlite::params![id, ord as i64, body],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())
+}
+
+/// 本机资料（按公钥）。返回 {公钥: 资料}。
+#[tauri::command]
+fn profile_load(app: AppHandle) -> Result<String, String> {
+    let conn = open_catalog(&app)?;
+    let mut stmt = conn.prepare("SELECT id, body FROM profile").map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?;
+    let mut map = serde_json::Map::new();
+    for row in rows {
+        let (id, body) = row.map_err(|e| e.to_string())?;
+        if let Ok(v) = serde_json::from_str::<Value>(&body) {
+            map.insert(id, v);
+        }
+    }
+    serde_json::to_string(&Value::Object(map)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn profile_save(app: AppHandle, id: String, data: String) -> Result<(), String> {
+    if data.len() > 2 * 1024 * 1024 {
+        return Err("too_large".into());
+    }
+    let id = identity_key(&id)?;
+    serde_json::from_str::<Value>(&data).map_err(|_| "bad_json".to_string())?;
+    let conn = open_catalog(&app)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO profile(id, body) VALUES (?1, ?2)",
+        rusqlite::params![id, data],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn msg_id(v: &Value) -> String {
+    v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string()
+}
+
+fn ts_of(v: &Value) -> u64 {
+    v.get("ts").and_then(|n| n.as_u64().or_else(|| n.as_i64().map(|x| x.max(0) as u64))).unwrap_or(0)
+}
+
+fn chat_db_path(app: &AppHandle, user: &str) -> Result<std::path::PathBuf, String> {
+    let user = identity_key(user)?;
     let dir = data_dir(app)?.join("chats");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir.join(format!("{user}.json")))
+    Ok(dir.join(format!("{user}.db")))
 }
 
-/// 读出某个身份的本机会话记录。没有文件时返回空对象。
-#[tauri::command]
-fn chat_log_load(app: AppHandle, user: String) -> Result<String, String> {
-    let path = chat_log_path(&app, &user)?;
-    Ok(std::fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string()))
+fn open_chat_db(app: &AppHandle, user: &str) -> Result<rusqlite::Connection, String> {
+    let path = chat_db_path(app, user)?;
+    let conn = rusqlite::Connection::open(path).map_err(|e| e.to_string())?;
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA synchronous=NORMAL;
+         CREATE TABLE IF NOT EXISTS msg (
+           conv TEXT NOT NULL,
+           id TEXT NOT NULL,
+           ts INTEGER NOT NULL,
+           ord INTEGER NOT NULL,
+           body TEXT NOT NULL,
+           PRIMARY KEY (conv, id)
+         );
+         CREATE INDEX IF NOT EXISTS msg_conv_ord ON msg(conv, ord);
+         CREATE TABLE IF NOT EXISTS unread (
+           conv TEXT PRIMARY KEY,
+           n INTEGER NOT NULL
+         );",
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(conn)
 }
 
-/// 把某个身份的会话记录整份写到本机。先写临时文件再换名，避免写到一半损坏。
-#[tauri::command]
-fn chat_log_save(app: AppHandle, user: String, data: String) -> Result<(), String> {
-    if data.len() > 48 * 1024 * 1024 {
-        return Err("会话记录过大".into());
+fn bodies_to_json(bodies: Vec<String>) -> Result<String, String> {
+    let vals: Vec<Value> = bodies.into_iter().filter_map(|s| serde_json::from_str(&s).ok()).collect();
+    serde_json::to_string(&vals).map_err(|e| e.to_string())
+}
+
+const MSG_CAP: i64 = 10_000;
+
+fn insert_msgs(conn: &mut rusqlite::Connection, conv: &str, fresh: &[Value]) -> Result<usize, String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let mut stored = 0usize;
+    for (i, m) in fresh.iter().enumerate() {
+        let ts = ts_of(m);
+        let mut id = msg_id(m);
+        if id.is_empty() {
+            id = format!("m{ts}-{i}");
+        }
+        let max_ord: i64 = tx
+            .query_row("SELECT COALESCE(MAX(ord), -1) FROM msg WHERE conv=?1", [conv], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        let ord = max_ord + 1;
+        let body = serde_json::to_string(m).map_err(|e| e.to_string())?;
+        let n = tx
+            .execute(
+                "INSERT OR IGNORE INTO msg(conv, id, ts, ord, body) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![conv, id, ts as i64, ord, body],
+            )
+            .map_err(|e| e.to_string())?;
+        if n == 0 {
+            continue;
+        }
+        stored += 1;
     }
-    serde_json::from_str::<Value>(&data).map_err(|_| "会话记录不是合法 JSON".to_string())?;
-    let path = chat_log_path(&app, &user)?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, data).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
-    Ok(())
+    if stored == 0 {
+        tx.commit().map_err(|e| e.to_string())?;
+        return Ok(0);
+    }
+    let cnt: i64 = tx
+        .query_row("SELECT COUNT(*) FROM msg WHERE conv=?1", [conv], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    if cnt > MSG_CAP {
+        tx.execute(
+            "DELETE FROM msg WHERE conv=?1 AND ord IN (SELECT ord FROM msg WHERE conv=?1 ORDER BY ord ASC LIMIT ?2)",
+            rusqlite::params![conv, cnt - MSG_CAP],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(stored)
+}
+
+fn window_bodies(conn: &rusqlite::Connection, conv: &str, end: i64, limit: i64) -> Result<Vec<String>, String> {
+    if end <= 0 || limit <= 0 {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT body FROM (
+               SELECT body, idx FROM (
+                 SELECT body, ROW_NUMBER() OVER (ORDER BY ord) - 1 AS idx
+                 FROM msg WHERE conv = ?1
+               ) WHERE idx < ?2
+             ) ORDER BY idx DESC LIMIT ?3",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![conv, end, limit], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| e.to_string())?);
+    }
+    out.reverse();
+    Ok(out)
+}
+
+/// 打开某个身份的会话索引。
+#[tauri::command]
+fn chat_open(app: AppHandle, user: String) -> Result<String, String> {
+    let user = identity_key(&user)?;
+    let conn = open_chat_db(&app, &user)?;
+    let mut convos = serde_json::Map::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT conv, COUNT(*), (SELECT body FROM msg m2 WHERE m2.conv = msg.conv ORDER BY ord DESC LIMIT 1)
+                 FROM msg GROUP BY conv",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let (id, n, body) = row.map_err(|e| e.to_string())?;
+            let last: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+            convos.insert(id, json!({"count": n, "last": last}));
+        }
+    }
+    let mut unread = serde_json::Map::new();
+    {
+        let mut stmt = conn.prepare("SELECT conv, n FROM unread WHERE n > 0").map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))).map_err(|e| e.to_string())?;
+        for row in rows {
+            let (id, n) = row.map_err(|e| e.to_string())?;
+            unread.insert(id, json!(n));
+        }
+    }
+    serde_json::to_string(&json!({"v": 2, "unread": unread, "convos": convos})).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn chat_tail(app: AppHandle, user: String, conv: String, limit: u32) -> Result<String, String> {
+    let conn = open_chat_db(&app, &user)?;
+    let conv = conv_key(&conv)?;
+    let n = (limit.max(1) as i64).min(200);
+    let mut stmt = conn
+        .prepare("SELECT body FROM msg WHERE conv=?1 ORDER BY ord DESC LIMIT ?2")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![conv, n], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    let mut bodies = Vec::new();
+    for row in rows {
+        bodies.push(row.map_err(|e| e.to_string())?);
+    }
+    bodies.reverse();
+    bodies_to_json(bodies)
+}
+
+#[tauri::command]
+fn chat_before(app: AppHandle, user: String, conv: String, before: u32, limit: u32) -> Result<String, String> {
+    let conn = open_chat_db(&app, &user)?;
+    let conv = conv_key(&conv)?;
+    let n = (limit.max(1) as i64).min(200);
+    bodies_to_json(window_bodies(&conn, &conv, before as i64, n)?)
+}
+
+#[tauri::command]
+fn chat_around(app: AppHandle, user: String, conv: String, id: String, limit: u32) -> Result<String, String> {
+    let conn = open_chat_db(&app, &user)?;
+    let conv = conv_key(&conv)?;
+    let n = (limit.max(1) as i64).min(200);
+    let at: Option<i64> = conn
+        .query_row(
+            "SELECT idx FROM (
+               SELECT id, ROW_NUMBER() OVER (ORDER BY ord) - 1 AS idx
+               FROM msg WHERE conv=?1
+             ) WHERE id=?2",
+            rusqlite::params![conv, id],
+            |r| r.get(0),
+        )
+        .ok();
+    let Some(at) = at else {
+        return serde_json::to_string(&json!({"start": 0, "msgs": []})).map_err(|e| e.to_string());
+    };
+    let start = (at - n / 2).max(0);
+    let end = start + n;
+    let mut stmt = conn
+        .prepare(
+            "SELECT body FROM (
+               SELECT body, ROW_NUMBER() OVER (ORDER BY ord) - 1 AS idx
+               FROM msg WHERE conv=?1
+             ) WHERE idx >= ?2 AND idx < ?3 ORDER BY idx",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![conv, start, end], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    let mut bodies = Vec::new();
+    for row in rows {
+        bodies.push(row.map_err(|e| e.to_string())?);
+    }
+    let msgs: Vec<Value> = bodies.into_iter().filter_map(|s| serde_json::from_str(&s).ok()).collect();
+    serde_json::to_string(&json!({"start": start, "msgs": msgs})).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn chat_append(app: AppHandle, user: String, conv: String, msg: String) -> Result<bool, String> {
+    let mut conn = open_chat_db(&app, &user)?;
+    let conv = conv_key(&conv)?;
+    let value: Value = serde_json::from_str(&msg).map_err(|_| "bad_json".to_string())?;
+    Ok(insert_msgs(&mut conn, &conv, &[value])? > 0)
+}
+
+#[tauri::command]
+fn chat_append_many(app: AppHandle, user: String, conv: String, data: String) -> Result<u32, String> {
+    if data.len() > 8 * 1024 * 1024 {
+        return Err("too_large".into());
+    }
+    let mut conn = open_chat_db(&app, &user)?;
+    let conv = conv_key(&conv)?;
+    let values: Vec<Value> = serde_json::from_str(&data).map_err(|_| "bad_json".to_string())?;
+    Ok(insert_msgs(&mut conn, &conv, &values)? as u32)
+}
+
+#[tauri::command]
+fn chat_unread_save(app: AppHandle, user: String, data: String) -> Result<(), String> {
+    let conn = open_chat_db(&app, &user)?;
+    let unread: Value = serde_json::from_str(&data).map_err(|_| "bad_json".to_string())?;
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM unread", []).map_err(|e| e.to_string())?;
+    if let Some(map) = unread.as_object() {
+        for (id, n) in map {
+            let Ok(key) = conv_key(id) else { continue };
+            let count = n.as_i64().unwrap_or(0);
+            if count > 0 {
+                tx.execute("INSERT INTO unread(conv, n) VALUES (?1, ?2)", rusqlite::params![key, count]).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn chat_search(app: AppHandle, user: String, conv: String, q: String, limit: u32) -> Result<String, String> {
+    let conn = open_chat_db(&app, &user)?;
+    let conv = conv_key(&conv)?;
+    let n = (limit.max(1) as i64).min(80);
+    let needle = format!("%{}%", q.trim().replace('%', ""));
+    let mut stmt = conn
+        .prepare("SELECT body FROM msg WHERE conv=?1 AND (?2 = '%%' OR body LIKE ?2) ORDER BY ord DESC LIMIT ?3")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![conv, needle, n], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    let mut bodies = Vec::new();
+    for row in rows {
+        bodies.push(row.map_err(|e| e.to_string())?);
+    }
+    bodies.reverse();
+    bodies_to_json(bodies)
 }
 
 /// 列出全部用户身份（公钥 hex）。仅解锁后可用；种子加密存 `identities/<pubkey>.enc`。
@@ -1260,6 +1695,52 @@ fn norm_account(local: &str, domain: &str) -> Result<(String, String), String> {
     Ok((local, domain))
 }
 
+fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines().find_map(|line| {
+        let (k, v) = line.split_once(':')?;
+        if k.eq_ignore_ascii_case(name) { Some(v.trim()) } else { None }
+    })
+}
+
+fn decode_chunked(mut rest: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    loop {
+        let nl = rest.windows(2).position(|w| w == b"\r\n").ok_or("分块不完整")?;
+        let size_line = std::str::from_utf8(&rest[..nl]).map_err(|_| "分块长度无效".to_string())?;
+        let size_hex = size_line.split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(size_hex, 16).map_err(|_| "分块长度无效".to_string())?;
+        rest = &rest[nl + 2..];
+        if size == 0 {
+            break;
+        }
+        if rest.len() < size + 2 {
+            return Err("分块被截断".into());
+        }
+        out.extend_from_slice(&rest[..size]);
+        if &rest[size..size + 2] != b"\r\n" {
+            return Err("分块格式不对".into());
+        }
+        rest = &rest[size + 2..];
+    }
+    Ok(out)
+}
+
+fn http_message(raw: &[u8]) -> Result<(u16, String), String> {
+    let sep = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or("响应不完整")?;
+    let head = std::str::from_utf8(&raw[..sep]).map_err(|_| "响应头不是文本".to_string())?;
+    let rest = &raw[sep + 4..];
+    let code: u16 = head.lines().next().and_then(|l| l.split_whitespace().nth(1)).and_then(|c| c.parse().ok()).unwrap_or(0);
+    let body = if header_value(head, "transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked")) {
+        decode_chunked(rest)?
+    } else if let Some(n) = header_value(head, "content-length").and_then(|v| v.parse::<usize>().ok()) {
+        let n = n.min(rest.len());
+        rest[..n].to_vec()
+    } else {
+        rest.to_vec()
+    };
+    Ok((code, String::from_utf8_lossy(&body).into_owned()))
+}
+
 /// 用 OpenSSL 发 HTTPS GET。系统 TLS 和 rustls 连 robot.link 会在 ClientHello 后被重置。
 fn https_get_json(url: &str) -> Result<Value, String> {
     let rest = url.strip_prefix("https://").ok_or("注册中心地址必须是 https")?;
@@ -1288,14 +1769,7 @@ fn https_get_json(url: &str) -> Result<Value, String> {
     std::io::Write::write_all(&mut stream, req.as_bytes()).map_err(|e| format!("请求注册中心失败: {e}"))?;
     let mut raw = Vec::new();
     std::io::Read::read_to_end(&mut stream, &mut raw).map_err(|e| format!("读取注册中心响应失败: {e}"))?;
-    let text = String::from_utf8_lossy(&raw);
-    let (head, body) = text.split_once("\r\n\r\n").ok_or("注册中心响应不完整")?;
-    let code: u16 = head
-        .lines()
-        .next()
-        .and_then(|l| l.split_whitespace().nth(1))
-        .and_then(|c| c.parse().ok())
-        .unwrap_or(0);
+    let (code, body) = http_message(&raw)?;
     let v: Value = serde_json::from_str(body.trim()).map_err(|e| format!("注册中心响应无法解析: {e}"))?;
     if !(200..300).contains(&code) {
         let err = v.get("error").and_then(|x| x.as_str()).unwrap_or("注册中心拒绝了请求");
@@ -1613,13 +2087,11 @@ fn https_get_raw(url: &str) -> Result<(u16, String), String> {
     std::io::Write::write_all(&mut stream, req.as_bytes()).map_err(|e| e.to_string())?;
     let mut raw = Vec::new();
     std::io::Read::read_to_end(&mut stream, &mut raw).map_err(|e| e.to_string())?;
-    let text = String::from_utf8_lossy(&raw);
-    let (head, body) = text.split_once("\r\n\r\n").ok_or("响应不完整")?;
-    let code: u16 = head.lines().next().and_then(|l| l.split_whitespace().nth(1)).and_then(|c| c.parse().ok()).unwrap_or(0);
+    let (code, body) = http_message(&raw)?;
     if !(200..300).contains(&code) {
         return Err(format!("HTTP {code}"));
     }
-    Ok((code, body.to_string()))
+    Ok((code, body))
 }
 
 fn rate_num(v: &Value) -> Option<f64> {
@@ -1722,27 +2194,30 @@ fn rss_text(block: &str, tag: &str) -> Option<String> {
     if text.is_empty() { None } else { Some(text.to_string()) }
 }
 
-fn ticker_news() -> Option<Value> {
-    let (_code, body) = https_get_raw("https://www.chinanews.com.cn/rss/scroll-news.xml").ok()?;
-    let mut rows = Vec::new();
-    for item in body.split("<item>").skip(1).take(8) {
+fn ticker_news() -> Vec<Value> {
+    let Ok((_code, body)) = https_get_raw("https://www.chinanews.com.cn/rss/scroll-news.xml") else {
+        return Vec::new();
+    };
+    let mut items = Vec::new();
+    for item in body.split("<item>").skip(1) {
         let Some(title) = rss_text(item, "title") else { continue };
         let link = rss_text(item, "link").unwrap_or_default();
         let when = rss_text(item, "pubDate").unwrap_or_default();
-        rows.push(ticker_row(&title, &when, "", &link));
-        if rows.len() == 8 { break; }
+        let n = items.len();
+        items.push(json!({
+            "id": format!("news-{n}"),
+            "title": title,
+            "label": format!("要闻  {title}"),
+            "source": "中国新闻网",
+            "url": link,
+            "note": when,
+            "rows": [ticker_row(&title, &when, "", &link)],
+        }));
+        if items.len() == 8 {
+            break;
+        }
     }
-    let first = rows.first()?.get("label")?.as_str()?.to_string();
-    let url = rows.first().and_then(|r| r.get("url")).and_then(|u| u.as_str()).unwrap_or("").to_string();
-    Some(json!({
-        "id": "news",
-        "title": "要闻",
-        "label": format!("要闻  {first}"),
-        "source": "中国新闻网",
-        "url": url,
-        "note": "滚动要闻",
-        "rows": rows,
-    }))
+    items
 }
 
 fn weather_phrase(code: i64) -> &'static str {
@@ -1835,7 +2310,7 @@ async fn ticker_feed(fx: bool, crypto: bool, news: bool, weather: bool) -> Resul
             if let Some(v) = ticker_crypto() { items.push(v); }
         }
         if news {
-            if let Some(v) = ticker_news() { items.push(v); }
+            items.extend(ticker_news());
         }
         if weather {
             if let Some(v) = ticker_weather() { items.push(v); }
@@ -1954,8 +2429,20 @@ pub fn run() {
             read_audit,
             ui_kv_get_all,
             ui_kv_set,
-            chat_log_load,
-            chat_log_save,
+            catalog_load,
+            catalog_save,
+            server_load,
+            server_save,
+            profile_load,
+            profile_save,
+            chat_open,
+            chat_tail,
+            chat_before,
+            chat_around,
+            chat_append,
+            chat_append_many,
+            chat_unread_save,
+            chat_search,
             #[cfg(desktop)]
             tray::tray_sync,
             #[cfg(desktop)]
@@ -1975,4 +2462,25 @@ pub fn run() {
             #[cfg(desktop)]
             tray::on_run_event(_app, &_ev);
         });
+}
+
+#[cfg(test)]
+mod http_body_tests {
+    use super::http_message;
+
+    #[test]
+    fn chunked_body_joins_pieces() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"a\"\r\n3\r\n:1}\r\n0\r\n\r\n";
+        let (code, body) = http_message(raw).unwrap();
+        assert_eq!(code, 200);
+        assert_eq!(body, "{\"a\":1}");
+    }
+
+    #[test]
+    fn content_length_stops_at_the_declared_end() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\n{\"a\":1}TAIL";
+        let (code, body) = http_message(raw).unwrap();
+        assert_eq!(code, 200);
+        assert_eq!(body, "{\"a\":1}");
+    }
 }

@@ -9,9 +9,15 @@
     --accent-soft:#17362b; --on-accent:#05221a;
     /* 代码 / 终端 / diff 块专用（双主题各一份；业务 css 禁止硬编码色值，一律引令牌） */
     --bg2:#0d1420; --code-ink:#c8d3e0;
-    --header-h:32px;
+    --header-h:40px;
     --aside-w:270px;
-    --r-ctrl:8px; --r-float:12px; --r-bubble:14px;
+    /* 字阶：13→21、16→26、26→42 为 φ 倍。间距为斐波那契并落在 4px 网格上。 */
+    --fs-meta:11px; --fs-sub:12px; --fs-ui:13px; --fs-body:14px; --fs-title:16px; --fs-name:21px; --fs-hero:26px; --fs-brand:42px;
+    --lh-body:1.618;
+    --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:20px; --sp-5:32px; --sp-6:52px;
+    --h-sm:24px; --h-md:32px; --h-lg:40px; --h-row:64px;
+    --av-xs:24px; --av-sm:32px; --av-md:40px; --av-lg:64px; --av-xl:104px;
+    --r-ctrl:8px; --r-float:12px; --r-bubble:16px;
     /* Apple 图标圆角：边长的约 22%，随头像尺寸缩放 */
     --avatar-radius:22%;
   }

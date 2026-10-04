@@ -1,3 +1,41 @@
+const I18N = {
+  "zh-CN": {
+    "login.title": "域名注册中心", "login.lead": "登记 acme.mesh 这类域名，解析为节点公钥。用户名 name@domain 不在这里。",
+    "login.user": "用户名", "login.pass": "密码", "login.submit": "登录",
+    "change.title": "修改初始密码", "change.lead": "首次登录，请设置新密码后进入。",
+    "change.old": "原密码", "change.new": "新密码（至少 6 位）", "change.again": "确认新密码", "change.save": "保存并进入",
+    "change.mismatch": "两次新密码不一致",
+    "shell.title": "全球域名注册", "shell.logout": "退出", "lang": "English",
+    "col.domain": "域名", "col.email": "邮箱", "col.node": "节点", "col.status": "状态", "col.time": "时间",
+    "status.pending": "待审", "status.approved": "已通过", "status.rejected": "已驳回",
+    "act.approve": "通过", "act.reject": "驳回",
+  },
+  en: {
+    "login.title": "Domain registry", "login.lead": "Register names like acme.mesh and resolve them to a node key. User names such as name@domain are not stored here.",
+    "login.user": "Username", "login.pass": "Password", "login.submit": "Sign in",
+    "change.title": "Change the initial password", "change.lead": "First sign-in. Set a new password to continue.",
+    "change.old": "Current password", "change.new": "New password (at least 6 characters)", "change.again": "Confirm new password", "change.save": "Save and continue",
+    "change.mismatch": "The two new passwords do not match",
+    "shell.title": "Domain registry", "shell.logout": "Sign out", "lang": "中文",
+    "col.domain": "Domain", "col.email": "Email", "col.node": "Node", "col.status": "Status", "col.time": "Time",
+    "status.pending": "Pending", "status.approved": "Approved", "status.rejected": "Rejected",
+    "act.approve": "Approve", "act.reject": "Reject",
+  },
+};
+function domLocale() {
+  const saved = localStorage.getItem("nmdomain-locale") || "";
+  if (I18N[saved]) return saved;
+  return (navigator.language || "").toLowerCase().startsWith("en") ? "en" : "zh-CN";
+}
+let DOM_LOCALE = domLocale();
+function t(key) { return (I18N[DOM_LOCALE] && I18N[DOM_LOCALE][key]) || I18N["zh-CN"][key] || key; }
+function toggleDomLocale() {
+  DOM_LOCALE = DOM_LOCALE === "en" ? "zh-CN" : "en";
+  localStorage.setItem("nmdomain-locale", DOM_LOCALE);
+  location.reload();
+}
+document.documentElement.lang = DOM_LOCALE === "en" ? "en" : "zh-CN";
+
 const COPY_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
 
 const TOKEN_KEY = "nmdomain-token";
@@ -88,16 +126,18 @@ class DomainLogin extends HTMLElement {
   connectedCallback() {
     this.innerHTML = `
     <div class="screen"><div class="card auth">
-      <h1>域名注册中心</h1>
-      <p class="lead">登记 acme.mesh 这类域名，解析为节点公钥。用户名 name@domain 不在这里。</p>
+      <h1>${t("login.title")}</h1>
+      <p class="lead">${t("login.lead")}</p>
       <form>
-        <label>用户名<input name="u" value="admin" autocomplete="username"></label>
-        <label>密码<input name="p" type="password" autocomplete="current-password"></label>
+        <label>${t("login.user")}<input name="u" value="admin" autocomplete="username"></label>
+        <label>${t("login.pass")}<input name="p" type="password" autocomplete="current-password"></label>
         <div class="err" hidden></div>
-        <button class="btn btn--primary btn--block" type="submit">登录</button>
+        <button class="btn btn--primary btn--block" type="submit">${t("login.submit")}</button>
       </form>
+      <button class="btn" type="button" id="dom-lang">${t("lang")}</button>
     </div></div>`;
     const form = this.querySelector("form"), err = this.querySelector(".err");
+    this.querySelector("#dom-lang").onclick = () => toggleDomLocale();
     form.addEventListener("submit", async (e) => {
       e.preventDefault(); err.hidden = true;
       try {
@@ -113,20 +153,20 @@ class DomainChange extends HTMLElement {
   connectedCallback() {
     this.innerHTML = `
     <div class="screen"><div class="card auth">
-      <h1>修改初始密码</h1>
-      <p class="lead">首次登录，请设置新密码后进入。</p>
+      <h1>${t("change.title")}</h1>
+      <p class="lead">${t("change.lead")}</p>
       <form>
-        <label>原密码<input name="o" type="password"></label>
-        <label>新密码（至少 6 位）<input name="n" type="password"></label>
-        <label>确认新密码<input name="c" type="password"></label>
+        <label>${t("change.old")}<input name="o" type="password"></label>
+        <label>${t("change.new")}<input name="n" type="password"></label>
+        <label>${t("change.again")}<input name="c" type="password"></label>
         <div class="err" hidden></div>
-        <button class="btn btn--primary btn--block" type="submit">保存并进入</button>
+        <button class="btn btn--primary btn--block" type="submit">${t("change.save")}</button>
       </form>
     </div></div>`;
     const form = this.querySelector("form"), err = this.querySelector(".err");
     form.addEventListener("submit", async (e) => {
       e.preventDefault(); err.hidden = true;
-      if (form.n.value !== form.c.value) { err.textContent = "两次新密码不一致"; err.hidden = false; return; }
+      if (form.n.value !== form.c.value) { err.textContent = t("change.mismatch"); err.hidden = false; return; }
       try {
         await api("/api/change-password", { method: "POST", body: { oldPassword: form.o.value, newPassword: form.n.value } });
         this.dispatchEvent(new CustomEvent("domain:navigate", { detail: "shell", bubbles: true }));
@@ -141,9 +181,10 @@ class DomainShell extends HTMLElement {
     this.q = "";
     this.innerHTML = `
     <div class="shell">
-      <header class="top"><h1>全球域名注册</h1><span><button class="btn" type="button" id="logout">退出</button></span></header>
+      <header class="top"><h1>${t("shell.title")}</h1><span><button class="btn" type="button" id="dom-lang">${t("lang")}</button> <button class="btn" type="button" id="logout">${t("shell.logout")}</button></span></header>
       <section class="host"></section>
     </div>`;
+    this.querySelector("#dom-lang").onclick = () => toggleDomLocale();
     this.querySelector("#logout").onclick = async () => {
       try { await api("/api/logout", { method: "POST" }); } catch {}
       sessionStorage.removeItem(TOKEN_KEY);
@@ -166,11 +207,11 @@ class DomainShell extends HTMLElement {
       <td><b>${esc(a.domain)}</b></td>
       <td>${esc(a.email || "—")}</td>
       <td><code class="mono">${shortId(a.node_id)}</code></td>
-      <td>${a.status === "pending" ? "待审" : a.status === "approved" ? "已通过" : "已驳回"}</td>
+      <td>${a.status === "pending" ? t("status.pending") : a.status === "approved" ? t("status.approved") : t("status.rejected")}</td>
       <td>${esc(fmtTime(a.created_ms))}</td>
       <td class="right">${a.status === "pending"
-        ? `<button class="btn btn--primary" type="button" data-approve="${esc(a.domain)}">通过</button>
-           <button class="btn btn--danger" type="button" data-reject="${esc(a.domain)}">驳回</button>`
+        ? `<button class="btn btn--primary" type="button" data-approve="${esc(a.domain)}">${t("act.approve")}</button>
+           <button class="btn btn--danger" type="button" data-reject="${esc(a.domain)}">${t("act.reject")}</button>`
         : ""}</td>
     </tr>`).join("");
     const rows = (data.items || []).map((r) => `<tr>
@@ -201,7 +242,7 @@ class DomainShell extends HTMLElement {
       <b>域名申请</b>
       <p class="hint">节点通过 <code>/api/signup?nodeid=&amp;domain=</code> 提交。通过或驳回都会经本机 nmd 通知该节点。</p>
       <table class="tbl">
-        <thead><tr><th>域名</th><th>邮箱</th><th>节点</th><th>状态</th><th>申请时间</th><th></th></tr></thead>
+        <thead><tr><th>${t("col.domain")}</th><th>${t("col.email")}</th><th>${t("col.node")}</th><th>${t("col.status")}</th><th>${t("col.time")}</th><th></th></tr></thead>
         <tbody>${appRows || '<tr><td colspan="6" style="color:var(--muted)">没有申请</td></tr>'}</tbody>
       </table>
     </div>
@@ -211,7 +252,7 @@ class DomainShell extends HTMLElement {
         <button class="btn" type="submit">搜索</button>
       </form>
       <table class="tbl">
-        <thead><tr><th>域名</th><th>邮箱</th><th>节点公钥</th><th>登记时间</th><th>状态</th><th></th></tr></thead>
+        <thead><tr><th>${t("col.domain")}</th><th>${t("col.email")}</th><th>${t("col.node")}</th><th>${t("col.time")}</th><th>${t("col.status")}</th><th></th></tr></thead>
         <tbody>${rows || '<tr><td colspan="6" style="color:var(--muted)">还没有域名</td></tr>'}</tbody>
       </table>
       <div class="pager">

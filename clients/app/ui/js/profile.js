@@ -1,16 +1,29 @@
-// ── 用户资料（P0 富属性 + P1 内容寻址头像）：本地按身份持久（键 nmspace:profile:<pk>，经 store.js 写穿后端），
+// ── 用户资料（P0 富属性 + P1 内容寻址头像）：按公钥存在本机 SQLite。
 //    连接后经 update_profile 发布到家节点（目录 LWW 收敛 + 联邦扩散）。
 //    头像（P1）：选图 → 缩放 → blob_put 存到家节点内容寻址 blob 库 → 档案只带 "b3:<hash>"（不再内联撑爆目录）；
 //    展示端按 hash 经 blob_get 拉取 + 本地缓存。兼容 P0 遗留的内联 data:URI 头像。
 (function () {
-  const KEY = (pk) => "nmspace:profile:" + pk;
+  const MEM = {};
   const STATUS_OPTS = [["", "（不设置）"], ["online", "在线"], ["away", "离开"], ["busy", "忙碌"], ["dnd", "勿扰"]];
   const AV_MAX = 200 * 1024; // 缩放后原始图上限（内容寻址，节点侧约 1MiB 硬限）
   const avCache = new Map(); // "b3:<hash>" -> data:URI（会话内缓存，避免重复 blob_get）
   let pendingAvatar = null;  // 模态框内待保存头像：null=未改动 / ""=移除 / data:URI=新图
 
-  function get(pk) { if (!pk) return {}; try { return JSON.parse(localStorage.getItem(KEY(pk)) || "{}"); } catch (_) { return {}; } }
-  function save(pk, obj) { if (!pk) return; try { localStorage.setItem(KEY(pk), JSON.stringify(obj)); } catch (_) {} }
+  async function load() {
+    Object.keys(MEM).forEach((k) => delete MEM[k]);
+    if (!window.NM) return MEM;
+    try {
+      const obj = JSON.parse((await NM.inv("profile_load")) || "{}");
+      if (obj && typeof obj === "object") Object.assign(MEM, obj);
+    } catch (_) {}
+    return MEM;
+  }
+  function get(pk) { if (!pk || !MEM[pk] || typeof MEM[pk] !== "object") return {}; return Object.assign({}, MEM[pk]); }
+  function save(pk, obj) {
+    if (!pk) return;
+    MEM[pk] = obj;
+    if (window.NM) NM.inv("profile_save", { id: pk, data: JSON.stringify(obj) }).catch(() => {});
+  }
   function statusLabel(v) { const o = STATUS_OPTS.find((x) => x[0] === v); return o ? o[1] : v || ""; }
   function isImg(a) { return typeof a === "string" && /^data:image\//.test(a); }
   function isRef(a) { return typeof a === "string" && /^b3:[0-9a-fA-F]{64}$/.test(a); }
@@ -48,7 +61,7 @@
     const s = size || 40;
     if (isImg(avatar)) return `<img src="${avatar}" alt="" style="width:${s}px;height:${s}px;border-radius:var(--avatar-radius);object-fit:cover;display:block">`;
     const ch = (typeof escapeHtml === "function") ? escapeHtml(fallbackChar || "?") : (fallbackChar || "?");
-    return `<div style="width:${s}px;height:${s}px;border-radius:var(--avatar-radius);display:flex;align-items:center;justify-content:center;background:${bg || "var(--accent-soft)"};color:#fff;font-weight:700;font-size:${Math.round(s * 0.42)}px">${ch}</div>`;
+    return `<div class="av" style="width:${s}px;height:${s}px;flex:0 0 ${s}px;background:${bg || "var(--accent)"};font-size:${Math.round(s * 0.42)}px">${ch}</div>`;
   }
 
   // 选图 → 居中裁剪缩放到 size → JPEG data:URI。
@@ -245,7 +258,9 @@
     const box = document.getElementById("pf-av-prev");
     if (!box) return;
     const name = (document.getElementById("pf-name") || {}).value || "?";
-    box.innerHTML = avatarHtml(av, name.slice(0, 1), 96);
+    const pk = window.Identity && Identity.current && Identity.current();
+    const bg = (typeof avatarColor === "function" && pk) ? avatarColor(pk) : "var(--accent)";
+    box.innerHTML = avatarHtml(av, name.slice(0, 1), 96, bg);
   }
 
   async function onSave() {
@@ -293,7 +308,7 @@
     m.classList.add("on");
   }
 
-  window.Profile = { get, save, publish, open, statusLabel, avatarHtml, faceHtml, displayAvatar, isImg, isRef, resolveAvatar, resolveList, ownAvatar, presenceColor, presenceLabel, presenceDot, applyPresence, metaEditor };
+  window.Profile = { load, get, save, publish, open, statusLabel, avatarHtml, faceHtml, displayAvatar, isImg, isRef, resolveAvatar, resolveList, ownAvatar, presenceColor, presenceLabel, presenceDot, applyPresence, metaEditor };
   window.openProfileModal = open;
 
   // ── P2 在线状态 ──
@@ -301,6 +316,8 @@
     return p === "online" ? "#22c55e" : p === "away" ? "#f59e0b" : (p === "busy" || p === "dnd") ? "#ef4444" : "#94a3b8";
   }
   function presenceLabel(p) {
+    const key = { online: "presence.online", away: "presence.away", busy: "presence.busy", dnd: "presence.dnd" }[p] || "presence.offline";
+    if (window.t) return t(key);
     return ({ online: "在线", away: "离开", busy: "忙碌", dnd: "勿扰" })[p] || "离线";
   }
   // 头像角标小圆点（容器需 position:relative）。size=直径像素。

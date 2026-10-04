@@ -68,17 +68,18 @@ function nsRefresh() {
 function renderNodeSvcList() {
   const box = document.getElementById("nodesvc-list");
   if (!box) return;
-  const list = NodeSvc.list();
-  if (!list.length) { box.innerHTML = '<div class="ns-empty">还没有节点服务。点上方「新增节点服务」。</div>'; return; }
+  const all = NodeSvc.list();
+  const q = ((document.getElementById("ns-search") || {}).value || "").trim().toLowerCase();
+  const list = all.filter((s) => !q || (s.name || "").toLowerCase().includes(q) || (s.node || "").toLowerCase().includes(q) || (s.contact || "").toLowerCase().includes(q));
+  if (!list.length) { box.innerHTML = `<div class="ns-empty">${all.length ? "没有匹配的节点服务" : "还没有节点服务。点上方加号新建。"}</div>`; return; }
   box.innerHTML = list.map((s) => {
     const pk = NodeSvc.pubkeyOf(s.node) || s.node;
     const extra = [s.contact, s.location].filter(Boolean).join(" · ");
     return `<div class="ns-item ${s.id === NSVC_SEL ? "on" : ""}" data-id="${s.id}">
-      <span class="ns-mode">${s.mode}</span>
+      <span class="av">${nmIcon("nodes")}</span>
       <span class="ns-meta">
         <b>${escapeHtml(s.name || "(未命名)")}</b>
-        <small>${escapeHtml(shortNode(pk))}</small>
-        ${extra ? `<small class="ns-extra">${escapeHtml(extra)}</small>` : ""}
+        <small>${escapeHtml(shortNode(pk))}${extra ? " · " + escapeHtml(extra) : ""}</small>
       </span>
       <button class="ns-edit" data-edit="${s.id}" title="编辑">${nmIcon("edit")}</button>
       <button class="ns-del" data-del="${s.id}" title="删除">${nmIcon("close")}</button>
@@ -114,21 +115,26 @@ function renderNodeSvcDetail(id) {
   if (s.contact) fields.push(["联系方式", s.contact]);
   if (s.location) fields.push(["地理位置", s.location]);
   if (s.note) fields.push(["备注", s.note]);
-  const fieldHtml = fields.map(([l, v]) => `<div class="ed-field"><label>${escapeHtml(l)}</label><div class="ed-plain">${escapeHtml(v)}</div></div>`).join("");
+  const modeLabel = s.mode === "nat" ? "穿透" : s.mode === "lan" ? "同网" : s.mode === "selfhost" ? "自建" : s.mode;
+  const rows = [["连接方式", escapeHtml(modeLabel)], ["公钥", `<span class="mono">${escapeHtml(shortNode(NodeSvc.pubkeyOf(s.node) || s.node))}</span><button class="ns-btn" id="nsd-copy">复制</button>`]]
+    .concat(fields.map(([l, v]) => [escapeHtml(l), escapeHtml(v)]));
   conv.innerHTML = `
-    <div class="conv-head"><b>节点服务详情</b><span class="sp"></span><span class="conv-kind">${escapeHtml(s.mode)}</span></div>
-    <div class="ent-detail">
-      <div class="ed-avatar" style="background:var(--accent-soft);color:var(--aqua)">${nmIcon("nodes")}</div>
-      <div class="ed-name">${escapeHtml(s.name || "(未命名)")}</div>
-      <div class="ed-field"><label>节点公钥 / 地址</label>
-        <div class="ed-key"><code>${escapeHtml(s.node)}</code><button class="ns-btn ns-primary" id="nsd-copy">复制</button></div></div>
-      ${fieldHtml}
-      <div class="ed-actions"><button class="ns-btn ns-primary" id="nsd-edit">编辑</button><button class="ns-btn" id="nsd-del">删除</button></div>
+    <div class="conv-head"><b>节点服务</b></div>
+    <div class="detail-scroll"><div class="detail">
+      <div class="detail-hero">
+        <div class="ed-avatar" style="background:var(--accent-soft);color:var(--aqua)">${nmIcon("nodes")}</div>
+        <div>
+          <div class="detail-name">${escapeHtml(s.name || "(未命名)")}</div>
+          <div class="detail-sub">${escapeHtml(modeLabel)}</div>
+        </div>
+      </div>
+      <div class="detail-actions"><button class="ns-btn ns-primary" id="nsd-edit">编辑</button><button class="ns-btn ns-danger" id="nsd-del">删除</button></div>
+      <div class="detail-rows">${rows.map(([k, v]) => `<div class="detail-row"><span class="k">${k}</span><span class="v">${v}</span></div>`).join("")}</div>
       <div class="ed-users">
         <div class="ed-users-head"><span>此节点上的用户</span><button class="ns-btn" id="nsd-refresh">刷新</button></div>
         <div class="nsu-list" id="nsd-users"><div class="ns-empty">点「刷新」加载该节点的用户</div></div>
       </div>
-    </div>`;
+    </div></div>`;
   document.getElementById("nsd-copy").addEventListener("click", async () => {
     try { await navigator.clipboard.writeText(s.node); if (window.toast) toast("已复制节点公钥/地址"); }
     catch (_) { if (window.toast) toast("复制失败，请手动选中"); }
@@ -158,7 +164,7 @@ async function loadNodeUsers(s) {
     box.innerHTML = users.map((u) => `
       <div class="nsu-item">
         ${window.Profile ? Profile.faceHtml(u.id, u.name || "?", 32, "", u.avatar) : `<span class="av" style="background:${avatarColor(u.id)}">${escapeHtml((u.name || "?").slice(0, 1))}</span>`}
-        <span class="nsu-meta"><b>${escapeHtml(u.name || shortId(u.id))}</b><small>${escapeHtml(u.kind || "")} · ${escapeHtml(shortNode(u.id))}</small></span>
+        <span class="nsu-meta"><b>${escapeHtml(u.name || shortId(u.id))}</b><small>${escapeHtml(typeof typeMeta === "function" ? typeMeta(u.kind).label : (u.kind || ""))}</small></span>
         <button class="ns-btn nsu-add" data-id="${u.id}" data-kind="${escapeHtml(u.kind || "")}" data-name="${escapeHtml(u.name || "")}">添加</button>
       </div>`).join("");
     box.querySelectorAll(".nsu-add").forEach((b) => b.addEventListener("click", () => {
@@ -178,5 +184,7 @@ async function loadNodeUsers(s) {
 (function initNodeSvc() {
   const nw = document.getElementById("ns-new");
   if (nw) nw.addEventListener("click", () => buildSvcForm(document.getElementById("nodesvc-form"), null, nsRefresh));
+  const se = document.getElementById("ns-search");
+  if (se) se.addEventListener("input", renderNodeSvcList);
   renderNodeSvcList();
 })();

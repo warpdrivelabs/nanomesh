@@ -36,9 +36,13 @@
   function esc(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
   }
+  function marqueeHost() { return document.querySelector(".statusbar .tb-marquee"); }
   function setTrack(text) {
+    const host = marqueeHost();
     const track = document.getElementById("tb-marquee-track");
     if (!track) return;
+    if (!text) { if (host) host.hidden = true; track.innerHTML = ""; return; }
+    if (host) host.hidden = false;
     const safe = esc(text);
     track.innerHTML = `<span>${safe}</span><span aria-hidden="true">${safe}</span>`;
   }
@@ -92,7 +96,7 @@
     const c = cfg();
     if (!c.fx && !c.crypto && !c.news && !c.weather) {
       ITEMS = [];
-      setTrack("标题栏内容已关闭");
+      setTrack("");
       return;
     }
     try {
@@ -100,12 +104,12 @@
         fx: !!c.fx, crypto: !!c.crypto, news: !!c.news, weather: !!c.weather,
       });
       ITEMS = (r && r.items) || [];
-      if (!ITEMS.length) setTrack("行情暂时不可用");
-      else setItems(ITEMS);
+      if (!ITEMS.length) setTrack("");
+      else { setTrack(" "); setItems(ITEMS); }
       applySpeed(c.speed);
     } catch (_) {
       ITEMS = [];
-      setTrack("行情暂时不可用");
+      setTrack("");
     }
   }
   function init() {
