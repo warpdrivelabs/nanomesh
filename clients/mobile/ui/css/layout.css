@@ -1,0 +1,151 @@
+﻿  .cmx-act img{width:32px;height:32px;border-radius:8px;object-fit:cover;display:block}
+  .cmx-act:hover{background:var(--hover)}
+  /* 用户菜单样式已删除（重构：收拢进设置中心「账户」分区，见 css/settings.css） */
+  button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
+  ::-webkit-scrollbar{width:8px;height:8px} ::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--border2) 65%,var(--ink));border-radius:4px} ::-webkit-scrollbar-track{background:transparent}
+
+  /* 原生标题条：贯穿窗口顶部一整行，与系统交通灯同一行（Overlay 标题栏）。
+     整条可拖动（app-region: drag）；左侧留 78px 给交通灯；右侧放控件（控件本身设 no-drag）。
+     左侧 82px 留白仅 macOS 需要（系统红绿灯浮在其上）；Windows/Linux 无原生装饰，JS 加 .no-native-decor
+     后去掉左 padding，标题条左对齐、右侧改放自绘窗口控件（.win-ctrls）。 */
+  .titlebar{height:40px;flex:0 0 40px;display:flex;align-items:center;gap:8px;position:relative;
+    background:var(--panel);border-bottom:1px solid var(--border);
+    padding:0 10px;-webkit-app-region:drag;user-select:none}
+  .tb-brand{display:flex;align-items:center;gap:8px;flex:none;cursor:grab;-webkit-app-region:drag}
+  .tb-brand:active{cursor:grabbing}
+  .tb-app-icon,.titlebar .tb-title{-webkit-app-region:drag}
+  .tb-app-icon{width:22px;height:22px;border-radius:var(--avatar-radius);corner-shape:squircle;object-fit:cover;display:block;flex:none}
+  .titlebar .tb-title{font-size:13px;color:var(--ink);font-weight:700;letter-spacing:0.04em}
+  .tb-ctrls{display:flex;align-items:center;gap:2px;-webkit-app-region:no-drag;flex:none}
+  .tb-marquee{flex:1 1 0;width:0;min-width:0;align-self:stretch;overflow:hidden;display:flex;align-items:center}
+  .tb-marquee-track{display:flex;width:max-content;white-space:nowrap;color:var(--ink2);font-size:12px;will-change:transform;
+    animation-name:tb-marquee;animation-timing-function:linear;animation-iteration-count:infinite;animation-duration:48s}
+  .tb-marquee-track span{padding-right:4em}
+  .tb-tick{border:none;background:transparent;color:inherit;font:inherit;padding:0 0.15em;cursor:pointer}
+  .tb-tick:hover{color:var(--ink)}
+  .tb-tick-sep{color:var(--muted);padding:0 0.7em}
+  .tb-marquee:hover .tb-marquee-track{animation-play-state:paused}
+  @keyframes tb-marquee{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+  .tb-ticker-pop{position:absolute;top:auto;bottom:calc(100% + 6px);right:8px;left:auto;z-index:30;display:flex;flex-direction:column;gap:8px;
+    min-width:180px;padding:10px 12px;background:var(--panel2);border:1px solid var(--border2);
+    border-radius:var(--r-float);box-shadow:0 10px 28px rgba(0,0,0,.35);-webkit-app-region:no-drag}
+  .tb-ticker-pop[hidden]{display:none}
+  .tb-ticker-pop label{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink);cursor:pointer}
+  .tb-speed{gap:10px}
+  .tb-speed input[type=range]{flex:1;height:4px;accent-color:var(--aqua);cursor:pointer}
+  .tb-btn{display:flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border-radius:var(--r-ctrl);color:var(--ink2);
+    font-size:12px;background:transparent;border:1px solid transparent}
+  .tb-btn:hover{background:var(--hover);color:var(--ink);border-color:var(--border)}
+  .tb-btn .ico{font-size:14px;line-height:1}
+  .tb-update{color:var(--aqua)} .tb-update:hover{border-color:var(--aqua)}
+  /* Windows/Linux 窗口控件（最小化/最大化/关闭）：默认隐藏，initPlatformChrome 探测非 macOS 后 display:flex */
+  .win-ctrls{display:flex;align-items:center;gap:8px;-webkit-app-region:no-drag;margin-left:auto;flex:none}
+  .tl{width:13px;height:13px;border-radius:50%;border:none;padding:0;flex:none}
+  .tl-red{background:#ff5f57}
+  .tl-yellow{background:#febc2e}
+  .tl-green{background:#28c840}
+  .tl:hover{filter:brightness(0.92)}
+  .win-btn{display:flex;align-items:center;justify-content:center;width:44px;height:32px;color:var(--ink2);border-radius:0}
+  .win-btn:hover{background:var(--hover);color:var(--ink)}
+  .win-btn.win-close:hover{background:var(--red);color:#fff}
+  .win-btn .ico{font-size:12px;line-height:1}
+  /* 无系统边框缩放热区：仅 Windows/Linux 显示（initPlatformChrome 控制），macOS 用系统边框缩放 */
+  .resize-handle{position:fixed;z-index:9999;display:none}
+  body.no-native-decor .resize-handle{display:block}
+  .rh-t{top:0;left:10px;right:10px;height:6px;cursor:n-resize}
+  .rh-b{bottom:0;left:10px;right:10px;height:6px;cursor:s-resize}
+  .rh-l{top:10px;bottom:10px;left:0;width:6px;cursor:w-resize}
+  .rh-r{top:10px;bottom:10px;right:0;width:6px;cursor:e-resize}
+  .rh-tl{top:0;left:0;width:10px;height:10px;cursor:nw-resize}
+  .rh-tr{top:0;right:0;width:10px;height:10px;cursor:ne-resize}
+  .rh-bl{bottom:0;left:0;width:10px;height:10px;cursor:sw-resize}
+  .rh-br{bottom:0;right:0;width:10px;height:10px;cursor:se-resize}
+  /* 侧栏折叠 */
+  body.sidebar-collapsed aside{display:none}
+
+  /* ── 左侧栏 ── */
+  aside{width:var(--aside-w);flex:0 0 var(--aside-w);background:var(--panel);
+    display:flex;flex-direction:column;padding:0 10px;position:relative}
+  /* 左右分栏拖动条：单条分隔线（取代 aside 右边框），中间有可拖动手柄 */
+  .splitter{flex:0 0 6px;align-self:stretch;cursor:col-resize;position:relative;z-index:5;background:transparent}
+  .splitter::before{content:"";position:absolute;top:0;bottom:0;left:50%;transform:translateX(-50%);width:1px;background:var(--border)}
+  .splitter::after{content:"";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:4px;height:34px;border-radius:3px;background:var(--aqua);opacity:0;transition:opacity .15s,height .15s}
+  .splitter:hover::after,.splitter.dragging::after{opacity:1;height:52px}
+  body.sidebar-collapsed .splitter{display:none}
+  /* 三面板：同一时刻只显示一个 */
+  .panel{display:none;flex-direction:column;flex:1;min-height:0}
+  .panel.on{display:flex}
+  /* IM / 插件 面板共用件 */
+  .im-search{position:relative;padding:8px 4px}
+  .im-search-ico{position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--muted);pointer-events:none}
+  .im-search input{width:100%;height:32px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-ctrl);
+    padding:0 11px 0 30px;color:var(--ink);font-size:13px;outline:none;font-family:inherit}
+  .im-search input:focus{border-color:var(--aqua)}
+  .im-list,
+  /* Telegram 式会话行 */
+  .im-item{display:flex;gap:10px;padding:9px 8px;border-radius:var(--r-ctrl);cursor:pointer}
+  .im-item:hover{background:var(--hover)}
+  .im-item .av{width:40px;height:40px;border-radius:var(--avatar-radius);flex:0 0 40px;display:flex;align-items:center;justify-content:center;
+    font-size:16px;color:#fff}
+  .im-item .mid{flex:1;min-width:0}
+  .im-item .r1{display:flex;align-items:center;gap:6px} .im-item .nm{font-weight:600;font-size:14px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .im-item .tm{font-size:11px;color:var(--muted);flex:0 0 auto}
+  .im-item .r2{display:flex;align-items:center;gap:6px;margin-top:2px}
+  .im-item .msg{flex:1;font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .im-item .nm-handle{color:var(--aqua);font-family:ui-monospace,Menlo,monospace;font-size:11.5px}
+  .im-item .nm-handle--inline{font-size:11px;flex:0 0 auto}
+  .im-item .unread{min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:var(--aqua);color:var(--on-accent);
+    font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+  /* VSCode 式插件行 */
+  .plug-item{display:flex;gap:10px;padding:9px 8px;border-radius:8px;cursor:pointer}
+  .plug-item:hover{background:var(--hover)}
+  .plug-item .pic{width:40px;height:40px;border-radius:8px;flex:0 0 40px;display:flex;align-items:center;justify-content:center;
+    font-size:16px;color:#fff}
+  .plug-item .pm{flex:1;min-width:0}
+  .plug-item .pn{font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .plug-item .pd{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+  .plug-item .pmeta{font-size:11px;color:var(--muted);margin-top:3px}
+  .plug-item .pbtn{align-self:center;font-size:12px;padding:4px 10px;border-radius:8px;border:1px solid var(--border2);color:var(--ink2);flex:0 0 auto}
+  .plug-item .pbtn.installed{color:var(--aqua);border-color:var(--aqua)}
+  .plug-item .pbtn:hover{background:var(--hover)}
+  .brand{display:flex;align-items:center;gap:9px;height:var(--header-h);box-sizing:border-box;
+    margin:0 -10px;padding:0 14px;border-bottom:1px solid var(--border)}
+  .brand
+  .brand .uname{font-weight:700;font-size:14px} .brand .v{color:var(--muted);font-size:11px;margin-left:auto;font-weight:400}
+  .newbtn{display:flex;align-items:center;gap:9px;width:100%;padding:11px 12px;border-radius:8px;
+    background:var(--surface);border:1px solid var(--border2);font-weight:600;font-size:14px;margin:12px 0 8px}
+  .newbtn:hover{background:var(--hover)} .newbtn .plus{font-size:16px;color:var(--aqua)}
+  nav{display:flex;flex-direction:column;gap:1px}
+  .navitem{display:flex;align-items:center;gap:11px;padding:9px 12px;border-radius:8px;color:var(--ink2);font-size:14px}
+  .navitem:hover{background:var(--hover);color:var(--ink)} .navitem .i{width:17px;text-align:center;opacity:.85}
+  .navitem.active{background:var(--hover);color:var(--ink);font-weight:600} /* 「助理」入口：会话打开时点亮 */
+  .navitem .tag{margin-left:auto;font-size:11px;color:var(--muted)}
+  .seclabel{color:var(--ink2);font-size:14px;font-weight:600;padding:14px 12px 6px;display:flex;align-items:center;gap:6px}
+  .seclabel .c{color:var(--ink2)}
+  .tasklist{flex:1;overflow:auto;margin:0 -2px}
+  /* 会话分组（对齐手绘示意）：顶层「项目」标签 + 纯文字组头（空间名/任务）+ 缩进会话；
+     折叠箭头与空间 ⋯ 仅悬停淡显，保持列表素净 */
+  .tl-group{margin:2px 0 4px}
+  .tl-head{display:flex;align-items:center;gap:6px;padding:7px 12px;color:var(--muted);font-size:12px;font-weight:600;border-radius:8px;cursor:pointer}
+  .tl-head:hover{background:var(--hover);color:var(--ink2)}
+  /* 任务组头与「空间」区标签平级：同字号同色（对齐 navitem 的 ink2/14px），保留点击折叠 */
+  .tl-head.section{color:var(--ink2);font-size:14px;padding:14px 12px 6px}
+  .tl-head.section:hover{background:none;color:var(--ink2)}
+  .tl-head.section .tl-chev{margin-left:4px}
+  .tl-ico{font-size:12px}
+  .tl-name{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tl-more{opacity:0;color:var(--muted);font-size:14px;padding:0 3px;cursor:pointer}
+  .tl-head:hover .tl-more{opacity:.85} .tl-more:hover{color:var(--ink);opacity:1}
+  .tl-chev{opacity:0;font-size:11px;color:var(--muted);transition:transform .15s}
+  .tl-head:hover .tl-chev{opacity:.9}
+  .tl-group.folded .tl-chev{opacity:.9;transform:rotate(-90deg)}
+  .tl-group.folded .tl-items{display:none}
+  .tl-items{display:flex;flex-direction:column}
+  .tl-items .task{padding-left:26px}
+  /* tl-wsmenu 定位/层级由 dropdown.css 的 .floating-menu 基类（fixed + z-index:1200）与 .tl-wsmenu 紧凑覆盖统一管理 */
+  .task{display:flex;align-items:center;gap:8px;padding:9px 12px;border-radius:8px;color:var(--ink2);font-size:14px}
+  .task:hover{background:var(--hover);color:var(--ink)} .task.active{background:var(--surface);color:var(--ink)}
+  .task .tt{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .task .tm{font-size:11px;color:var(--muted);flex:0 0 auto}
+  .task .del{opacity:0;color:var(--muted);font-size:14px;padding:0 2px} .task:hover .del{opacity:.7} .task .del:hover{color:var(--red);opacity:1}
+  .empty-tasks{color:var(--muted);font-size:12px;padding:10px 12px;line-height:1.7}

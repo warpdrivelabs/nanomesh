@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<!-- NANO MESH 桌面前端 · 采用 cmx-agent 窗口外壳（自绘标题栏 + 活动栏 + 侧栏 + splitter），
+     仅保留「即时通讯」；连接页复用其太空品牌页。数据层走 nmspace 的 Tauri 命令
+     （connect/send_to/directory_query/my_id/disconnect）+ 事件 core://event。 -->
+<html lang="zh" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>NANO MESH</title>
+  <link rel="icon" type="image/png" href="nanomesh-logo.png" />
+  <link rel="stylesheet" href="css/tokens.css" />
+  <link rel="stylesheet" href="css/layout.css" />
+  <link rel="stylesheet" href="css/login.css" />
+  <link rel="stylesheet" href="css/im.css" />
+  <link rel="stylesheet" href="css/mobile.css" />
+  <link rel="stylesheet" href="css/shell.css" />
+</head>
+<body class="mobile">
+
+<!-- ═════════════════ 主视图（已连接）═════════════════ -->
+<div id="main-view" class="spa-view" style="display:none">
+  <!-- 用户菜单仍由 usermenu.js 使用；手机「我」页直接调用同样的操作。 -->
+  <div class="user-menu" id="user-menu"></div>
+  <!-- 安全设置：左侧导航 + 右侧面板 -->
+  <div class="sec-overlay" id="sec-modal">
+    <div class="dlg">
+      <div class="dlg-head"><span class="ico" data-ico="shield"></span><span class="dlg-title">安全设置</span><span class="dlg-sub">本机密钥库的保护与找回</span><button class="sec-x" id="sec-close" title="关闭"><span class="ico" data-ico="close"></span></button></div>
+      <div class="dlg-main">
+        <nav class="dlg-nav">
+          <button class="on" data-pane="lock"><span data-ico="clock"></span>自动锁定</button>
+          <button data-pane="master"><span data-ico="lock"></span>主口令</button>
+          <button data-pane="backup"><span data-ico="file"></span>加密备份</button>
+          <button data-pane="recovery"><span data-ico="key"></span>恢复码</button>
+          <button data-pane="audit"><span data-ico="list"></span>安全日志</button>
+          <div class="dlg-nav-sep"></div>
+          <button id="sec-dev-open"><span data-ico="device"></span>我的设备</button>
+        </nav>
+        <section class="dlg-pane" data-pane="lock">
+          <div class="pane-head"><div><div class="pane-t">自动锁定</div><div class="pane-d">离开应用后自动锁住本机密钥库，解锁需要主口令。改动立即生效。</div></div></div>
+          <div class="sec-row"><label>空闲多少分钟后自动锁定</label><input id="sec-al-min" type="number" min="1" value="10" inputmode="numeric" /></div>
+          <label class="set-row"><span class="set-txt"><b>切到其他应用时锁定</b><small>切换到别的应用后立即锁定</small></span><input id="sec-al-blur" class="tg" type="checkbox" /></label>
+        </section>
+        <section class="dlg-pane" data-pane="master" hidden>
+          <div class="pane-head"><div><div class="pane-t">修改主口令</div><div class="pane-d">主口令只用来加密本机密钥库，不会上传。新口令需 <b>≥8 位</b>，含大小写字母、数字和特殊字符。</div></div></div>
+          <div class="fm-grid">
+            <label for="sec-old">旧主口令</label><input id="sec-old" type="password" class="sec-input" autocomplete="current-password" />
+            <label for="sec-new">新主口令</label><input id="sec-new" type="password" class="sec-input" autocomplete="new-password" />
+            <label for="sec-new2">确认</label><input id="sec-new2" type="password" class="sec-input" placeholder="再输入一次" autocomplete="new-password" />
+          </div>
+          <button class="ns-btn ns-primary sec-block" id="sec-cm-save">修改</button>
+        </section>
+        <section class="dlg-pane" data-pane="backup" hidden>
+          <div class="pane-head"><div><div class="pane-t">加密备份</div><div class="pane-d">用一个<b>独立的备份口令</b>把全部身份导出为加密串，换机时粘回即可恢复。主口令和备份都丢失将<b>无法找回</b>。</div></div></div>
+          <div class="pane-cols">
+            <div class="pane-card">
+              <div class="card-head"><span class="pane-t">导出</span><button class="ns-btn" id="sec-exp-copy">复制</button><button class="ns-btn ns-primary" id="sec-exp-go">导出</button></div>
+              <input id="sec-exp-pw" type="password" class="sec-input" placeholder="设置备份口令（请另行牢记）" autocomplete="new-password" />
+              <textarea id="sec-exp-out" class="sec-ta" readonly placeholder="导出的备份串会出现在这里"></textarea>
+            </div>
+            <div class="pane-card">
+              <div class="card-head"><span class="pane-t">导入</span><button class="ns-btn ns-primary" id="sec-imp-go">导入</button></div>
+              <input id="sec-imp-pw" type="password" class="sec-input" placeholder="该备份的口令" autocomplete="off" />
+              <textarea id="sec-imp-in" class="sec-ta" placeholder="粘贴备份串"></textarea>
+            </div>
+          </div>
+        </section>
+        <section class="dlg-pane" data-pane="recovery" hidden>
+          <div class="pane-head"><div><div class="pane-t">恢复码</div><div class="pane-d">生成一段 24 词恢复码并<b>离线抄写保存</b>，忘记主口令时在解锁页用它重置。生成新码会使旧码失效。</div></div>
+            <button class="ns-btn ns-primary" id="sec-rec-go">生成恢复码</button></div>
+          <textarea id="sec-rec-out" class="sec-ta" readonly placeholder="生成的 24 词恢复码会出现在这里（只显示这一次，请立即抄写）"></textarea>
+          <div id="sec-rec-status" class="pane-d"></div>
+        </section>
+        <section class="dlg-pane" data-pane="audit" hidden>
+          <div class="pane-head"><div><div class="pane-t">安全日志</div><div class="pane-d">本机最近的解锁、导出、迁移、吊销等敏感操作记录。</div></div>
+            <button class="ns-btn" id="sec-audit-go">刷新</button></div>
+          <div id="sec-audit-out" class="sec-audit"></div>
+        </section>
+      </div>
+      <div class="dlg-foot"><div class="sec-msg" id="sec-msg"></div><button class="ns-btn" data-close="sec-modal">完成</button></div>
+    </div>
+  </div>
+  <!-- 我的设备 -->
+  <div class="sec-overlay" id="dev-modal">
+    <div class="dlg">
+      <div class="dlg-head"><span class="ico" data-ico="device"></span><span class="dlg-title">我的设备</span><span class="dlg-sub" id="dev-sub">每台设备独立密钥，可单独吊销</span><button class="sec-x" id="dev-close" title="关闭"><span class="ico" data-ico="close"></span></button></div>
+      <div class="dlg-main">
+        <nav class="dlg-nav">
+          <button class="on" data-pane="list"><span data-ico="device"></span>设备列表</button>
+          <button data-pane="freeze"><span data-ico="lock"></span>紧急冻结</button>
+          <button data-pane="grant"><span data-ico="plus"></span>授权新设备</button>
+        </nav>
+        <section class="dlg-pane" data-pane="list">
+          <div class="pane-head"><div><div class="pane-t">设备列表</div><div class="pane-d" id="sec-dev-hint">每台设备有自己的设备密钥。丢了一台只需吊销它，账号和其它设备不受影响。</div></div>
+            <button class="ns-btn" id="sec-dev-refresh">刷新</button></div>
+          <div class="dev-list" id="sec-dev-list"></div>
+        </section>
+        <section class="dlg-pane" data-pane="freeze" hidden>
+          <div class="pane-head"><div><div class="pane-t">紧急冻结</div><div class="pane-d">手边没有管理设备时，用<b>登录密码</b>让 Home Node 冻结设备。在设备列表里点「冻结」只冻结那一台；「冻结全部」之后需要用持有账号私钥的设备或备份串重新登录。</div></div>
+            <button class="ns-btn dev-danger-btn" id="sec-frz-all">冻结全部</button></div>
+          <div class="fm-grid">
+            <label for="sec-frz-pw">登录密码</label><input id="sec-frz-pw" type="password" class="sec-input" placeholder="Home Node 上的登录密码" autocomplete="off" />
+          </div>
+        </section>
+        <section class="dlg-pane" data-pane="grant" hidden>
+          <div class="pane-head"><div><div class="pane-t">授权新设备</div><div class="pane-d">新设备在登录页选「迁移串」生成一段文字，粘贴到这里，核对后为它签发设备证书（可选同时交出账号私钥）。只有<b>管理设备</b>能处理。</div></div>
+            <button class="ns-btn ns-primary" id="sec-pair-go">处理</button></div>
+          <textarea id="sec-pair-in" class="sec-ta" spellcheck="false" placeholder="粘贴新设备上的迁移串（nmpair1:…）"></textarea>
+        </section>
+      </div>
+      <div class="dlg-foot"><div class="sec-msg" id="dev-msg"></div><button class="ns-btn" data-close="dev-modal">完成</button></div>
+    </div>
+  </div>
+  <!-- 通知与托盘 -->
+  <div class="sec-overlay" id="tray-modal">
+    <div class="dlg">
+      <div class="dlg-head"><span class="ico" data-ico="bell"></span><span class="dlg-title">通知</span><span class="dlg-sub">新消息怎么提醒你</span><button class="sec-x" data-close="tray-modal" title="关闭"><span class="ico" data-ico="close"></span></button></div>
+      <div class="dlg-main">
+        <nav class="dlg-nav">
+          <button class="on" data-pane="notify"><span data-ico="bell"></span>消息通知</button>
+          <button data-pane="mute"><span data-ico="moon"></span>免打扰</button>
+          <button data-pane="tray"><span data-ico="tray"></span>托盘与窗口</button>
+          <button data-pane="hotkey"><span data-ico="keyboard"></span>快捷键</button>
+          <div class="dlg-nav-sep"></div>
+          <button data-pane="about"><span data-ico="info"></span>关于</button>
+        </nav>
+        <section class="dlg-pane" data-pane="notify">
+          <div class="pane-head"><div><div class="pane-t">消息通知</div><div class="pane-d">应用不在前台时，新消息用系统通知提醒你。设置即时生效。</div></div>
+            <button class="ns-btn" id="tp-test">发送测试通知</button></div>
+          <div class="set-list">
+            <label class="set-row"><span class="set-txt"><b>新消息系统通知</b><small>私聊、群聊和频道的新消息</small></span><input type="checkbox" class="tg" data-pref="notify" /></label>
+            <label class="set-row"><span class="set-txt"><b>显示发送者和内容</b><small>关闭后只提示「你收到一条新消息」，适合投屏或公共场合</small></span><input type="checkbox" class="tg" data-pref="preview" /></label>
+            <label class="set-row"><span class="set-txt"><b>提示音</b><small>通知时播放系统提示音</small></span><input type="checkbox" class="tg" data-pref="sound" /></label>
+            <label class="set-row" id="tp-flash-row"><span class="set-txt"><b>托盘图标闪烁</b><small>有新消息时托盘图标闪烁，打开窗口后停止</small></span><input type="checkbox" class="tg" data-pref="flash" /></label>
+            <label class="set-row"><span class="set-txt"><b id="tp-badge-t">未读数角标</b><small id="tp-badge-d">在任务栏图标上显示未读消息数</small></span><input type="checkbox" class="tg" data-pref="badge" /></label>
+          </div>
+        </section>
+        <section class="dlg-pane" data-pane="mute" hidden>
+          <div class="pane-head"><div><div class="pane-t">免打扰</div><div class="pane-d">免打扰期间不弹通知、不响铃、不闪烁，未读数照常累计。把状态设为<b>「勿扰」</b>也有同样效果。</div></div></div>
+          <div class="mute-now" id="tp-mute-now"></div>
+          <div class="mute-grid">
+            <button class="mute-opt" data-mute="30m"><b>30 分钟</b><small>开个短会</small></button>
+            <button class="mute-opt" data-mute="1h"><b>1 小时</b><small>专心做事</small></button>
+            <button class="mute-opt" data-mute="8h"><b>8 小时</b><small>一个工作日</small></button>
+            <button class="mute-opt" data-mute="tomorrow"><b>到明早 8 点</b><small>今晚不打扰</small></button>
+            <button class="mute-opt" data-mute="forever"><b>直到我关闭</b><small>手动恢复</small></button>
+            <button class="mute-opt mute-off" data-mute="off"><b>恢复通知</b><small>立即结束免打扰</small></button>
+          </div>
+        </section>
+        <section class="dlg-pane" data-pane="tray" hidden>
+          <div class="pane-head"><div><div class="pane-t">托盘与窗口</div><div class="pane-d" id="tp-tray-d">程序可以常驻系统托盘，关掉窗口也不会错过消息。</div></div></div>
+          <div class="set-list">
+            <label class="set-row"><span class="set-txt"><b>关闭窗口时最小化到托盘</b><small id="tp-close-d">关闭后可点托盘图标重新打开；关掉此项则关闭即退出</small></span><input type="checkbox" class="tg" data-pref="closeToTray" /></label>
+            <label class="set-row"><span class="set-txt"><b>开机自动启动</b><small>登录系统后在后台启动并驻留托盘，不弹出窗口</small></span><input type="checkbox" class="tg" data-pref="autostart" /></label>
+          </div>
+          <div class="set-tips" id="tp-tray-tips"></div>
+        </section>
+        <section class="dlg-pane" data-pane="hotkey" hidden>
+          <div class="pane-head"><div><div class="pane-t">全局快捷键</div><div class="pane-d">在任何程序里按下快捷键，都能立即显示或隐藏 NANO MESH 窗口。</div></div></div>
+          <div class="set-list">
+            <label class="set-row"><span class="set-txt"><b>启用快捷键</b><small>显示 / 隐藏主窗口</small></span><input type="checkbox" class="tg" id="tp-hk-on" /></label>
+          </div>
+          <div class="hk-box">
+            <button class="hk-rec" id="tp-hk-rec" title="点击后按下新的组合键"></button>
+            <div class="hk-ops"><button class="ns-btn" id="tp-hk-reset">恢复默认</button></div>
+          </div>
+          <div class="pane-d" id="tp-hk-hint">点击上方按键框，然后按下新的组合键（需包含 Ctrl、Alt 或 ⌘ 之一），按 Esc 取消。</div>
+        </section>
+        <section class="dlg-pane" data-pane="about" hidden>
+          <div class="about-box">
+            <img src="nanomesh-logo.png" alt="" class="about-logo" />
+            <div class="about-name">NANO MESH</div>
+            <div class="about-ver" id="tp-ver"></div>
+            <div class="pane-d">去中心化的即时通讯与协作网络。<br />每台设备独立密钥，消息经 Home Node 与联邦转发。</div>
+          </div>
+        </section>
+      </div>
+      <div class="dlg-foot"><div class="sec-msg" id="tp-msg"></div><button class="ns-btn" data-close="tray-modal">完成</button></div>
+    </div>
+  </div>
+  <div class="sec-overlay" id="pair-modal">
+    <div class="sec-box pair-box">
+      <div class="sec-head"><span class="ico" data-ico="shield"></span>设备迁移请求</div>
+      <div class="sec-body">
+        <p class="pair-desc" id="pair-desc"></p>
+        <div class="sec-hint">只有你本人正在那台设备上操作时才继续。请输入那台设备上显示的 6 位核对码；陌生请求请直接拒绝。</div>
+        <input id="pair-sas" class="sec-input pair-sas" inputmode="numeric" maxlength="7" placeholder="000 000" autocomplete="off" />
+        <label class="sec-check" id="pair-admin-row" hidden><input id="pair-admin" type="checkbox" /> 同时设为管理设备（交出账号私钥，那台设备也能授权和吊销其它设备）</label>
+        <div class="sec-actions"><button class="ns-btn ns-primary" id="pair-allow">允许</button><button class="ns-btn" id="pair-deny">拒绝</button></div>
+        <div class="sec-msg" id="pair-msg"></div>
+      </div>
+    </div>
+  </div>
+  <div class="phone" id="phone">
+    <nav class="tabbar" id="phone-tabs" aria-label="主导航">
+      <button type="button" class="tab on" data-root="chats"><span class="tab-ico" data-ico="chat"></span><span>消息</span></button>
+      <button type="button" class="tab" data-root="people"><span class="tab-ico" data-ico="contacts"></span><span>关系</span></button>
+      <button type="button" class="tab" data-root="feed"><span class="tab-ico" data-ico="ticker"></span><span>动态</span></button>
+      <button type="button" class="tab" data-root="me"><span class="tab-ico" data-ico="person"></span><span>我</span></button>
+    </nav>
+    <div class="stage">
+      <header class="topbar">
+        <button type="button" class="top-back" id="top-back" hidden aria-label="返回"><span class="ico" data-ico="chevron"></span></button>
+        <h1 class="top-title" id="top-title">消息</h1>
+      </header>
+      <div class="stage-body">
+        <div class="roots" id="roots">
+      <section class="root on" data-root="chats">
+      <div class="panel im-panel on" id="panel-im">
+        <div class="brand"><span class="uname" data-i18n="panel.im">消息</span><span class="brand-tools"><button class="brand-refresh" data-act="imRefresh" title="刷新目录"><span class="ico" data-ico="refresh"></span></button></span></div>
+        <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="im-search-input" type="text" placeholder="搜索会话" data-i18n-ph="search.im" /></div>
+        <div class="im-list" id="im-list"></div>
+      </div>
+      </section>
+      <section class="root" data-root="people">
+      <div class="seg" id="people-seg" role="tablist">
+        <button type="button" class="on" data-seg="entities">实体</button>
+        <button type="button" data-seg="groups">群</button>
+        <button type="button" data-seg="channels">频道</button>
+      </div>
+      <div class="panel entities-panel on" id="panel-entities">
+        <div class="brand"><span class="uname" data-i18n="panel.entities">实体目录</span>
+          <span class="brand-tools">
+            <button class="brand-refresh" id="name-claim-btn" title="认领名字 local@域名">@</button>
+            <button class="brand-refresh" id="ent-add-btn" title="添加实体"><span class="ico" data-ico="plus"></span></button>
+            <button class="brand-refresh" data-act="imRefresh" title="刷新目录"><span class="ico" data-ico="refresh"></span></button>
+          </span>
+        </div>
+        <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="entity-search-input" type="text" placeholder="搜索实体" data-i18n-ph="search.entities" /></div>
+        <div class="nodesvc-form entity-form" id="entity-form" style="display:none"></div>
+        <div class="entity-list" id="entity-list"></div>
+      </div>
+      <div class="panel groups-panel" id="panel-groups">
+        <div class="brand"><span class="uname" data-i18n="panel.groups">群组</span>
+          <span class="brand-tools">
+            <button class="brand-refresh" id="grp-new-btn" title="新建群"><span class="ico" data-ico="plus"></span></button>
+            <button class="brand-refresh" id="grp-refresh-btn" title="刷新"><span class="ico" data-ico="refresh"></span></button>
+          </span>
+        </div>
+        <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="grp-search" type="text" placeholder="搜索群组" data-i18n-ph="search.groups" /></div>
+        <div class="im-list" id="groups-list"></div>
+      </div>
+      <div class="panel channels-panel" id="panel-channels">
+        <div class="brand"><span class="uname" data-i18n="panel.channels">频道</span>
+          <span class="brand-tools">
+            <button class="brand-refresh" id="chn-new-btn" title="新建频道"><span class="ico" data-ico="plus"></span></button>
+            <button class="brand-refresh" id="chn-sub-btn" title="粘贴频道 id 订阅"><span class="ico" data-ico="subscribe"></span></button>
+            <button class="brand-refresh" id="chn-refresh-btn" title="刷新"><span class="ico" data-ico="refresh"></span></button>
+          </span>
+        </div>
+        <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="chn-search" type="text" placeholder="搜索频道" data-i18n-ph="search.channels" /></div>
+        <div class="im-list" id="channels-list"></div>
+      </div>
+      </section>
+      <section class="root" data-root="feed">
+        <div class="feed-tools">
+          <button class="brand-refresh" id="tb-ticker-cfg" type="button" title="选择要显示的动态"><span class="ico" data-ico="ticker"></span></button>
+          <div class="tb-ticker-pop" id="tb-ticker-pop" hidden>
+            <label><input type="checkbox" data-ticker="fx" /> 主要货币汇率</label>
+            <label><input type="checkbox" data-ticker="crypto" /> 主要数字货币</label>
+            <label><input type="checkbox" data-ticker="news" /> 最新要闻</label>
+            <label><input type="checkbox" data-ticker="weather" /> 主要城市天气</label>
+          </div>
+        </div>
+        <div class="feed-list" id="feed-list"></div>
+      </section>
+      <section class="root" data-root="me">
+        <div id="me-home">
+          <div class="me-head">
+            <span class="me-av" id="tb-user-av">?</span>
+            <div class="me-id">
+              <div class="me-name" id="tb-user-name">未登录</div>
+              <div class="me-node"><span class="sb-dot" id="sb-dot"></span><span id="sb-node-text">未连接</span></div>
+            </div>
+          </div>
+          <div class="me-status" id="me-status"></div>
+          <div class="me-group">
+            <button type="button" class="me-row" id="me-profile">编辑资料</button>
+            <button type="button" class="me-row" id="me-nodes">节点服务</button>
+          </div>
+          <div class="me-group">
+            <button type="button" class="me-row" id="me-sec">安全</button>
+            <button type="button" class="me-row" id="me-devices">我的设备</button>
+            <button type="button" class="me-row" id="me-notify">通知</button>
+          </div>
+          <div class="me-group">
+            <button type="button" class="me-row" id="me-theme">外观</button>
+            <button type="button" class="me-row" id="me-lang">语言</button>
+            <button type="button" class="me-row" id="me-logout">切换账号</button>
+          </div>
+        </div>
+        <div class="panel nodesvc-panel" id="panel-nodesvc">
+          <div class="brand"><span class="uname">节点服务</span><span class="brand-tools"><button class="brand-refresh" id="ns-new" title="新增节点服务"><span class="ico" data-ico="plus"></span></button></span></div>
+          <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="ns-search" type="text" placeholder="搜索节点服务" data-i18n-ph="search.nodes" /></div>
+          <div class="nodesvc-form" id="nodesvc-form" style="display:none"></div>
+          <div class="nodesvc-list" id="nodesvc-list"></div>
+        </div>
+      </section>
+        </div>
+        <div class="stack" id="stack">
+          <main>
+            <template id="conv-home-tpl">
+              <div class="home">
+                <div class="home-body">
+                  <img src="nanomesh-logo.png" class="home-logo" alt="" />
+                  <h1 class="home-name">NANO<span>MESH</span></h1>
+                  <p class="home-hint">从左侧列表打开一个会话</p>
+                </div>
+              </div>
+            </template>
+            <div class="conv" id="conv"></div>
+          </main>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═════════════════ 连接视图（未连接，复用太空品牌页）═════════════════ -->
+<div id="login-view" class="spa-view" style="display:none">
+  <div class="login-drag-strip" data-tauri-drag-region></div>
+  <div class="login-win-ctrls" id="login-win-ctrls" style="display:none">
+    <button class="win-btn" data-act="winMinimize" title="最小化"><span class="ico" data-ico="minimize"></span></button>
+    <button class="win-btn" data-act="winToggleMaximize" title="最大化"><span class="ico" data-ico="maximize"></span></button>
+    <button class="win-btn win-close" data-act="winClose" title="关闭"><span class="ico" data-ico="close"></span></button>
+  </div>
+  <div class="login-page">
+    <div class="brand-panel" data-tauri-drag-region>
+      <div class="brand-bg">
+        <div class="space-nebula space-nebula--a"></div>
+        <div class="space-nebula space-nebula--b"></div>
+        <div class="space-nebula space-nebula--c"></div>
+        <div class="space-galaxy"></div>
+      </div>
+      <div class="space-stars" id="space-stars-far" aria-hidden="true"></div>
+      <div class="space-stars" id="space-stars-mid" aria-hidden="true"></div>
+      <div class="space-rush" id="space-rush" aria-hidden="true"></div>
+      <div class="space-shooters" id="space-shooters" aria-hidden="true"></div>
+      <header class="brand-header">
+        <img src="nanomesh-logo.png" class="brand-logo" alt="NANO MESH" />
+        <span class="brand-wordmark">NANO<span class="brand-wordmark__accent">MESH</span></span>
+      </header>
+      <div class="brand-content">
+        <div class="brand-eyebrow"><span class="brand-eyebrow__dot"></span> 去中心化网格 · P2P</div>
+        <h1 class="brand-title"><span class="brand-title__text">NANO<span class="brand-title__accent">MESH</span></span></h1>
+        <p class="brand-desc">基于 QUIC/P2P 的去中心化网格<br>按节点公钥直连 · 同网优先 · 穿透兜底</p>
+        <ul class="brand-features">
+          <li><span class="feature-index">01</span><div class="feature-text"><strong>去中心 P2P</strong><em>节点即身份 · 无中心服务器</em></div></li>
+          <li><span class="feature-index">02</span><div class="feature-text"><strong>同网优先 · 穿透兜底</strong><em>同一网络直连 · 跨网 NAT 打洞</em></div></li>
+          <li><span class="feature-index">03</span><div class="feature-text"><strong>本地身份</strong><em>私钥本地落盘 · 重启复用</em></div></li>
+        </ul>
+      </div>
+      <footer class="brand-footer">
+        <span>© <span id="year"></span> Warp Drive Labs · NANO MESH</span>
+      </footer>
+    </div>
+    <div class="form-panel">
+      <div class="form-wrapper">
+        <div class="form-card">
+          <div class="form-card__head">
+            <h2 class="form-title" id="acct-title">登录</h2>
+            <p class="form-subtitle" id="acct-sub">使用用户名@域名和密码登录 Home Node</p>
+          </div>
+          <form id="account-form" class="login-form" autocomplete="off">
+            <div class="login-form__item" id="acct-nick-row" style="display:none">
+              <label for="acct-nick">昵称</label>
+              <input id="acct-nick" type="text" maxlength="32" placeholder="显示名称" />
+            </div>
+            <div class="login-form__item acct-id-wrap">
+              <label for="acct-local">账号</label>
+              <div class="acct-id">
+                <input id="acct-local" type="text" maxlength="63" autocomplete="username" placeholder="用户名" />
+                <span class="acct-at" aria-hidden="true">@</span>
+                <input id="acct-domain" type="text" maxlength="253" spellcheck="false" autocomplete="off" placeholder="域名" />
+              </div>
+              <div class="acct-suggest" id="acct-suggest" hidden></div>
+              <p class="acct-hint" id="acct-domain-hint"></p>
+            </div>
+            <div class="login-form__item">
+              <label for="acct-password">密码</label>
+              <div class="pwd-line">
+                <input id="acct-password" type="password" autocomplete="current-password" placeholder="至少 8 位" />
+                <button type="button" class="pwd-eye" data-eye="acct-password">显示</button>
+              </div>
+            </div>
+            <div class="login-form__item" id="acct-pass2-row" style="display:none">
+              <label for="acct-pass2">确认密码</label>
+              <div class="pwd-line">
+                <input id="acct-pass2" type="password" autocomplete="new-password" placeholder="再输入一次" />
+                <button type="button" class="pwd-eye" data-eye="acct-pass2">显示</button>
+              </div>
+            </div>
+            <button class="login-submit" id="acct-submit" type="submit">登录</button>
+            <button type="button" class="acct-link" id="acct-forgot">忘记密码</button>
+            <button type="button" class="acct-link" id="acct-switch">没有账号？去注册</button>
+            <button type="button" class="acct-link" id="acct-import-open">换了设备？把私钥迁移到本机</button>
+            <div class="acct-ask acct-import" id="acct-import" hidden>
+              <div class="acct-tabs" role="tablist">
+                <button type="button" data-tab="push" class="on">旧设备确认</button>
+                <button type="button" data-tab="ticket">迁移串</button>
+                <button type="button" data-tab="backup">备份串</button>
+              </div>
+              <div class="acct-pane" data-pane="push">
+                <p>旧设备需在线并已登录该账号。填好上方账号和密码后发送请求，旧设备会弹出确认框，在那里输入本机显示的核对码。</p>
+                <div class="acct-ask-ops"><button type="button" class="login-submit" id="acct-pair-go">发送请求</button></div>
+              </div>
+              <div class="acct-pane" data-pane="ticket" hidden>
+                <p>只需填好上方账号。把生成的迁移串发到旧设备，在旧设备「安全设置 → 设备迁移」中粘贴。5 分钟内有效，只能用一次。</p>
+                <textarea id="acct-ticket-out" class="acct-import-ta" readonly spellcheck="false" placeholder="迁移串会出现在这里"></textarea>
+                <div class="acct-ask-ops">
+                  <button type="button" class="login-submit" id="acct-ticket-go">生成迁移串</button>
+                  <button type="button" class="acct-link" id="acct-ticket-copy">复制</button>
+                </div>
+              </div>
+              <div class="acct-pane" data-pane="backup" hidden>
+                <p>在旧设备的「安全设置 → 加密备份」中导出备份串，粘贴到这里，并输入导出时设置的备份口令。</p>
+                <textarea id="acct-import-blob" class="acct-import-ta" spellcheck="false" placeholder="粘贴备份串"></textarea>
+                <input id="acct-import-pw" type="password" class="acct-import-pw" autocomplete="off" placeholder="备份口令" />
+                <div class="acct-ask-ops"><button type="button" class="login-submit" id="acct-import-go">导入并登录</button></div>
+              </div>
+              <div class="acct-pair-status" id="acct-pair-status" hidden>
+                <p id="acct-pair-text"></p>
+                <div class="acct-sas" id="acct-pair-sas"></div>
+              </div>
+              <div class="acct-ask-ops acct-import-foot"><button type="button" class="acct-link" id="acct-import-cancel">关闭</button></div>
+            </div>
+            <div class="acct-ask" id="acct-ask" hidden>
+              <p id="acct-ask-text"></p>
+              <div class="acct-ask-ops">
+                <button type="button" class="login-submit" id="acct-ask-yes">确定</button>
+                <button type="button" class="acct-link" id="acct-ask-no">取消</button>
+              </div>
+            </div>
+            <div class="error" id="acct-error" role="alert"></div>
+          </form>
+          <form id="connect-form" class="login-form" autocomplete="off" style="display:none">
+            <div class="login-form__item">
+              <label for="c-user">用户身份</label>
+              <div class="pubkey-row">
+                <select id="c-user" class="pubkey-select"></select>
+                <button type="button" class="pubkey-gen" id="c-newuser" title="新建一个身份（公钥）——像多开一个 QQ/微信号"><span class="ico" data-ico="plus"></span> 新建身份</button>
+              </div>
+              <div class="import-box" id="newuser-box" style="display:none">
+                <input id="newuser-name" type="text" placeholder="给这个身份起个昵称（如 工作号 / 生活号）" />
+                <button type="button" class="import-ok" id="newuser-ok">创建</button>
+                <button type="button" class="import-cancel" id="newuser-cancel">取消</button>
+              </div>
+            </div>
+            <div class="login-form__item">
+              <label for="c-service">节点服务</label>
+              <div class="pubkey-row">
+                <select id="c-service" class="pubkey-select"></select>
+                <button type="button" class="pubkey-gen" id="c-newsvc" title="新建节点服务（可填公钥/地址、名称、联系方式、地理位置等）"><span class="ico" data-ico="plus"></span> 新建服务</button>
+              </div>
+              <div class="nodesvc-form svc-form-box" id="svc-form-box" style="display:none"></div>
+              <div class="svc-hint">节点服务是公用的（所有身份共享）；在主界面「节点服务」面板也可新增/管理。</div>
+            </div>
+            <button class="login-submit" id="c-submit" type="submit">连接</button>
+            <div class="error" id="c-error" role="alert"></div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="js/i18n.js" defer></script>
+<script src="js/icons.js" defer></script>
+<script src="js/bridge.js" defer></script>
+<script src="js/store.js" defer></script>
+<script src="js/platform.js" defer></script>
+<script src="js/ticker.js" defer></script>
+<script src="js/tabs.js" defer></script>
+<script src="js/identity.js" defer></script>
+<script src="js/services.js" defer></script>
+<script src="js/connect.js" defer></script>
+<script src="js/account.js" defer></script>
+<script src="js/nodesvc.js" defer></script>
+<script src="js/usermenu.js" defer></script>
+<script src="js/profile.js" defer></script>
+<script src="js/groups.js" defer></script>
+<script src="js/channels.js" defer></script>
+<script src="js/naming.js" defer></script>
+<script src="js/composer.js" defer></script>
+<script src="js/listcache.js" defer></script>
+<script src="js/chatlog.js" defer></script>
+<script src="js/im.js" defer></script>
+<script src="js/main.js" defer></script>
+<script src="js/auth.js" defer></script>
+<script src="js/pairing.js" defer></script>
+<script src="js/devices.js" defer></script>
+<script src="js/tray.js" defer></script>
+<script src="js/mobile.js" defer></script>
+<script src="js/mobile-boot.js" defer></script>
+</body>
+</html>

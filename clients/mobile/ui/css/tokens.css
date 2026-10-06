@@ -1,0 +1,87 @@
+  :root{
+    /* 原生控件（select/checkbox/滚动条）绘制通道声明：WebKitGTK/WebView2/WKWebView 据此画深色，
+       否则 Linux 按本机 GTK 亮色主题画成白底浅灰字（CSS background 管不到这个通道）。 */
+    color-scheme:dark;
+    --bg:#0d0d0d; --panel:#141414; --panel2:#1a1a19; --surface:#1e1e1d; --hover:#242423;
+    --ink:#f2f1ec; --ink2:#b8b7ae; --muted:#7d7c76; --border:#2a2a28; --border2:#333330;
+    --blue:#3987e5; --aqua:#1fb182; --violet:#9085e9; --magenta:#d55181; --orange:#eb6834;
+    --green:#22c55e; --green2:#4ade80; --red:#e5605f; --red-soft:#d08b85; --accent:#1fb182; --gold:#e5b95f;
+    --accent-soft:#17362b; --on-accent:#05221a;
+    /* 代码 / 终端 / diff 块专用（双主题各一份；业务 css 禁止硬编码色值，一律引令牌） */
+    --bg2:#0d1420; --code-ink:#c8d3e0;
+    --header-h:40px;
+    --aside-w:270px;
+    /* 字阶：13→21、16→26、26→42 为 φ 倍。间距为斐波那契并落在 4px 网格上。 */
+    --fs-meta:11px; --fs-sub:12px; --fs-ui:13px; --fs-body:14px; --fs-title:16px; --fs-name:21px; --fs-hero:26px; --fs-brand:42px;
+    --lh-body:1.618;
+    --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:20px; --sp-5:32px; --sp-6:52px;
+    --h-sm:24px; --h-md:32px; --h-lg:40px; --h-row:64px;
+    --av-xs:24px; --av-sm:32px; --av-md:40px; --av-lg:64px; --av-xl:104px;
+    --r-ctrl:8px; --r-float:12px; --r-bubble:16px;
+    /* Apple 图标圆角：边长的约 22%，随头像尺寸缩放 */
+    --avatar-radius:22%;
+  }
+  /* 浅色主题（dataviz light 令牌）——由标题栏主题开关切换 html[data-theme] */
+  html[data-theme="light"]{
+    color-scheme:light; /* 原生控件随亮色主题转亮（见 :root 处注释） */
+    --bg:#f4f4f2; --panel:#ffffff; --panel2:#f7f7f5; --surface:#ffffff; --hover:#ececea;
+    --ink:#0b0b0b; --ink2:#52514e; --muted:#898781; --border:#e4e3dc; --border2:#d6d5ce;
+    --blue:#2a78d6; --aqua:#1baf7a; --violet:#4a3aa7; --magenta:#e87ba4; --orange:#eb6834;
+    --green:#0ca30c; --green2:#0ca30c; --red:#e34948; --red-soft:#a8564e; --accent:#1baf7a; --accent-soft:#e3f5ee; --on-accent:#05221a; --gold:#a2761c;
+    /* 亮色下的代码块：浅底深字（令牌名与暗色一致，随主题切换） */
+    --bg2:#efefea; --code-ink:#33332e;
+  }
+  *{box-sizing:border-box}
+  /* 关掉 Edge/WebView2 给密码框自带的原生小眼睛（::-ms-reveal/::-ms-clear）——
+     应用统一用自绘 SVG 眼睛，原生图标叠在旁边会出现两个眼睛（2026-09-17） */
+  input[type=password]::-ms-reveal,
+  input[type=password]::-ms-clear{display:none}
+  html,body{height:100%;margin:0}
+  html,body{background:transparent;height:100%;overflow:hidden}
+  body{font-family:-apple-system,'PingFang SC','Hiragino Sans GB',system-ui,sans-serif;color:var(--ink);margin:0}
+  #main-view{border-radius:16px}
+  #login-view{border-radius:0;background:var(--bg)}
+  /* 顶部工作区（活动栏 + 侧栏 + 主区）在原生标题条之下 */
+  .workspace{flex:1;display:flex;min-height:0}
+
+  /* ── 最左活动栏（VSCode 式）：Agent / 即时通讯 / 插件管理 ── */
+  .activitybar{width:48px;flex:0 0 48px;background:var(--panel);border-right:1px solid var(--border);
+    display:flex;flex-direction:column;align-items:center;padding:12px 0 16px;gap:4px}
+  .act{width:32px;height:32px;border-radius:var(--r-ctrl);display:flex;align-items:center;justify-content:center;cursor:pointer;
+    color:var(--muted);position:relative;background:transparent}
+  .act:hover{background:var(--hover);color:var(--ink)}
+  .act.active{color:var(--aqua);background:var(--accent-soft)}
+  .act .badge{position:absolute;top:2px;right:2px;min-width:16px;height:16px;padding:0 3px;border-radius:999px;
+    background:var(--red);color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .act-sp{flex:1}
+  /* 活动栏底部 cmx 按钮（图片） */
+  .cmx-act{padding:0;overflow:hidden}
+  /* ── SPA 视图切换 ──
+     #main-view = 主视图（现有 flex 布局搬过来）；#login-view = 登录视图（display:none 默认隐藏）。
+     js/login.js 里的 showLogin()/showMain() 切换二者。 */
+  .spa-view{flex:1;min-height:0}
+  #main-view{display:flex;flex-direction:column;height:100vh;overflow:hidden;font-size:14px;
+    background:var(--bg);color:var(--ink)}
+  #login-view{display:none;height:100vh;overflow:hidden}
+  /* 下拉框：隐藏原生箭头，画单个 chevron（不平铺）。基础规则补齐 appearance/no-repeat/position——
+     此前只覆盖了浅色主题的 chevron 图，缺基础规则导致原生箭头 + 平铺图叠出「很多箭头」。 */
+  select{
+    -webkit-appearance:none; appearance:none;
+    background-repeat:no-repeat; background-position:right 10px center; background-size:12px;
+    padding-right:28px;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239aa0a8' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  }
+  select::-ms-expand{display:none}
+html[data-theme="light"] select{
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23898781' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  }
+  /* 全局交互元素统一小手 */
+  button,[data-act],.act,.cat,.navitem,.tab,.mi,.newbtn,.selbtn,.cmx-act,.user-act,.tool-ic,.send,.model,.back,.win-btn,.tb-btn,.tab-overflow,.tab-dd-item,.pg-actbtn,.conn .tchip,.qa,.task,.um-danger,.um-head,.pl-item,.ddx,.quick button,.badge{cursor:pointer}
+  .nm-ico{width:16px;height:16px;display:block;flex:0 0 auto}
+  .ico,.tab-ico,.im-search-ico{display:inline-flex;align-items:center;justify-content:center;line-height:0}
+  .act .nm-ico{width:20px;height:20px}
+  .im-center .ico .nm-ico{width:22px;height:22px}
+  .ed-avatar .nm-ico{width:28px;height:28px}
+  :focus{outline:none}
+  :focus-visible{outline:2px solid var(--aqua);outline-offset:2px}
+  *{scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--border2) 65%,var(--ink)) transparent}
