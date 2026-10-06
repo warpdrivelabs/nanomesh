@@ -5,9 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-nm-proto = { workspace = true }
-nm-core = { workspace = true }
-nm-transport = { workspace = true }
+nm-gossip = { workspace = true }
+nm-crypto = { workspace = true }
+iroh-gossip = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
-iroh-docs = { workspace = true }

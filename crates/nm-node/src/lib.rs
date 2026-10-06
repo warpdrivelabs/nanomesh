@@ -652,6 +652,17 @@ impl Node {
     pub fn addr(&self) -> nm_transport::Addr {
         self.ep.addr()
     }
+    /// 规模化联邦（F0）：构造一个基于本节点 gossip 的联邦句柄（按群主题收发），返回 `(句柄, 事件流)`。
+    /// **opt-in**：仅在调用时创建，不改任何现有投递路径（火管照旧）；F1 起才接入 fanout/deliver
+    /// （`nmd.toml [federation] per_topic` 灰度切换）。详见 `docs/FEDERATION_SCALING_IMPL.md`。
+    pub fn federation(
+        &self,
+    ) -> (
+        Arc<nm_federation::Federation>,
+        tokio::sync::mpsc::UnboundedReceiver<nm_federation::FedMsg>,
+    ) {
+        nm_federation::Federation::new(self.gossip.clone(), self.ep.id_bytes())
+    }
     pub fn directory(&self) -> Arc<MemDirectory> {
         self.dir.clone()
     }

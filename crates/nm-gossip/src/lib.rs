@@ -106,3 +106,48 @@ impl ChannelTopic {
         }
     }
 }
+
+impl ChannelTopic {
+    /// 拆分为「可克隆的发送端 + 独占的接收端」，使发布与收播可在不同任务并发进行。
+    /// （`publish` 为 `&self`、`recv` 为 `&mut self`，bundled 的 `ChannelTopic` 无法同时做两件事。）
+    pub fn into_split(self) -> (ChannelSender, ChannelReceiver) {
+        let ChannelTopic { tx, rx } = self;
+        (ChannelSender(std::sync::Arc::new(tx)), ChannelReceiver(rx))
+    }
+}
+
+/// 频道发送端：可克隆、`&self` 广播（内部 `Arc<GossipSender>`）。
+#[derive(Clone)]
+pub struct ChannelSender(std::sync::Arc<GossipSender>);
+
+impl ChannelSender {
+    /// 向频道广播一段字节（经 PlumTree 扩散给全体订阅者）。
+    pub async fn publish(&self, payload: impl Into<Bytes>) -> Result<(), GossipError> {
+        self.0
+            .broadcast(payload.into())
+            .await
+            .map_err(|e| GossipError::Gossip(e.to_string()))
+    }
+}
+
+/// 频道接收端：独占 `&mut self` 收播。
+pub struct ChannelReceiver(GossipReceiver);
+
+impl ChannelReceiver {
+    /// 取下一条频道广播；`None` 表示流结束。忽略邻居 up/down 与 Lagged 等非消息事件。
+    pub async fn recv(&mut self) -> Option<ChannelMsg> {
+        loop {
+            match self.0.next().await {
+                Some(Ok(Event::Received(m))) => {
+                    return Some(ChannelMsg {
+                        from: *m.delivered_from.as_bytes(),
+                        content: m.content.to_vec(),
+                    })
+                }
+                Some(Ok(_)) => continue,
+                Some(Err(_)) => continue,
+                None => return None,
+            }
+        }
+    }
+}
