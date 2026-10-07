@@ -1543,6 +1543,17 @@ impl Node {
                     for acct in local_accounts(&ctx) {
                         let _ = self.fed.join_inbox(&acct, inbox_bootstrap(&acct, &ctx)).await;
                     }
+                    // F4：订阅本节点「关心的」域名主题 nmspace-names:<domain>——自持有域 ∪ 已缓存记录的域。
+                    // 持有域的记录在 announce 块按域发布到各域主题（下方）；此处只负责 join（幂等）。
+                    let mut interest: Vec<String> = self.domains.read().unwrap().clone();
+                    for r in self.names.iter() {
+                        if !interest.contains(&r.domain) {
+                            interest.push(r.domain.clone());
+                        }
+                    }
+                    for d in &interest {
+                        let _ = self.fed.join_names(d, names_bootstrap(d, &ctx)).await;
+                    }
                     last_fed = tokio::time::Instant::now();
                 }
                 // F2：pkarr 群发现（每 ~60s）——home 节点发布「群公钥 → seed」记录；非 home 成员节点解析缓存，
@@ -1592,9 +1603,15 @@ impl Node {
                     for r in my_names {
                         let gg = GroupGossip {
                             origin: me.to_vec(),
-                            body: Some(nm_proto::pb::group_gossip::Body::Name(r)),
+                            body: Some(nm_proto::pb::group_gossip::Body::Name(r.clone())),
                         };
-                        let _ = topic.publish(gg.encode_to_vec()).await;
+                        let bytes = gg.encode_to_vec();
+                        let _ = topic.publish(bytes.clone()).await; // 火管（兜底 / 未全迁移时）
+                        // F4：per_topic 开 → 同一记录也发到其域主题 nmspace-names:<domain>（仅关心该域者收）。
+                        // 与火管双写；收端 merge_name_lww（验签 + serial LWW）。退役待 resolve 触发订阅后另议。
+                        if self.per_topic.load(std::sync::atomic::Ordering::Relaxed) {
+                            let _ = self.fed.publish_names(&r.domain, bytes).await;
+                        }
                     }
                     // 重播本节点登记过的设备的吊销记录，令晚加入节点也拒绝这些设备。
                     let my_revokes: Vec<DeviceRevoke> = self
@@ -2309,6 +2326,28 @@ fn local_accounts(ctx: &Ctx) -> Vec<Vec<u8>> {
         }
     }
     out
+}
+
+/// F4：某命名域主题的 bootstrap——该域已知记录的 home 节点(锚点) + 本节点已知对等。
+fn names_bootstrap(domain: &str, ctx: &Ctx) -> Vec<[u8; 32]> {
+    let mut v: Vec<[u8; 32]> = Vec::new();
+    for r in ctx.names.iter() {
+        if r.domain == domain {
+            if let Ok(h) = <[u8; 32]>::try_from(r.home_node.as_slice()) {
+                if !v.contains(&h) {
+                    v.push(h);
+                }
+            }
+        }
+    }
+    for e in ctx.peers.iter() {
+        if let Ok(id) = <[u8; 32]>::try_from(e.key().as_slice()) {
+            if !v.contains(&id) {
+                v.push(id);
+            }
+        }
+    }
+    v
 }
 
 /// F1 协商就绪判定（F5 预备）：该群是否「全员经每群主题可达」——每个**远端**成员的 home 节点都已

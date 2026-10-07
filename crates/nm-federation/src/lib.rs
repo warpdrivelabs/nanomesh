@@ -32,6 +32,12 @@ pub fn inbox_topic_key(account: &[u8]) -> [u8; 32] {
     topic_key(b"nmspace-inbox:", account)
 }
 
+/// 域名命名 → gossip 主题键：`blake3("nmspace-names:" ++ domain)`（F4）。
+/// 关心该域的节点（持有该域 / 已缓存其名字）订阅 → 该域的 `NameRecord` 只在关心者间复制，取代火管全广播。
+pub fn names_topic_key(domain: &str) -> [u8; 32] {
+    topic_key(b"nmspace-names:", domain.as_bytes())
+}
+
 fn topic_key(prefix: &[u8], id: &[u8]) -> [u8; 32] {
     let mut buf = Vec::with_capacity(prefix.len() + id.len());
     buf.extend_from_slice(prefix);
@@ -108,6 +114,11 @@ impl Federation {
         self.join_topic(inbox_topic_key(account), account.to_vec(), bootstrap).await
     }
 
+    /// F4：加入某域名命名主题（**幂等**）。关心该域的节点订阅后收取其 `NameRecord` 复制。
+    pub async fn join_names(&self, domain: &str, bootstrap: Vec<[u8; 32]>) -> Result<(), FederationError> {
+        self.join_topic(names_topic_key(domain), domain.as_bytes().to_vec(), bootstrap).await
+    }
+
     /// 加入某主题并接入其叠加网（**幂等**）。`label` 随每条收播装入 [`FedMsg::group`] 供宿主路由。
     ///
     /// `bootstrap` 为已知对端节点公钥（群= `home_node` ∪ 已知成员 home；收件箱= 收件人 home；F2 起 DHT 兜底）。
@@ -175,6 +186,11 @@ impl Federation {
         self.publish_topic(inbox_topic_key(account), payload).await
     }
 
+    /// F4：向某域名命名主题广播字节（须先 [`Federation::join_names`]）。`NameRecord` 复制用。
+    pub async fn publish_names(&self, domain: &str, payload: Vec<u8>) -> Result<(), FederationError> {
+        self.publish_topic(names_topic_key(domain), payload).await
+    }
+
     async fn publish_topic(&self, key: [u8; 32], payload: Vec<u8>) -> Result<(), FederationError> {
         let sender = {
             let subs = self.subs.lock().await;
@@ -219,5 +235,16 @@ mod tests {
             "群主题与收件箱主题即便 id 相同也必须不同"
         );
         assert_eq!(inbox_topic_key(&id), inbox_topic_key(&id), "同 account 必须算出同一收件箱主题");
+    }
+
+    #[test]
+    fn names_topic_is_deterministic_and_distinct() {
+        let a1 = names_topic_key("jeff.nm");
+        let a2 = names_topic_key("jeff.nm");
+        assert_eq!(a1, a2, "同域名必须算出同一命名主题");
+        assert_ne!(a1, names_topic_key("amy.nm"), "不同域名应得到不同命名主题");
+        // 与群/收件箱主题族互不串台（即便字节巧合）。
+        assert_ne!(a1, group_topic_key(b"jeff.nm"));
+        assert_ne!(a1, inbox_topic_key(b"jeff.nm"));
     }
 }
