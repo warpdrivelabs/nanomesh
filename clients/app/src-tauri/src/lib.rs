@@ -19,7 +19,7 @@ use nm_client::{Client, Session};
 use nm_proto::DirectoryQuery;
 use serde_json::{json, Value};
 use tauri::{async_runtime, AppHandle, Emitter, Manager, State};
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 
 mod auth;
 mod devices;
@@ -41,6 +41,9 @@ struct AppState {
     /// 解锁后驻留的保险库密钥 VK；None = 已上锁（见 auth.rs / docs/CLIENT_AUTH_SECURITY.md）。
     vault: std::sync::Mutex<Option<[u8; 32]>>,
     pair: pairing::PairState,
+    /// 前端就绪闸门：连接后消息事件循环先等它，直到 `imStart` 完成（监听器+用户+本地库就绪）才放水，
+    /// 避免离线补投的消息早于前端监听器而丢失。每次 connect 重置。
+    im_ready: Mutex<Option<oneshot::Sender<()>>>,
 }
 
 fn hex(b: &[u8]) -> String {
@@ -776,7 +779,12 @@ async fn finish_session(
     let session = Arc::new(session);
     let watch = session.clone();
     let apph = app.clone();
+    // 前端就绪闸门：imStart 完成后调用 im_ready 放水。避免节点在「连接建立」瞬间补投的离线消息
+    // 早于前端监听器而被丢弃（登录后看不到离线消息的根因）。最多等 8s 兜底，前端异常也不永久卡住。
+    let (ready_tx, ready_rx) = oneshot::channel::<()>();
+    *state.im_ready.lock().await = Some(ready_tx);
     async_runtime::spawn(async move {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(8), ready_rx).await;
         while let Some(gram) = inbox.recv().await {
             if let Some(p) = gram.payload.as_ref().filter(|p| p.type_url.starts_with(pair::PREFIX)) {
                 pairing::on_old_side(&apph, &p.type_url, &p.value, &gram.sender).await;
@@ -846,6 +854,16 @@ async fn connect(
     let (client, session) =
         devices::dial_account(&app, &vk, user, &mode, &node, relay_urls, pkarr_url, dns_origin).await?;
     finish_session(&app, &state, client, session, &display_name).await
+}
+
+/// 前端在 `imStart` 完成（已注册 core://event 监听、已设 MY_ID、本地库就绪）后调用，放开消息事件循环，
+/// 使节点在连接瞬间补投的离线消息被可靠接收 + 入库 + 展示（修复「登录后看不到离线消息」）。
+#[tauri::command]
+async fn im_ready(state: State<'_, AppState>) -> Result<(), String> {
+    if let Some(tx) = state.im_ready.lock().await.take() {
+        let _ = tx.send(());
+    }
+    Ok(())
 }
 
 /// 上线：给了设备证书则以设备密钥连接后出示证书（账号身份收发），否则按连接密钥本身上线。
@@ -2355,6 +2373,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             connect,
+            im_ready,
             send_to,
             directory_query,
             update_profile,

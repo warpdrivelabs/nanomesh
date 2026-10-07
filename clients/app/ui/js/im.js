@@ -127,6 +127,8 @@ async function imStart(myId) {
   bindPanelUI();
   await imRefresh();
   renderConversation();
+  // 前端已就绪（监听器+MY_ID+本地库）→ 通知后端放水，补投离线消息不再因早于监听器而丢失。
+  try { await NM.inv("im_ready"); } catch (_) {}
 }
 
 function dirSig(list) {
