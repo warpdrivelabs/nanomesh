@@ -233,6 +233,8 @@ struct Ctx {
     channels: Arc<Channels>,          // P4 频道运行态（gossip pub/sub）
     gossip: Gossip,                   // 频道动态 join 需要
     group_pub: tokio::sync::mpsc::UnboundedSender<Vec<u8>>, // 群消息/群公告 → 联邦 gossip 广播队列
+    fed: Arc<nm_federation::Federation>,                    // F1：每群独立主题收发
+    per_topic: Arc<std::sync::atomic::AtomicBool>,          // F1 灰度开关（关=仅火管）
     domains: Arc<std::sync::RwLock<Vec<String>>>, // 本节点自声明域名集合（命名 N1）
     names: Arc<DashMap<String, NameRecord>>,  // 命名缓存 local@domain → NameRecord
     /// 注册中心审批结果：域名 → (是否通过, 时间)。
@@ -332,6 +334,10 @@ pub struct Node {
     presence: Arc<PresenceMap>,                        // 在线状态缓存（gossip + 本地会话，TTL）
     status_intent: Arc<StatusIntent>,                  // 用户设定状态（away/busy/dnd…）
     channels: Arc<Channels>,                           // P4 频道运行态（gossip pub/sub）
+    // 规模化联邦（F1）：每群独立主题收发；灰度开关 per_topic（默认关=仅火管，零行为变化）。
+    fed: Arc<nm_federation::Federation>,
+    fed_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<nm_federation::FedMsg>>>,
+    per_topic: Arc<std::sync::atomic::AtomicBool>,
     // 群联邦 gossip：fanout 把待广播的 GroupGossip 字节丢进 group_pub，由 spawn_group_sync 统一发布。
     group_pub: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     group_pub_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>>,
@@ -468,6 +474,8 @@ impl Node {
         // 频道 pub/sub：与单播共用同一 iroh endpoint（accept 侧由 serve() 的 Router 分流）。
         let gossip = Gossip::builder().spawn(ep.iroh().clone());
         let (group_pub, group_pub_rx) = tokio::sync::mpsc::unbounded_channel();
+        // F1：每群主题联邦句柄（复用同一 gossip endpoint）；默认 per_topic=关 → self.fed 空置、零行为变化。
+        let (fed, fed_rx) = nm_federation::Federation::new(gossip.clone(), ep.id_bytes());
         // 命名缓存：回填本节点持久化的命名记录（重启恢复）。
         let names: Arc<DashMap<String, NameRecord>> = Arc::new(DashMap::new());
         let mut owned_domains: Vec<String> = Vec::new();
@@ -501,6 +509,9 @@ impl Node {
             presence: Arc::new(PresenceMap::new()),
             status_intent: Arc::new(StatusIntent::new()),
             channels: Arc::new(Channels::new()),
+            fed,
+            fed_rx: std::sync::Mutex::new(Some(fed_rx)),
+            per_topic: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             group_pub,
             group_pub_rx: std::sync::Mutex::new(Some(group_pub_rx)),
             domains: Arc::new(std::sync::RwLock::new(owned_domains)),
@@ -528,6 +539,8 @@ impl Node {
             channels: self.channels.clone(),
             gossip: self.gossip.clone(),
             group_pub: self.group_pub.clone(),
+            fed: self.fed.clone(),
+            per_topic: self.per_topic.clone(),
             domains: self.domains.clone(),
             names: self.names.clone(),
             domain_notices: self.domain_notices.clone(),
@@ -662,6 +675,14 @@ impl Node {
         tokio::sync::mpsc::UnboundedReceiver<nm_federation::FedMsg>,
     ) {
         nm_federation::Federation::new(self.gossip.clone(), self.ep.id_bytes())
+    }
+    /// F1（规模化联邦）：开/关「每群独立主题」灰度（nmd 据 `nmd.toml [federation] per_topic` 在 serve 前调用）。
+    /// 关=仅火管（现状）；开=群 announce/msg 额外走 `nmspace-group:<gid>`（双写，收端去重）。
+    pub fn set_per_topic(&self, on: bool) {
+        self.per_topic.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn per_topic_on(&self) -> bool {
+        self.per_topic.load(std::sync::atomic::Ordering::Relaxed)
     }
     pub fn directory(&self) -> Arc<MemDirectory> {
         self.dir.clone()
@@ -1288,10 +1309,46 @@ impl Node {
             };
             let announce_iv = std::time::Duration::from_secs(20);
             let mut last_announce = tokio::time::Instant::now() - announce_iv; // 立即先广播一次
+            // F1：per_topic 开启 → 起「每群主题」事件泵（FedMsg → on_group_gossip，与火管同一处理路径）。
+            if self.per_topic.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Some(mut fed_rx) = self.fed_rx.lock().unwrap().take() {
+                    let me = self.clone();
+                    tokio::spawn(async move {
+                        while let Some(fm) = fed_rx.recv().await {
+                            me.on_group_gossip(&fm.content).await;
+                        }
+                    });
+                    tracing::info!("per-topic group pump started");
+                }
+            }
+            let mut last_fed = tokio::time::Instant::now() - std::time::Duration::from_secs(10);
             loop {
                 // 发布 fanout 丢来的待广播项（群消息 / 变更即时公告）。
                 while let Ok(bytes) = pub_rx.try_recv() {
                     let _ = topic.publish(bytes).await;
+                }
+                // F1：per_topic 维护（每 ~3s）——join 本节点所托管群的每群主题 + 向自有群主题发 announce，
+                // 使成员节点经 nmspace-group:<gid> 收播；非成员节点不订阅 → 收不到（去火管的核心）。
+                if self.per_topic.load(std::sync::atomic::Ordering::Relaxed)
+                    && last_fed.elapsed() >= std::time::Duration::from_secs(3)
+                {
+                    let ctx = self.ctx();
+                    let me = self.ep.id_bytes();
+                    let groups: Vec<Group> = self.groups.iter().map(|e| e.value().clone()).collect();
+                    for g in groups {
+                        if !g.members.iter().any(|m| is_home_here(&ctx, m)) {
+                            continue; // 本节点不托管该群任何成员 → 不订阅其主题
+                        }
+                        let _ = self.fed.join_group(&g.group_id, group_bootstrap(&g, &ctx)).await;
+                        if g.home_node.as_slice() == me.as_slice() {
+                            let gg = GroupGossip {
+                                origin: me.to_vec(),
+                                body: Some(nm_proto::pb::group_gossip::Body::Announce(g.clone())),
+                            };
+                            let _ = self.fed.publish(&g.group_id, gg.encode_to_vec()).await;
+                        }
+                    }
+                    last_fed = tokio::time::Instant::now();
                 }
                 // 周期广播本节点归属群（发现 + 成员表收敛）。
                 if last_announce.elapsed() >= announce_iv {
@@ -1955,7 +2012,30 @@ async fn fanout_group(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) {
         origin: ctx.node_id.to_vec(),
         body: Some(nm_proto::pb::group_gossip::Body::Msg(gram.clone())),
     };
-    let _ = ctx.group_pub.send(gg.encode_to_vec());
+    let bytes = gg.encode_to_vec();
+    let _ = ctx.group_pub.send(bytes.clone()); // 火管（现状：所有节点都收）
+    // F1 灰度：per_topic 开启时，同一条也发到该群独立主题 nmspace-group:<gid>（双写；仅成员节点收）。
+    // TODO(F1-2)：收端按 gram_id 去重；Announce.supports_per_topic 协商全网支持后停火管（退役）。
+    if ctx.per_topic.load(std::sync::atomic::Ordering::Relaxed) {
+        let _ = ctx.fed.join_group(&gram.receiver, group_bootstrap(&group, ctx)).await;
+        let _ = ctx.fed.publish(&gram.receiver, bytes).await;
+    }
+}
+
+/// 某群主题的 bootstrap 对端：群归属节点(锚点) + 本节点已知对等。
+fn group_bootstrap(group: &Group, ctx: &Ctx) -> Vec<[u8; 32]> {
+    let mut v: Vec<[u8; 32]> = Vec::new();
+    if let Ok(h) = <[u8; 32]>::try_from(group.home_node.as_slice()) {
+        v.push(h);
+    }
+    for e in ctx.peers.iter() {
+        if let Ok(id) = <[u8; 32]>::try_from(e.key().as_slice()) {
+            if !v.contains(&id) {
+                v.push(id);
+            }
+        }
+    }
+    v
 }
 
 /// 把群消息投递给「本节点负责的成员」：在线设备直投；本节点是其 home 则离线设备入库。

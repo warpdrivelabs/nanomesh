@@ -86,6 +86,18 @@ struct Config {
     /// 本节点自声明域名（去中心命名 N1）：如 jeff.nm。空=不签发命名（仍可解析他人）。
     #[serde(default)]
     domain: String,
+    /// 规模化联邦（F1）：群是否额外走「每群独立主题」（去火管灰度）。缺省关=仅火管。
+    #[serde(default)]
+    federation: FederationCfg,
+}
+
+/// 规模化联邦（F1）灰度配置。
+#[derive(Deserialize, Default)]
+struct FederationCfg {
+    /// 群 announce/msg 是否额外发到 `nmspace-group:<gid>` 每群独立主题（双写，去火管第一步）。
+    /// 缺省 false=仅火管（现状，零变化）；true=成员节点经每群主题收播，非成员收不到。
+    #[serde(default)]
+    per_topic: bool,
 }
 
 /// 联邦成员自动发现配置。每台只需配少量种子([[peers]])，其余成员经 gossip 自动发现自维护。
@@ -428,6 +440,7 @@ async fn main() -> anyhow::Result<()> {
             card,
         });
         node.clone().spawn_presence(m.federation.clone()); // P2：在线状态 gossip + TTL
+        node.set_per_topic(cfg.federation.per_topic); // F1：按 nmd.toml [federation] per_topic 开/关每群主题
         node.clone().spawn_group_sync(m.federation.clone()); // 群联邦：发现 + 消息扇出走 gossip（免 s2s 中继）
         tracing::info!(
             federation = %cfg.membership.federation,
