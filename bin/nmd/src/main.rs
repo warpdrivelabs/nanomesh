@@ -86,18 +86,25 @@ struct Config {
     /// 本节点自声明域名（去中心命名 N1）：如 jeff.nm。空=不签发命名（仍可解析他人）。
     #[serde(default)]
     domain: String,
-    /// 规模化联邦（F1）：群是否额外走「每群独立主题」（去火管灰度）。缺省关=仅火管。
+    /// 规模化联邦（F1–F5）：群/私聊/命名是否额外走「每主题」。**缺省开**（见 FederationCfg）；
+    /// 显式 `[federation] per_topic = false` 回退仅火管。
     #[serde(default)]
     federation: FederationCfg,
 }
 
-/// 规模化联邦（F1）灰度配置。
-#[derive(Deserialize, Default)]
+/// 规模化联邦（F1–F5）配置。
+#[derive(Deserialize)]
 struct FederationCfg {
-    /// 群 announce/msg 是否额外发到 `nmspace-group:<gid>` 每群独立主题（双写，去火管第一步）。
-    /// 缺省 false=仅火管（现状，零变化）；true=成员节点经每群主题收播，非成员收不到。
-    #[serde(default)]
+    /// 群/私聊/命名是否额外走「每主题」（nmspace-group/inbox/names）：双写兜底、收端去重、
+    /// 对端在主题上存活后退火管。**缺省 true=默认启用**；显式 `per_topic = false` 可回退仅火管。
+    #[serde(default = "default_true")]
     per_topic: bool,
+}
+impl Default for FederationCfg {
+    // `[federation]` 整段缺省时也默认启用（保证 default 行为一致，不只是段内缺字段）。
+    fn default() -> Self {
+        Self { per_topic: true }
+    }
 }
 
 /// 联邦成员自动发现配置。每台只需配少量种子([[peers]])，其余成员经 gossip 自动发现自维护。
@@ -440,7 +447,7 @@ async fn main() -> anyhow::Result<()> {
             card,
         });
         node.clone().spawn_presence(m.federation.clone()); // P2：在线状态 gossip + TTL
-        node.set_per_topic(cfg.federation.per_topic); // F1：按 nmd.toml [federation] per_topic 开/关每群主题
+        node.set_per_topic(cfg.federation.per_topic); // F1–F5：[federation] per_topic（缺省开）启停每主题；火管仍双写兜底、存活后退火管
         node.set_pkarr(cfg.dns.url.clone()); // F2：群发现 pkarr relay（配置了 [dns] url 即启用；否则仅火管/home 锚点发现）
         node.clone().spawn_group_sync(m.federation.clone()); // 群联邦：发现 + 消息扇出走 gossip（免 s2s 中继）
         tracing::info!(
