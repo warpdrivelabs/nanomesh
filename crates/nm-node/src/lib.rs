@@ -164,6 +164,10 @@ enum ChannelOut {
 }
 type Channels = DashMap<Vec<u8>, ChannelEntry>;
 const CHANNEL_LOG_CAP: usize = 300; // 每频道内存日志上限（回填近期）
+/// F5 存活账本：群 id → (节点 id → 最近在该群主题上收到其广播的 ms)。
+/// 在某群主题上收到某节点的消息 ⇒ 该节点此刻订阅并存活于此主题（心跳由成员 home 周期 announce 承载）。
+type GroupLive = DashMap<Vec<u8>, DashMap<Vec<u8>, u64>>;
+const LIVE_TTL_MS: u64 = 12_000; // 存活 TTL：sweep 每 ~3s 发一次心跳，容 3 次丢失
 
 /// 联邦成员发现配置（nmd 透传）。
 pub struct MembershipCfg {
@@ -235,6 +239,7 @@ struct Ctx {
     group_pub: tokio::sync::mpsc::UnboundedSender<Vec<u8>>, // 群消息/群公告 → 联邦 gossip 广播队列
     fed: Arc<nm_federation::Federation>,                    // F1：每群独立主题收发
     per_topic: Arc<std::sync::atomic::AtomicBool>,          // F1 灰度开关（关=仅火管）
+    per_group_live: Arc<GroupLive>,                         // F5：各群主题上各节点最近存活（火管省略判据）
     domains: Arc<std::sync::RwLock<Vec<String>>>, // 本节点自声明域名集合（命名 N1）
     names: Arc<DashMap<String, NameRecord>>,  // 命名缓存 local@domain → NameRecord
     /// 注册中心审批结果：域名 → (是否通过, 时间)。
@@ -367,6 +372,7 @@ pub struct Node {
     per_topic: Arc<std::sync::atomic::AtomicBool>,
     seen: Arc<std::sync::Mutex<SeenGrams>>, // 群消息去重（火管 + 每群主题双写只投一次）
     per_topic_nodes: Arc<DashSet<Vec<u8>>>, // F1 协商：已广告支持每群主题的节点 id（收 announce 时记录；F5 据此停火管）
+    per_group_live: Arc<GroupLive>,         // F5：各群主题上各节点的最近存活（据此省略群消息的火管副本）
     // 群联邦 gossip：fanout 把待广播的 GroupGossip 字节丢进 group_pub，由 spawn_group_sync 统一发布。
     group_pub: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     group_pub_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>>,
@@ -543,6 +549,7 @@ impl Node {
             per_topic: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             seen: Arc::new(std::sync::Mutex::new(SeenGrams::default())),
             per_topic_nodes: Arc::new(DashSet::new()),
+            per_group_live: Arc::new(GroupLive::new()),
             group_pub,
             group_pub_rx: std::sync::Mutex::new(Some(group_pub_rx)),
             domains: Arc::new(std::sync::RwLock::new(owned_domains)),
@@ -572,6 +579,7 @@ impl Node {
             group_pub: self.group_pub.clone(),
             fed: self.fed.clone(),
             per_topic: self.per_topic.clone(),
+            per_group_live: self.per_group_live.clone(),
             domains: self.domains.clone(),
             names: self.names.clone(),
             domain_notices: self.domain_notices.clone(),
@@ -723,6 +731,21 @@ impl Node {
             return false;
         };
         group_fully_per_topic(&self.ep.id_bytes(), &self.dir.entities, &self.per_topic_nodes, &g)
+    }
+    /// F5 诊断/测试：该群的「群消息」火管副本当前是否已可省略（全员远端 home 在该群主题存活）。
+    /// 见 [`group_topic_retireable`]。true 时发群消息只走每群主题、不再广播火管。
+    pub fn group_firehose_retireable(&self, gid: &[u8]) -> bool {
+        let Some(g) = self.groups.get(gid).map(|g| g.clone()) else {
+            return false;
+        };
+        group_topic_retireable(
+            &self.ep.id_bytes(),
+            &self.dir.entities,
+            &self.per_group_live,
+            &g,
+            now_ms(),
+            LIVE_TTL_MS,
+        )
     }
     pub fn directory(&self) -> Arc<MemDirectory> {
         self.dir.clone()
@@ -1369,6 +1392,17 @@ impl Node {
                     let me = self.clone();
                     tokio::spawn(async move {
                         while let Some(fm) = fed_rx.recv().await {
+                            // F5 存活账本：在该群主题上收到某节点的广播 ⇒ 该节点此刻订阅并存活于此主题。
+                            if let Ok(gg) = GroupGossip::decode(fm.content.as_slice()) {
+                                if !gg.origin.is_empty()
+                                    && gg.origin.as_slice() != me.ep.id_bytes().as_slice()
+                                {
+                                    me.per_group_live
+                                        .entry(fm.group.clone())
+                                        .or_default()
+                                        .insert(gg.origin, now_ms());
+                                }
+                            }
                             me.on_group_gossip(&fm.content).await;
                         }
                     });
@@ -1394,10 +1428,10 @@ impl Node {
                             continue; // 本节点不托管该群任何成员 → 不订阅其主题
                         }
                         let _ = self.fed.join_group(&g.group_id, group_bootstrap(&g, &ctx)).await;
-                        if g.home_node.as_slice() == me.as_slice() {
-                            let bytes = encode_announce(&me, true, g.clone()); // 在 per_topic 泵内 → 本节点必然支持
-                            let _ = self.fed.publish(&g.group_id, bytes).await;
-                        }
+                        // F5：任何「托管本群成员」的节点都在该群主题周期 announce，兼作存活心跳
+                        // （非群 home 也发），使发送方据此判定「全员远端 home 在此主题存活」后省略火管群消息副本。
+                        let bytes = encode_announce(&me, true, g.clone());
+                        let _ = self.fed.publish(&g.group_id, bytes).await;
                     }
                     last_fed = tokio::time::Instant::now();
                 }
@@ -2061,13 +2095,23 @@ async fn fanout_group(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) {
         body: Some(nm_proto::pb::group_gossip::Body::Msg(gram.clone())),
     };
     let bytes = gg.encode_to_vec();
-    let _ = ctx.group_pub.send(bytes.clone()); // 火管（现状：所有节点都收）
-    // F1 灰度：per_topic 开启时，同一条也发到该群独立主题 nmspace-group:<gid>（双写；仅成员节点收）。
-    // 收端已按 (sender,gram_id) 去重（F1-2a）。协商就绪判定见 group_fully_per_topic（F1-2b）；
-    // 待全网广告支持 + 主题订阅存活后，F5 据此停火管（退役），实现真正「仅成员可达」。
-    if ctx.per_topic.load(std::sync::atomic::Ordering::Relaxed) {
+    let per_topic = ctx.per_topic.load(std::sync::atomic::Ordering::Relaxed);
+    // F5：当「本群所有远端成员(home!=本节点)的 home 都在该群主题上存活」时，省略火管的群消息副本——
+    // 该消息仅经每群主题投递(仅成员节点收)，实现真正「仅成员可达」。保守：任一远端 home 存活未知/过期
+    // → 仍发火管(自愈，不漏投)。注意仅针对群「消息」；announce 仍走火管(发现/收敛)，直至 F2 DHT 落地。
+    let retireable = per_topic
+        && group_topic_retireable(&ctx.node_id, &ctx.dir.entities, &ctx.per_group_live, &group, now_ms(), LIVE_TTL_MS);
+    // 每群主题双写（仅成员节点收；收端按 gram_id 去重 F1-2a）。
+    let mut per_topic_ok = false;
+    if per_topic {
         let _ = ctx.fed.join_group(&gram.receiver, group_bootstrap(&group, ctx)).await;
-        let _ = ctx.fed.publish(&gram.receiver, bytes).await;
+        per_topic_ok = ctx.fed.publish(&gram.receiver, bytes.clone()).await.is_ok();
+    }
+    // 火管兜底：仅当「可退火管」且每群主题确已发出时才省略；否则(含 per-topic 发布失败)仍发火管，绝不漏投。
+    if retireable && per_topic_ok {
+        tracing::debug!("firehose suppressed for group message (all remote homes live on topic)");
+    } else {
+        let _ = ctx.group_pub.send(bytes);
     }
 }
 
@@ -2110,6 +2154,41 @@ fn group_fully_per_topic(
         }
         if !per_topic_nodes.contains(&e.home_node) {
             return false; // 远端成员 home 未广告 per_topic → 保守
+        }
+    }
+    true
+}
+
+/// F5 判据：该群的「群消息」火管副本现在可省略吗？——每个**远端**成员(home!=本节点)的 home 节点
+/// 都在该群主题上「存活」(近 `ttl_ms` 内经 nmspace-group:<gid> 收到过其广播/心跳)。本地成员本地直投、
+/// 无需联邦，跳过。保守：任一成员 home 未知、或其存活缺失/过期 → false(仍发火管，自愈不漏投)。
+/// 仅针对群「消息」；announce 仍走火管(发现/收敛)，直至 F2 DHT 发现落地后方可彻底退火管。
+/// 比 [`group_fully_per_topic`]（仅能力广告）更强：存活=确已订阅并在线于此主题，非仅声明支持。
+fn group_topic_retireable(
+    node_id: &[u8],
+    entities: &DashMap<Vec<u8>, Entity>,
+    live: &GroupLive,
+    group: &Group,
+    now_ms: u64,
+    ttl_ms: u64,
+) -> bool {
+    let gl = live.get(&group.group_id);
+    for m in &group.members {
+        let Some(e) = entities.get(m) else {
+            return false; // 成员 home 未知 → 保守
+        };
+        if e.home_node.is_empty() {
+            return false;
+        }
+        if e.home_node.as_slice() == node_id {
+            continue; // 本地成员，本地投递
+        }
+        let fresh = gl
+            .as_ref()
+            .and_then(|g| g.get(&e.home_node).map(|ts| now_ms.saturating_sub(*ts) < ttl_ms))
+            .unwrap_or(false);
+        if !fresh {
+            return false; // 远端成员 home 在此主题存活未知/过期 → 保守
         }
     }
     true
@@ -3656,5 +3735,56 @@ mod p0_tests {
             ..Default::default()
         };
         assert!(!group_fully_per_topic(&me, &ents, &advertised, &g2));
+    }
+
+    #[test]
+    fn group_topic_retireable_predicate() {
+        let me = vec![0u8; 32];
+        let node_b = vec![1u8; 32];
+        let node_c = vec![2u8; 32];
+        let alice = vec![10u8; 32]; // home=本节点
+        let bob = vec![11u8; 32]; // home=B
+        let carol = vec![12u8; 32]; // home=C
+        let ents: DashMap<Vec<u8>, Entity> = DashMap::new();
+        let mk = |h: &Vec<u8>| Entity { home_node: h.clone(), ..Default::default() };
+        ents.insert(alice.clone(), mk(&me));
+        ents.insert(bob.clone(), mk(&node_b));
+        ents.insert(carol.clone(), mk(&node_c));
+        let gid = vec![80u8; 32];
+        let g = Group {
+            group_id: gid.clone(),
+            members: vec![alice.clone(), bob.clone(), carol.clone()],
+            ..Default::default()
+        };
+        let now = 1_000_000u64;
+        let ttl = 12_000u64;
+        let live: GroupLive = GroupLive::new();
+        // 无存活 → false
+        assert!(!group_topic_retireable(&me, &ents, &live, &g, now, ttl));
+        // 仅 B 新鲜 → 仍 false（C 缺失）
+        live.entry(gid.clone()).or_default().insert(node_b.clone(), now - 1_000);
+        assert!(!group_topic_retireable(&me, &ents, &live, &g, now, ttl));
+        // B + C 新鲜 → true（本地成员 alice 跳过）
+        live.get(&gid).unwrap().insert(node_c.clone(), now - 2_000);
+        assert!(group_topic_retireable(&me, &ents, &live, &g, now, ttl));
+        // C 过期（> ttl）→ false（自愈恢复火管）
+        live.get(&gid).unwrap().insert(node_c.clone(), now - 20_000);
+        assert!(!group_topic_retireable(&me, &ents, &live, &g, now, ttl));
+        // 全本地群（无远端成员）→ true（无人需联邦）
+        let g_local = Group {
+            group_id: vec![81u8; 32],
+            members: vec![alice.clone()],
+            ..Default::default()
+        };
+        assert!(group_topic_retireable(&me, &ents, &live, &g_local, now, ttl));
+        // 含 home 未知的成员 → false（保守）
+        let dave = vec![13u8; 32];
+        let g2 = Group {
+            group_id: gid.clone(),
+            members: vec![bob.clone(), dave.clone()],
+            ..Default::default()
+        };
+        live.get(&gid).unwrap().insert(node_b.clone(), now);
+        assert!(!group_topic_retireable(&me, &ents, &live, &g2, now, ttl));
     }
 }
