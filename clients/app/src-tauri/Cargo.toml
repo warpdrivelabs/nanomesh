@@ -11,10 +11,10 @@ name = "nmspace_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.7.1", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["image-png", "macos-private-api", "tray-icon"] }
+tauri = { version = "2.12.1", features = ["image-png", "macos-private-api", "tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -38,13 +38,13 @@ openssl = "0.10"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 hkdf = "0.12"
 sha2 = "0.10"
-tauri-plugin-notification = "2"
+tauri-plugin-notification = "2.5.1"
 
 # 托盘配套：单实例唤起、开机自启、全局快捷键（仅桌面端）。
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-tauri-plugin-single-instance = "2"
-tauri-plugin-autostart = "2"
-tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2.5.2"
+tauri-plugin-autostart = "2.7.0"
+tauri-plugin-global-shortcut = "2.4.0"
 
 # 设备口令存系统钥匙串（Android 无对应后端，退回 0600 文件）。
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
