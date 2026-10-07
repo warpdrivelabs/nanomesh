@@ -795,6 +795,10 @@ impl Node {
     fn pkarr_endpoint(&self) -> Option<String> {
         self.pkarr_url.read().unwrap().clone()
     }
+    /// F3 诊断/测试：当前已加入的联邦主题标签（群 gid 与收件人 account 混列）。
+    pub async fn fed_joined(&self) -> Vec<Vec<u8>> {
+        self.fed.joined().await
+    }
     /// F2：把某「带密钥群」的 seed 节点集合（本节点=home + 该群主题上存活的成员 home）签名后 PUT 到
     /// pkarr relay，使无锚节点可据群公钥解析入网 seed。无 pkarr / 无群私钥 / 非 home 则跳过。
     /// pub：供 sweep 周期调用，也便于运维/测试直接触发。
@@ -1442,6 +1446,10 @@ impl Node {
                     apply_domain_decision(&gram, &self.domains, &self.store, &self.domain_notices);
                     return;
                 }
+                // F3 去重：火管 Direct + 收件箱主题双写时同一条会到两次，按 (sender, gram_id) 只投一次。
+                if !self.seen.lock().unwrap().first_seen(&gram.sender, gram.gram_id) {
+                    return;
+                }
                 let home_here = is_home_here(&ctx, to);
                 deliver_account(to, &gram, &ctx, home_here, None).await;
             }
@@ -1529,6 +1537,11 @@ impl Node {
                         // （非群 home 也发），使发送方据此判定「全员远端 home 在此主题存活」后省略火管群消息副本。
                         let bytes = encode_announce(&me, true, g.clone());
                         let _ = self.fed.publish(&g.group_id, bytes).await;
+                    }
+                    // F3：订阅本节点 home 账号的收件箱主题 nmspace-inbox:<account>，私聊单播经此主题投达
+                    // （含离线：收件人 home 订阅后收取并入离线库）。join_inbox 幂等。
+                    for acct in local_accounts(&ctx) {
+                        let _ = self.fed.join_inbox(&acct, inbox_bootstrap(&acct, &ctx)).await;
                     }
                     last_fed = tokio::time::Instant::now();
                 }
@@ -2258,6 +2271,44 @@ fn group_bootstrap(group: &Group, ctx: &Ctx) -> Vec<[u8; 32]> {
         }
     }
     v
+}
+
+/// F3：收件人收件箱主题的 bootstrap——收件人 home 节点(锚点) + 本节点已知对等。
+/// 发送方据此接入 `nmspace-inbox:<to>` 叠加网（收件人 home 已订阅在其上）。
+fn inbox_bootstrap(account: &[u8], ctx: &Ctx) -> Vec<[u8; 32]> {
+    let mut v: Vec<[u8; 32]> = Vec::new();
+    if let Some(e) = ctx.dir.entities.get(account) {
+        if let Ok(h) = <[u8; 32]>::try_from(e.home_node.as_slice()) {
+            v.push(h);
+        }
+    }
+    for e in ctx.peers.iter() {
+        if let Ok(id) = <[u8; 32]>::try_from(e.key().as_slice()) {
+            if !v.contains(&id) {
+                v.push(id);
+            }
+        }
+    }
+    v
+}
+
+/// F3：本节点为 home 的账号集合（目录 home_node==本节点 ∪ 本地登记设备的账号）。
+/// 这些账号的收件箱主题需由本节点订阅，以收取发给它们的私聊单播（在线直投 / 离线入库）。
+fn local_accounts(ctx: &Ctx) -> Vec<Vec<u8>> {
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    for e in ctx.dir.entities.iter() {
+        if e.value().home_node == ctx.node_id.as_slice() && !out.contains(e.key()) {
+            out.push(e.key().clone());
+        }
+    }
+    for d in ctx.devices.iter() {
+        if let Some(c) = d.cert.as_ref() {
+            if !out.contains(&c.account) {
+                out.push(c.account.clone());
+            }
+        }
+    }
+    out
 }
 
 /// F1 协商就绪判定（F5 预备）：该群是否「全员经每群主题可达」——每个**远端**成员的 home 节点都已
@@ -3013,7 +3064,14 @@ async fn deliver_direct(gram: &Gram, ctx: &Ctx) {
         origin: ctx.node_id.to_vec(),
         body: Some(nm_proto::pb::group_gossip::Body::Direct(gram.clone())),
     };
-    let _ = ctx.group_pub.send(gg.encode_to_vec());
+    let bytes = gg.encode_to_vec();
+    // F3：per_topic 开 → 投到收件人收件箱主题 nmspace-inbox:<to>（仅其 home 订阅 → 私密单播，
+    // 取代火管 Direct 全广播 + NAT 下常不通的 s2s 直投）。与火管双写；收端按 (sender,gram_id) 去重。
+    if ctx.per_topic.load(std::sync::atomic::Ordering::Relaxed) {
+        let _ = ctx.fed.join_inbox(to, inbox_bootstrap(to, ctx)).await;
+        let _ = ctx.fed.publish_inbox(to, bytes.clone()).await;
+    }
+    let _ = ctx.group_pub.send(bytes); // 火管（兜底 / 未全迁移时；收件箱退役待投递 ACK，见 F3 说明）
 }
 
 /// 尝试把 gram 经 uni 流推送给某在线会话；返回是否投递成功。
