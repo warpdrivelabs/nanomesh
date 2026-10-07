@@ -441,6 +441,7 @@ async fn main() -> anyhow::Result<()> {
         });
         node.clone().spawn_presence(m.federation.clone()); // P2：在线状态 gossip + TTL
         node.set_per_topic(cfg.federation.per_topic); // F1：按 nmd.toml [federation] per_topic 开/关每群主题
+        node.set_pkarr(cfg.dns.url.clone()); // F2：群发现 pkarr relay（配置了 [dns] url 即启用；否则仅火管/home 锚点发现）
         node.clone().spawn_group_sync(m.federation.clone()); // 群联邦：发现 + 消息扇出走 gossip（免 s2s 中继）
         tracing::info!(
             federation = %cfg.membership.federation,

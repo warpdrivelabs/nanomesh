@@ -198,7 +198,6 @@ fn hex_decode_n<const N: usize>(s: &str) -> Option<[u8; N]> {
 /// F2 pkarr 群发现记录编解码：把「群公钥 → seed 节点集合」签成 pkarr `SignedPacket`，
 /// 载荷即 relay payload（可 PUT/GET iroh-dns-server）。此处仅编解码；网络收发见 pkarr 发布/解析任务。
 /// 复用 iroh-dns 自带 pkarr（iroh 原生 ed25519），不引入独立 pkarr/mainline 依赖。
-#[allow(dead_code)] // 由 F2 part 2（pkarr 发布/解析任务）消费；part 1 仅编解码 + 单测
 mod pkarr_rec {
     use super::{hex_decode_n, hex_encode};
     use iroh_dns::pkarr::SignedPacket;
@@ -274,6 +273,7 @@ struct Ctx {
     fed: Arc<nm_federation::Federation>,                    // F1：每群独立主题收发
     per_topic: Arc<std::sync::atomic::AtomicBool>,          // F1 灰度开关（关=仅火管）
     per_group_live: Arc<GroupLive>,                         // F5：各群主题上各节点最近存活（火管省略判据）
+    pkarr_seeds: Arc<DashMap<Vec<u8>, Vec<[u8; 32]>>>,      // F2：pkarr 解析到的各群 seed（group_bootstrap 兜底）
     domains: Arc<std::sync::RwLock<Vec<String>>>, // 本节点自声明域名集合（命名 N1）
     names: Arc<DashMap<String, NameRecord>>,  // 命名缓存 local@domain → NameRecord
     /// 注册中心审批结果：域名 → (是否通过, 时间)。
@@ -407,6 +407,9 @@ pub struct Node {
     seen: Arc<std::sync::Mutex<SeenGrams>>, // 群消息去重（火管 + 每群主题双写只投一次）
     per_topic_nodes: Arc<DashSet<Vec<u8>>>, // F1 协商：已广告支持每群主题的节点 id（收 announce 时记录；F5 据此停火管）
     per_group_live: Arc<GroupLive>,         // F5：各群主题上各节点的最近存活（据此省略群消息的火管副本）
+    pkarr_url: Arc<std::sync::RwLock<Option<String>>>, // F2：pkarr relay 端点（nmd 据 infra 设置；None=不发布/解析）
+    pkarr_seeds: Arc<DashMap<Vec<u8>, Vec<[u8; 32]>>>, // F2：pkarr 解析到的各群 seed 节点（join bootstrap 兜底/无锚发现）
+    http: reqwest::Client,                  // F2：pkarr relay HTTP 客户端
     // 群联邦 gossip：fanout 把待广播的 GroupGossip 字节丢进 group_pub，由 spawn_group_sync 统一发布。
     group_pub: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     group_pub_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>>,
@@ -584,6 +587,9 @@ impl Node {
             seen: Arc::new(std::sync::Mutex::new(SeenGrams::default())),
             per_topic_nodes: Arc::new(DashSet::new()),
             per_group_live: Arc::new(GroupLive::new()),
+            pkarr_url: Arc::new(std::sync::RwLock::new(None)),
+            pkarr_seeds: Arc::new(DashMap::new()),
+            http: reqwest::Client::new(),
             group_pub,
             group_pub_rx: std::sync::Mutex::new(Some(group_pub_rx)),
             domains: Arc::new(std::sync::RwLock::new(owned_domains)),
@@ -614,6 +620,7 @@ impl Node {
             fed: self.fed.clone(),
             per_topic: self.per_topic.clone(),
             per_group_live: self.per_group_live.clone(),
+            pkarr_seeds: self.pkarr_seeds.clone(),
             domains: self.domains.clone(),
             names: self.names.clone(),
             domain_notices: self.domain_notices.clone(),
@@ -780,6 +787,61 @@ impl Node {
             now_ms(),
             LIVE_TTL_MS,
         )
+    }
+    /// F2：设置本节点 pkarr relay 端点（nmd 据 infra 透传；`None`=不发布/解析群发现记录）。
+    pub fn set_pkarr(&self, url: Option<String>) {
+        *self.pkarr_url.write().unwrap() = url;
+    }
+    fn pkarr_endpoint(&self) -> Option<String> {
+        self.pkarr_url.read().unwrap().clone()
+    }
+    /// F2：把某「带密钥群」的 seed 节点集合（本节点=home + 该群主题上存活的成员 home）签名后 PUT 到
+    /// pkarr relay，使无锚节点可据群公钥解析入网 seed。无 pkarr / 无群私钥 / 非 home 则跳过。
+    /// pub：供 sweep 周期调用，也便于运维/测试直接触发。
+    pub async fn pkarr_publish_group(&self, gid: &[u8]) {
+        let Some(url) = self.pkarr_endpoint() else { return };
+        let Some(store) = &self.store else { return };
+        let Ok(Some(secret_bytes)) = store.group_secret(gid) else { return };
+        let Ok(sk_arr) = <[u8; 32]>::try_from(secret_bytes.as_slice()) else { return };
+        let sk = nm_transport::SecretKey::from_bytes(&sk_arr);
+        let mut seeds: Vec<[u8; 32]> = vec![self.ep.id_bytes()]; // 本节点(home) 为首 seed
+        if let Some(gl) = self.per_group_live.get(gid) {
+            let now = now_ms();
+            for e in gl.iter() {
+                if now.saturating_sub(*e.value()) < LIVE_TTL_MS {
+                    if let Ok(id) = <[u8; 32]>::try_from(e.key().as_slice()) {
+                        if !seeds.contains(&id) {
+                            seeds.push(id);
+                        }
+                    }
+                }
+            }
+        }
+        let Ok(payload) = pkarr_rec::build(&sk, &seeds) else { return };
+        let endpoint = format!("{}/{}", url.trim_end_matches('/'), sk.public().to_z32());
+        match self.http.put(&endpoint).body(payload).send().await {
+            Ok(r) if r.status().is_success() => {
+                tracing::debug!(seeds = seeds.len(), "pkarr group record published")
+            }
+            Ok(r) => tracing::debug!(status = %r.status(), "pkarr publish non-success"),
+            Err(e) => tracing::debug!("pkarr publish failed: {e}"),
+        }
+    }
+    /// F2：据群公钥从 pkarr relay 解析 seed 节点集合（GET + 验签）。无 pkarr / 解析失败则空。
+    /// pub：供 sweep 周期调用，也便于运维/测试直接触发。
+    pub async fn pkarr_resolve_group(&self, gid: &[u8]) -> Vec<[u8; 32]> {
+        let Some(url) = self.pkarr_endpoint() else { return Vec::new() };
+        let Ok(gid_arr) = <[u8; 32]>::try_from(gid) else { return Vec::new() };
+        let Ok(pk) = nm_transport::Id::from_bytes(&gid_arr) else { return Vec::new() };
+        let endpoint = format!("{}/{}", url.trim_end_matches('/'), pk.to_z32());
+        let payload = match self.http.get(&endpoint).send().await {
+            Ok(r) if r.status().is_success() => match r.bytes().await {
+                Ok(b) => b.to_vec(),
+                Err(_) => return Vec::new(),
+            },
+            _ => return Vec::new(),
+        };
+        pkarr_rec::parse(&gid_arr, &payload).unwrap_or_default()
     }
     pub fn directory(&self) -> Arc<MemDirectory> {
         self.dir.clone()
@@ -1444,6 +1506,7 @@ impl Node {
                 }
             }
             let mut last_fed = tokio::time::Instant::now() - std::time::Duration::from_secs(10);
+            let mut last_pkarr = tokio::time::Instant::now() - std::time::Duration::from_secs(120);
             loop {
                 // 发布 fanout 丢来的待广播项（群消息 / 变更即时公告）。
                 while let Ok(bytes) = pub_rx.try_recv() {
@@ -1468,6 +1531,30 @@ impl Node {
                         let _ = self.fed.publish(&g.group_id, bytes).await;
                     }
                     last_fed = tokio::time::Instant::now();
+                }
+                // F2：pkarr 群发现（每 ~60s）——home 节点发布「群公钥 → seed」记录；非 home 成员节点解析缓存，
+                // 供 group_bootstrap 无锚/兜底入网。仅 per_topic 开 + 配置了 pkarr relay 时。
+                if self.per_topic.load(std::sync::atomic::Ordering::Relaxed)
+                    && self.pkarr_endpoint().is_some()
+                    && last_pkarr.elapsed() >= std::time::Duration::from_secs(60)
+                {
+                    let ctx = self.ctx();
+                    let me = self.ep.id_bytes();
+                    let groups: Vec<Group> = self.groups.iter().map(|e| e.value().clone()).collect();
+                    for g in groups {
+                        if !g.members.iter().any(|m| is_home_here(&ctx, m)) {
+                            continue;
+                        }
+                        if g.home_node.as_slice() == me.as_slice() {
+                            self.pkarr_publish_group(&g.group_id).await; // home 发布 seed 记录
+                        } else {
+                            let seeds = self.pkarr_resolve_group(&g.group_id).await; // 非 home 解析兜底
+                            if !seeds.is_empty() {
+                                self.pkarr_seeds.insert(g.group_id.clone(), seeds);
+                            }
+                        }
+                    }
+                    last_pkarr = tokio::time::Instant::now();
                 }
                 // 周期广播本节点归属群（发现 + 成员表收敛）。
                 if last_announce.elapsed() >= announce_iv {
@@ -2149,7 +2236,7 @@ async fn fanout_group(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) {
     }
 }
 
-/// 某群主题的 bootstrap 对端：群归属节点(锚点) + 本节点已知对等。
+/// 某群主题的 bootstrap 对端：群归属节点(锚点) + 本节点已知对等 + F2 pkarr 解析到的 seed（无锚/兜底）。
 fn group_bootstrap(group: &Group, ctx: &Ctx) -> Vec<[u8; 32]> {
     let mut v: Vec<[u8; 32]> = Vec::new();
     if let Ok(h) = <[u8; 32]>::try_from(group.home_node.as_slice()) {
@@ -2159,6 +2246,14 @@ fn group_bootstrap(group: &Group, ctx: &Ctx) -> Vec<[u8; 32]> {
         if let Ok(id) = <[u8; 32]>::try_from(e.key().as_slice()) {
             if !v.contains(&id) {
                 v.push(id);
+            }
+        }
+    }
+    // F2：并入 pkarr 解析到的 seed（home 不可达 / 无锚发现时的入网点）。
+    if let Some(s) = ctx.pkarr_seeds.get(&group.group_id) {
+        for id in s.value() {
+            if !v.contains(id) {
+                v.push(*id);
             }
         }
     }

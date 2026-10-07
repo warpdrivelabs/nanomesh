@@ -2450,6 +2450,7 @@ name = "nm-node"
 version = "0.1.0"
 dependencies = [
  "argon2",
+ "axum",
  "dashmap",
  "iroh",
  "iroh-dns",
@@ -2464,6 +2465,7 @@ dependencies = [
  "nm-store",
  "nm-transport",
  "prost",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

@@ -19,6 +19,7 @@ dashmap = { workspace = true }
 iroh = { workspace = true }
 iroh-gossip = { workspace = true }
 iroh-dns = { workspace = true }   # F2 pkarr 群发现记录编解码
+reqwest = { version = "0.13", default-features = false, features = ["native-tls"] }  # F2：pkarr relay PUT/GET（服务端，native-tls 同 nm-admind）
 serde = { workspace = true }
 serde_json = { workspace = true }
 prost = "0.14"
@@ -29,3 +30,4 @@ nm-client = { workspace = true }
 nm-entity = { workspace = true }
 tempfile = "3"
 tracing-subscriber = { workspace = true }
+axum = { workspace = true }   # F2：pkarr mock relay（本地验证 publish/resolve）
