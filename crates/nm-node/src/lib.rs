@@ -320,6 +320,33 @@ fn entity_matches(e: &Entity, q: &DirectoryQuery) -> bool {
 }
 
 /// 去中心节点。
+/// 群消息去重：最近已投递的 `(sender, gram_id)`，有界 FIFO。
+/// 火管 + 每群主题双写（F1）时同一条 Msg 会到两次，据此只投一次。
+#[derive(Default)]
+struct SeenGrams {
+    set: std::collections::HashSet<(Vec<u8>, u64)>,
+    order: std::collections::VecDeque<(Vec<u8>, u64)>,
+}
+
+impl SeenGrams {
+    const CAP: usize = 8192;
+    /// `true`=首次见（应投递）；`false`=已见（丢弃）。
+    fn first_seen(&mut self, sender: &[u8], gram_id: u64) -> bool {
+        let key = (sender.to_vec(), gram_id);
+        if self.set.contains(&key) {
+            return false;
+        }
+        self.set.insert(key.clone());
+        self.order.push_back(key);
+        if self.order.len() > Self::CAP {
+            if let Some(old) = self.order.pop_front() {
+                self.set.remove(&old);
+            }
+        }
+        true
+    }
+}
+
 pub struct Node {
     ep: NodeEndpoint,
     dir: Arc<MemDirectory>,
@@ -338,6 +365,7 @@ pub struct Node {
     fed: Arc<nm_federation::Federation>,
     fed_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<nm_federation::FedMsg>>>,
     per_topic: Arc<std::sync::atomic::AtomicBool>,
+    seen: Arc<std::sync::Mutex<SeenGrams>>, // 群消息去重（火管 + 每群主题双写只投一次）
     // 群联邦 gossip：fanout 把待广播的 GroupGossip 字节丢进 group_pub，由 spawn_group_sync 统一发布。
     group_pub: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     group_pub_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>>,
@@ -512,6 +540,7 @@ impl Node {
             fed,
             fed_rx: std::sync::Mutex::new(Some(fed_rx)),
             per_topic: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            seen: Arc::new(std::sync::Mutex::new(SeenGrams::default())),
             group_pub,
             group_pub_rx: std::sync::Mutex::new(Some(group_pub_rx)),
             domains: Arc::new(std::sync::RwLock::new(owned_domains)),
@@ -1254,6 +1283,10 @@ impl Node {
         match gg.body {
             Some(nm_proto::pb::group_gossip::Body::Announce(g)) => self.merge_group_lww(g),
             Some(nm_proto::pb::group_gossip::Body::Msg(gram)) => {
+                // 去重（F1-2）：火管 + 每群主题双写时同一条 Msg 会到两次，按 (sender, gram_id) 只投一次。
+                if !self.seen.lock().unwrap().first_seen(&gram.sender, gram.gram_id) {
+                    return;
+                }
                 let Some(group) = self.groups.get(&gram.receiver).map(|g| g.clone()) else {
                     return; // 尚未学到该群（announce 未到）→ 跳过；周期公告后续会补
                 };
@@ -3525,5 +3558,15 @@ mod p0_tests {
         assert!(d.merge_lww(ent(1, 200, "v2eq")), "相等 updated_at 按 >= 接受");
         assert_eq!(d.entities.get(&key).unwrap().display_name, "v2eq");
         assert_eq!(d.len(), 1, "同一 id 只保留一条");
+    }
+
+    #[test]
+    fn seen_grams_dedup() {
+        let mut s = SeenGrams::default();
+        assert!(s.first_seen(&[1u8; 32], 7), "首次见应投递");
+        assert!(!s.first_seen(&[1u8; 32], 7), "重复 (sender,gram_id) 应丢弃");
+        assert!(s.first_seen(&[1u8; 32], 8), "不同 gram_id 应投递");
+        assert!(s.first_seen(&[2u8; 32], 7), "不同 sender、同 gram_id 应投递");
+        assert!(!s.first_seen(&[2u8; 32], 7), "再次重复应丢弃");
     }
 }
