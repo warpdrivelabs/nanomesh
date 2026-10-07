@@ -136,6 +136,7 @@ message Group {
   string topic = 7;                   // 群简介 / 公告
   string avatar_url = 8;              // 群头像："b3:<hash>"（内容寻址，blob 存 home_node）或内联 data:URI
   bytes home_node = 9;                // 群归属节点（头像 blob 所在；跨节点 blob_get 寻址用）
+  bool supports_per_topic = 10;       // F1 协商：announce 源节点广告自身支持「每群独立主题」；收端据此跟踪可 per_topic 节点（非群状态，仅能力广告）。老节点不填=false=仅火管，向后兼容。
 }
 // 群操作参数（method=group.create/join/leave/kick/set_meta/list 时装入 Command.params）。
 message GroupOp {

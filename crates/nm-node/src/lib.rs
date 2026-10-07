@@ -366,6 +366,7 @@ pub struct Node {
     fed_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<nm_federation::FedMsg>>>,
     per_topic: Arc<std::sync::atomic::AtomicBool>,
     seen: Arc<std::sync::Mutex<SeenGrams>>, // 群消息去重（火管 + 每群主题双写只投一次）
+    per_topic_nodes: Arc<DashSet<Vec<u8>>>, // F1 协商：已广告支持每群主题的节点 id（收 announce 时记录；F5 据此停火管）
     // 群联邦 gossip：fanout 把待广播的 GroupGossip 字节丢进 group_pub，由 spawn_group_sync 统一发布。
     group_pub: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     group_pub_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>>,
@@ -541,6 +542,7 @@ impl Node {
             fed_rx: std::sync::Mutex::new(Some(fed_rx)),
             per_topic: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             seen: Arc::new(std::sync::Mutex::new(SeenGrams::default())),
+            per_topic_nodes: Arc::new(DashSet::new()),
             group_pub,
             group_pub_rx: std::sync::Mutex::new(Some(group_pub_rx)),
             domains: Arc::new(std::sync::RwLock::new(owned_domains)),
@@ -712,6 +714,15 @@ impl Node {
     }
     pub fn per_topic_on(&self) -> bool {
         self.per_topic.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    /// F1 协商就绪查询（F5 预备 / 运维可见）：该群是否「全员经每群主题可达」——每个远端成员的
+    /// home 节点都已在 announce 中广告支持 per_topic（本地成员无需联邦）。保守：任一成员 home 未知/未广告 → false。
+    /// 当前仅供诊断与 F5（火管退役）判定使用，不改变投递路径（仍双写火管）。
+    pub fn group_per_topic_ready(&self, gid: &[u8]) -> bool {
+        let Some(g) = self.groups.get(gid).map(|g| g.clone()) else {
+            return false;
+        };
+        group_fully_per_topic(&self.ep.id_bytes(), &self.dir.entities, &self.per_topic_nodes, &g)
     }
     pub fn directory(&self) -> Arc<MemDirectory> {
         self.dir.clone()
@@ -1279,9 +1290,19 @@ impl Node {
         if gg.origin.as_slice() == self.ep.id_bytes().as_slice() {
             return; // 自回环忽略
         }
+        let origin = gg.origin.clone();
         let ctx = self.ctx();
         match gg.body {
-            Some(nm_proto::pb::group_gossip::Body::Announce(g)) => self.merge_group_lww(g),
+            Some(nm_proto::pb::group_gossip::Body::Announce(mut g)) => {
+                // F1 协商：home 节点在 announce 里广告自身 per_topic 能力；据 origin 跟踪可 per_topic 节点。
+                if g.supports_per_topic {
+                    self.per_topic_nodes.insert(origin);
+                } else {
+                    self.per_topic_nodes.remove(&origin);
+                }
+                g.supports_per_topic = false; // 节点能力不写进群状态（保持群状态纯净）
+                self.merge_group_lww(g);
+            }
             Some(nm_proto::pb::group_gossip::Body::Msg(gram)) => {
                 // 去重（F1-2）：火管 + 每群主题双写时同一条 Msg 会到两次，按 (sender, gram_id) 只投一次。
                 if !self.seen.lock().unwrap().first_seen(&gram.sender, gram.gram_id) {
@@ -1374,11 +1395,8 @@ impl Node {
                         }
                         let _ = self.fed.join_group(&g.group_id, group_bootstrap(&g, &ctx)).await;
                         if g.home_node.as_slice() == me.as_slice() {
-                            let gg = GroupGossip {
-                                origin: me.to_vec(),
-                                body: Some(nm_proto::pb::group_gossip::Body::Announce(g.clone())),
-                            };
-                            let _ = self.fed.publish(&g.group_id, gg.encode_to_vec()).await;
+                            let bytes = encode_announce(&me, true, g.clone()); // 在 per_topic 泵内 → 本节点必然支持
+                            let _ = self.fed.publish(&g.group_id, bytes).await;
                         }
                     }
                     last_fed = tokio::time::Instant::now();
@@ -1393,11 +1411,8 @@ impl Node {
                         .map(|g| g.clone())
                         .collect();
                     for g in mine {
-                        let gg = GroupGossip {
-                            origin: me.to_vec(),
-                            body: Some(nm_proto::pb::group_gossip::Body::Announce(g)),
-                        };
-                        let _ = topic.publish(gg.encode_to_vec()).await;
+                        let per_topic = self.per_topic.load(std::sync::atomic::Ordering::Relaxed);
+                        let _ = topic.publish(encode_announce(&me, per_topic, g)).await;
                     }
                     // 周期重播本节点签发的命名记录（home_node==自身），令晚加入节点补全命名缓存。
                     let my_names: Vec<NameRecord> = self
@@ -2048,7 +2063,8 @@ async fn fanout_group(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) {
     let bytes = gg.encode_to_vec();
     let _ = ctx.group_pub.send(bytes.clone()); // 火管（现状：所有节点都收）
     // F1 灰度：per_topic 开启时，同一条也发到该群独立主题 nmspace-group:<gid>（双写；仅成员节点收）。
-    // TODO(F1-2)：收端按 gram_id 去重；Announce.supports_per_topic 协商全网支持后停火管（退役）。
+    // 收端已按 (sender,gram_id) 去重（F1-2a）。协商就绪判定见 group_fully_per_topic（F1-2b）；
+    // 待全网广告支持 + 主题订阅存活后，F5 据此停火管（退役），实现真正「仅成员可达」。
     if ctx.per_topic.load(std::sync::atomic::Ordering::Relaxed) {
         let _ = ctx.fed.join_group(&gram.receiver, group_bootstrap(&group, ctx)).await;
         let _ = ctx.fed.publish(&gram.receiver, bytes).await;
@@ -2069,6 +2085,34 @@ fn group_bootstrap(group: &Group, ctx: &Ctx) -> Vec<[u8; 32]> {
         }
     }
     v
+}
+
+/// F1 协商就绪判定（F5 预备）：该群是否「全员经每群主题可达」——每个**远端**成员的 home 节点都已
+/// 广告支持 per_topic。本地成员（home==本节点）本地投递、无需联邦，跳过。
+/// 保守：任一成员 home 未知 / home 未广告 → false（继续走火管，不漏投）。
+/// F5（火管退役）将据此对「全员可达」的群跳过火管；在此之前只广告 + 跟踪，不改投递路径。
+/// 注意：能力广告 ≠ 已订阅该群主题（广告与 join 扫描之间有窗口），F5 落地还须加「主题邻居存活」信号。
+fn group_fully_per_topic(
+    node_id: &[u8],
+    entities: &DashMap<Vec<u8>, Entity>,
+    per_topic_nodes: &DashSet<Vec<u8>>,
+    group: &Group,
+) -> bool {
+    for m in &group.members {
+        let Some(e) = entities.get(m) else {
+            return false; // 成员 home 未知 → 保守
+        };
+        if e.home_node.is_empty() {
+            return false;
+        }
+        if e.home_node.as_slice() == node_id {
+            continue; // 本地成员，本地投递
+        }
+        if !per_topic_nodes.contains(&e.home_node) {
+            return false; // 远端成员 home 未广告 per_topic → 保守
+        }
+    }
+    true
 }
 
 /// 把群消息投递给「本节点负责的成员」：在线设备直投；本节点是其 home 则离线设备入库。
@@ -2169,14 +2213,22 @@ fn drain_inbox_to(ctx: &Ctx, rid: &[u8], conn: &IrohConnection) {
     });
 }
 
+/// 构造群 Announce 的 gossip 字节：origin=本节点；`supports_per_topic`=本节点能力广告（F1 协商）。
+/// 该标志是「节点能力」不是「群状态」——仅在 announce 瞬间按本节点 per_topic 置位，收端据 origin 跟踪。
+fn encode_announce(origin: &[u8], per_topic: bool, mut g: Group) -> Vec<u8> {
+    g.supports_per_topic = per_topic;
+    GroupGossip {
+        origin: origin.to_vec(),
+        body: Some(nm_proto::pb::group_gossip::Body::Announce(g)),
+    }
+    .encode_to_vec()
+}
+
 /// 立即向联邦广播某群当前状态（发现 + 成员表）。群变更后调用，避免等周期公告。
 fn announce_group(ctx: &Ctx, gid: &[u8]) {
     if let Some(g) = ctx.groups.get(gid).map(|g| g.clone()) {
-        let gg = GroupGossip {
-            origin: ctx.node_id.to_vec(),
-            body: Some(nm_proto::pb::group_gossip::Body::Announce(g)),
-        };
-        let _ = ctx.group_pub.send(gg.encode_to_vec());
+        let per_topic = ctx.per_topic.load(std::sync::atomic::Ordering::Relaxed);
+        let _ = ctx.group_pub.send(encode_announce(&ctx.node_id, per_topic, g));
     }
 }
 
@@ -3225,6 +3277,7 @@ fn group_create(
         topic: op.topic.clone(),
         avatar_url: op.avatar_url.clone(),
         home_node: node_id.to_vec(),
+        supports_per_topic: false, // 群状态不含节点能力；announce 时按本节点 per_topic 置位
     };
     persist_group(store, &g);
     groups.insert(g.group_id.clone(), g);
@@ -3568,5 +3621,40 @@ mod p0_tests {
         assert!(s.first_seen(&[1u8; 32], 8), "不同 gram_id 应投递");
         assert!(s.first_seen(&[2u8; 32], 7), "不同 sender、同 gram_id 应投递");
         assert!(!s.first_seen(&[2u8; 32], 7), "再次重复应丢弃");
+    }
+
+    #[test]
+    fn group_fully_per_topic_predicate() {
+        let me = vec![0u8; 32];
+        let node_b = vec![1u8; 32];
+        let node_c = vec![2u8; 32];
+        let alice = vec![10u8; 32]; // home=本节点（本地成员）
+        let bob = vec![11u8; 32]; // home=B
+        let carol = vec![12u8; 32]; // home=C
+        let ents: DashMap<Vec<u8>, Entity> = DashMap::new();
+        let mk = |home: &Vec<u8>| Entity { home_node: home.clone(), ..Default::default() };
+        ents.insert(alice.clone(), mk(&me));
+        ents.insert(bob.clone(), mk(&node_b));
+        ents.insert(carol.clone(), mk(&node_c));
+        let advertised: DashSet<Vec<u8>> = DashSet::new();
+        let g = Group {
+            members: vec![alice.clone(), bob.clone(), carol.clone()],
+            ..Default::default()
+        };
+        // 无人广告 → false（保守）
+        assert!(!group_fully_per_topic(&me, &ents, &advertised, &g));
+        // 仅 B 广告 → 仍 false（C 未广告）
+        advertised.insert(node_b.clone());
+        assert!(!group_fully_per_topic(&me, &ents, &advertised, &g));
+        // B + C 都广告 → true（本地成员 alice 无需联邦）
+        advertised.insert(node_c.clone());
+        assert!(group_fully_per_topic(&me, &ents, &advertised, &g));
+        // 含 home 未知的成员 → false（保守）
+        let dave = vec![13u8; 32];
+        let g2 = Group {
+            members: vec![bob.clone(), dave.clone()],
+            ..Default::default()
+        };
+        assert!(!group_fully_per_topic(&me, &ents, &advertised, &g2));
     }
 }
