@@ -194,6 +194,40 @@ fn hex_decode_n<const N: usize>(s: &str) -> Option<[u8; N]> {
     }
     Some(out)
 }
+
+/// F2 pkarr 群发现记录编解码：把「群公钥 → seed 节点集合」签成 pkarr `SignedPacket`，
+/// 载荷即 relay payload（可 PUT/GET iroh-dns-server）。此处仅编解码；网络收发见 pkarr 发布/解析任务。
+/// 复用 iroh-dns 自带 pkarr（iroh 原生 ed25519），不引入独立 pkarr/mainline 依赖。
+#[allow(dead_code)] // 由 F2 part 2（pkarr 发布/解析任务）消费；part 1 仅编解码 + 单测
+mod pkarr_rec {
+    use super::{hex_decode_n, hex_encode};
+    use iroh_dns::pkarr::SignedPacket;
+    use nm_transport::SecretKey;
+
+    pub(super) const SEED_NAME: &str = "_nmspace"; // seed 记录挂载的 TXT 名（相对群公钥 origin）
+    pub(super) const REC_TTL: u32 = 300; // 记录 TTL（秒）：seed 集合变动不频繁
+    pub(super) const MAX_SEEDS: usize = 8; // seed 上限（控制 DNS 包 < pkarr 上限）
+
+    /// 用群私钥把 seed 节点集合签成 relay payload（PUT 到 relay 的 body）。
+    pub(super) fn build(secret: &SecretKey, seeds: &[[u8; 32]]) -> Result<Vec<u8>, String> {
+        let values: Vec<String> = seeds.iter().take(MAX_SEEDS).map(|s| hex_encode(s)).collect();
+        let pkt = SignedPacket::from_txt_strings(secret, SEED_NAME, values, REC_TTL)
+            .map_err(|e| e.to_string())?;
+        Ok(pkt.to_relay_payload())
+    }
+
+    /// 校验并解析某群公钥下的 relay payload → seed 节点集合（签名由该公钥校验，篡改即失败）。
+    pub(super) fn parse(pubkey: &[u8; 32], payload: &[u8]) -> Result<Vec<[u8; 32]>, String> {
+        let pk = nm_transport::Id::from_bytes(pubkey).map_err(|e| e.to_string())?;
+        let pkt = SignedPacket::from_relay_payload(&pk, payload).map_err(|e| e.to_string())?;
+        Ok(pkt
+            .txt_records(SEED_NAME)
+            .iter()
+            .filter_map(|t| hex_decode_n::<32>(t))
+            .collect())
+    }
+}
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -3346,6 +3380,21 @@ fn group_create(
     if groups.contains_key(&op.group_id) {
         return (false, None, "group already exists".into());
     }
+    // F2「带密钥群」：若携带群私钥，须其公钥 == group_id；存本地供 home 节点 pkarr 发布，绝不回播。
+    if !op.secret.is_empty() {
+        let Ok(sk_bytes) = <[u8; 32]>::try_from(op.secret.as_slice()) else {
+            return (false, None, "group secret must be 32 bytes".into());
+        };
+        let sk = nm_transport::SecretKey::from_bytes(&sk_bytes);
+        if sk.public().as_bytes().as_slice() != op.group_id.as_slice() {
+            return (false, None, "group secret does not match group_id (pubkey)".into());
+        }
+        if let Some(s) = store {
+            if let Err(e) = s.put_group_secret(&op.group_id, &sk_bytes) {
+                return (false, None, format!("persist group secret failed: {e}"));
+            }
+        }
+    }
     let g = Group {
         group_id: op.group_id.clone(),
         name: op.name.clone(),
@@ -3360,7 +3409,7 @@ fn group_create(
     };
     persist_group(store, &g);
     groups.insert(g.group_id.clone(), g);
-    tracing::info!("group created");
+    tracing::info!(keyed = !op.secret.is_empty(), "group created");
     (true, None, String::new())
 }
 
@@ -3786,5 +3835,23 @@ mod p0_tests {
         };
         live.get(&gid).unwrap().insert(node_b.clone(), now);
         assert!(!group_topic_retireable(&me, &ents, &live, &g2, now, ttl));
+    }
+
+    #[test]
+    fn pkarr_group_record_roundtrip() {
+        // 群私钥 → 群公钥(=group_id)；签 seed 集合 → relay payload → 解析回同一集合。
+        let sk = nm_transport::SecretKey::from_bytes(&[42u8; 32]);
+        let gid = *sk.public().as_bytes();
+        let seeds = [[1u8; 32], [2u8; 32], [3u8; 32]];
+        let payload = pkarr_rec::build(&sk, &seeds).expect("build");
+        let got = pkarr_rec::parse(&gid, &payload).expect("parse");
+        assert_eq!(got, seeds.to_vec(), "seed 集合应原样往返");
+        // 错误公钥（非签名者）→ 校验失败。
+        let other = *nm_transport::SecretKey::from_bytes(&[7u8; 32]).public().as_bytes();
+        assert!(pkarr_rec::parse(&other, &payload).is_err(), "非签名者公钥应校验失败");
+        // 篡改载荷 → 校验失败。
+        let mut bad = payload.clone();
+        *bad.last_mut().unwrap() ^= 0xff;
+        assert!(pkarr_rec::parse(&gid, &bad).is_err(), "篡改载荷应校验失败");
     }
 }

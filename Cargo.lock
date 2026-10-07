@@ -2452,6 +2452,7 @@ dependencies = [
  "argon2",
  "dashmap",
  "iroh",
+ "iroh-dns",
  "iroh-gossip",
  "nm-client",
  "nm-core",

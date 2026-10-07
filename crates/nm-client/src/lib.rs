@@ -374,6 +374,22 @@ impl Session {
         self.group_op("group.create", op).await?;
         Ok(group_id)
     }
+    /// F2：创建「带密钥群」——group_id = 新生成的 Ed25519 公钥；私钥随 create 命令交给 home 节点
+    /// （经加密的 client→home 信道），home 节点据此用 pkarr 发布「群公钥 → seed 节点」发现记录，
+    /// 使成员节点无锚（不依赖 home_node 常驻）也能发现并 join 该群主题。返回 group_id（= 群公钥）。
+    /// 传统 [`Self::group_create`]（调用方给定随机 id、仅火管发现）保持不变。
+    pub async fn group_create_keyed(&self, name: &str) -> Result<[u8; 32], ClientError> {
+        let sk = nm_transport::SecretKey::generate();
+        let group_id = *sk.public().as_bytes();
+        let op = GroupOp {
+            group_id: group_id.to_vec(),
+            name: name.to_string(),
+            secret: sk.to_bytes().to_vec(),
+            ..Default::default()
+        };
+        self.group_op("group.create", op).await?;
+        Ok(group_id)
+    }
     pub async fn group_join(&self, group_id: [u8; 32]) -> Result<(), ClientError> {
         self.group_op("group.join", GroupOp { group_id: group_id.to_vec(), ..Default::default() }).await
     }

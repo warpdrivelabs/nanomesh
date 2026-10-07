@@ -145,6 +145,7 @@ message GroupOp {
   bytes target = 3;                   // kick/add/promote/demote 用：目标成员
   string topic = 4;                   // set_meta 用：群简介
   string avatar_url = 5;              // set_meta 用：群头像引用
+  bytes secret = 6;                   // F2 create 用：群签名私钥(32)。group_id 须等于其公钥；home 节点存本地供 pkarr 发布，绝不回播。空=传统群(仅火管发现)。
 }
 message GroupList { repeated Group groups = 1; }
 

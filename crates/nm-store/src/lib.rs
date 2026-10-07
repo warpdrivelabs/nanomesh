@@ -23,6 +23,9 @@ const BLOBS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("blobs");
 const NAMES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("names");
 /// 账号口令校验器：key = "local@domain"，value = Argon2 PHC 字符串。只存哈希，不明文。
 const NAME_SECRETS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("name_secrets");
+/// F2：本节点为「群 home」时持有的群签名私钥：key = group_id(群公钥,32)，value = 群私钥(32)。
+/// 仅本地、绝不广播；用于 pkarr 发布 `群公钥 → seed 节点` 发现记录。
+const GROUP_SECRETS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("group_secrets");
 // 本节点拥有的域名（N1，TOFU）：key = 域名字节，value = 占位（申请时间戳字符串）。
 const DOMAINS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("domains");
 /// 已登记设备：key = 设备公钥(32)，value = DeviceInfo 编码（证书 + 改名 + 最近在线）。
@@ -338,6 +341,24 @@ impl RedbStore {
         let t = rtx.open_table(NAME_SECRETS).map_err(db_err)?;
         match t.get(full.as_bytes()).map_err(db_err)? {
             Some(v) => Ok(Some(String::from_utf8_lossy(v.value()).into_owned())),
+            None => Ok(None),
+        }
+    }
+    /// F2：存本节点为 home 的群签名私钥（32 字节）。仅本地、绝不广播；镜像 [`Self::name_secret`]。
+    pub fn put_group_secret(&self, group_id: &[u8], secret: &[u8]) -> Result<()> {
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        {
+            let mut t = wtx.open_table(GROUP_SECRETS).map_err(db_err)?;
+            t.insert(group_id, secret).map_err(db_err)?;
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+    pub fn group_secret(&self, group_id: &[u8]) -> Result<Option<Vec<u8>>> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(GROUP_SECRETS).map_err(db_err)?;
+        match t.get(group_id).map_err(db_err)? {
+            Some(v) => Ok(Some(v.value().to_vec())),
             None => Ok(None),
         }
     }
