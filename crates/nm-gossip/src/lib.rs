@@ -114,6 +114,21 @@ impl ChannelTopic {
         let ChannelTopic { tx, rx } = self;
         (ChannelSender(std::sync::Arc::new(tx)), ChannelReceiver(rx))
     }
+
+    /// 当前直接邻居数（0 = 叠加网尚未建立）。
+    pub fn neighbor_count(&self) -> usize {
+        self.rx.neighbors().count()
+    }
+
+    /// 自愈引导：`subscribe` 不重试，叠加网没建起来时把 bootstrap 对端重新注入（join_peers），
+    /// 直到邻居出现。幂等、可反复调用。
+    pub async fn rejoin(&self, bootstrap: Vec<[u8; 32]>) -> Result<(), GossipError> {
+        let mut ids = Vec::with_capacity(bootstrap.len());
+        for b in &bootstrap {
+            ids.push(EndpointId::from_bytes(b).map_err(|e| GossipError::BadPeer(e.to_string()))?);
+        }
+        self.tx.join_peers(ids).await.map_err(|e| GossipError::Gossip(e.to_string()))
+    }
 }
 
 /// 频道发送端：可克隆、`&self` 广播（内部 `Arc<GossipSender>`）。
@@ -121,6 +136,14 @@ impl ChannelTopic {
 pub struct ChannelSender(std::sync::Arc<GossipSender>);
 
 impl ChannelSender {
+    /// 自愈引导：向已订阅主题重新注入 bootstrap 对端（subscribe 不重试，叠加网没建起来时重灌）。
+    pub async fn join_peers(&self, bootstrap: Vec<[u8; 32]>) -> Result<(), GossipError> {
+        let mut ids = Vec::with_capacity(bootstrap.len());
+        for b in &bootstrap {
+            ids.push(EndpointId::from_bytes(b).map_err(|e| GossipError::BadPeer(e.to_string()))?);
+        }
+        self.0.join_peers(ids).await.map_err(|e| GossipError::Gossip(e.to_string()))
+    }
     /// 向频道广播一段字节（经 PlumTree 扩散给全体订阅者）。
     pub async fn publish(&self, payload: impl Into<Bytes>) -> Result<(), GossipError> {
         self.0
@@ -134,6 +157,10 @@ impl ChannelSender {
 pub struct ChannelReceiver(GossipReceiver);
 
 impl ChannelReceiver {
+    /// 当前直接邻居数（0 = 叠加网尚未建立）。
+    pub fn neighbor_count(&self) -> usize {
+        self.0.neighbors().count()
+    }
     /// 取下一条频道广播；`None` 表示流结束。忽略邻居 up/down 与 Lagged 等非消息事件。
     pub async fn recv(&mut self) -> Option<ChannelMsg> {
         loop {

@@ -98,6 +98,7 @@ impl Federation {
         if subs.contains_key(gid) {
             return Ok(()); // 已加入：幂等
         }
+        let heal_boot = bootstrap.clone();
         let topic = self
             .hub
             .join(group_topic_key(gid), bootstrap)
@@ -106,11 +107,23 @@ impl Federation {
         let (sender, mut rx) = topic.into_split();
         let events = self.events.clone();
         let gid_v = gid.to_vec();
+        let heal_sender = sender.clone();
         let pump = tokio::spawn(async move {
-            while let Some(msg) = rx.recv().await {
-                let fed = FedMsg { group: gid_v.clone(), content: msg.content, from: msg.from };
-                if events.send(fed).is_err() {
-                    break; // 事件接收端已丢弃 → 收摊
+            loop {
+                match tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await {
+                    Ok(Some(msg)) => {
+                        let fed = FedMsg { group: gid_v.clone(), content: msg.content, from: msg.from };
+                        if events.send(fed).is_err() {
+                            break; // 事件接收端已丢弃 → 收摊
+                        }
+                    }
+                    Ok(None) => break, // 流结束
+                    Err(_) => {
+                        // 自愈引导：无邻居且有 bootstrap 时重新注入对端，直到叠加网成型。
+                        if !heal_boot.is_empty() && rx.neighbor_count() == 0 {
+                            let _ = heal_sender.join_peers(heal_boot.clone()).await;
+                        }
+                    }
                 }
             }
         });

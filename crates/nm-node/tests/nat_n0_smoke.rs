@@ -11,6 +11,7 @@ use nm_proto::pb::{AgentProfile, PersonProfile};
 use nm_proto::{DirectoryQuery, GramKind};
 
 #[tokio::test]
+#[ignore = "requires N0 public relay/discovery to come online (real network); unavailable/flaky in CI/offline. Run with --ignored."]
 async fn n0_two_nodes_federate() {
     let dir = tempfile::tempdir().unwrap();
 
