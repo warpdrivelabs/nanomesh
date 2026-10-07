@@ -788,6 +788,18 @@ impl Node {
             LIVE_TTL_MS,
         )
     }
+    /// F3 诊断/测试：发给 `account` 的私聊单播火管 `Direct` 副本当前是否已可省略
+    /// （其 home 节点在收件箱主题存活）。见 [`inbox_retireable`]。
+    pub fn dm_firehose_retireable(&self, account: &[u8]) -> bool {
+        inbox_retireable(
+            account,
+            &self.ep.id_bytes(),
+            &self.dir.entities,
+            &self.per_group_live,
+            now_ms(),
+            LIVE_TTL_MS,
+        )
+    }
     /// F2：设置本节点 pkarr relay 端点（nmd 据 infra 透传；`None`=不发布/解析群发现记录）。
     pub fn set_pkarr(&self, url: Option<String>) {
         *self.pkarr_url.write().unwrap() = url;
@@ -1462,6 +1474,10 @@ impl Node {
                 // 命名记录复制：验签后并入命名缓存（各节点据此解析 local@domain）。
                 self.merge_name_lww(rec);
             }
+            Some(nm_proto::pb::group_gossip::Body::InboxLive(_)) => {
+                // F3 退火管：收件人 home 存活心跳。存活已由每群主题泵记入
+                // per_group_live[account][origin]；此处无需额外动作（发送方据此省略火管 Direct）。
+            }
             None => {}
         }
     }
@@ -1542,6 +1558,16 @@ impl Node {
                     // （含离线：收件人 home 订阅后收取并入离线库）。join_inbox 幂等。
                     for acct in local_accounts(&ctx) {
                         let _ = self.fed.join_inbox(&acct, inbox_bootstrap(&acct, &ctx)).await;
+                        // F3 退火管心跳：在本账号收件箱主题广播存活（origin=本节点=该账号 home）。
+                        // 发送方（已 join 该主题以发 Direct）据此记 per_group_live[account][home]，
+                        // 全部远端 home 存活时省略火管 Direct 副本。
+                        let hb = GroupGossip {
+                            origin: me.to_vec(),
+                            body: Some(nm_proto::pb::group_gossip::Body::InboxLive(
+                                nm_proto::pb::InboxLive { account: acct.clone() },
+                            )),
+                        };
+                        let _ = self.fed.publish_inbox(&acct, hb.encode_to_vec()).await;
                     }
                     // F4：订阅本节点「关心的」域名主题 nmspace-names:<domain>——自持有域 ∪ 已缓存记录的域。
                     // 持有域的记录在 announce 块按域发布到各域主题（下方）；此处只负责 join（幂等）。
@@ -2413,6 +2439,29 @@ fn group_topic_retireable(
     true
 }
 
+/// F3 退火管判据：远端收件人 `account` 的 home 节点是否在其收件箱主题 `nmspace-inbox:<account>` 上
+/// 「存活」（近 `ttl_ms` 内收到过其心跳 → per_group_live[account][home] 新鲜）。为 true 时发私聊单播
+/// 可省略火管 `Direct` 副本（仅经收件箱主题投达）。保守：home 未知/本地/存活过期 → false（仍发火管）。
+fn inbox_retireable(
+    account: &[u8],
+    node_id: &[u8],
+    entities: &DashMap<Vec<u8>, Entity>,
+    live: &GroupLive,
+    now_ms: u64,
+    ttl_ms: u64,
+) -> bool {
+    let Some(e) = entities.get(account) else {
+        return false; // 收件人 home 未知 → 保守
+    };
+    if e.home_node.is_empty() || e.home_node.as_slice() == node_id {
+        return false; // 本地收件人不走此路径（已本地直投/入库）
+    }
+    live
+        .get(account)
+        .and_then(|m| m.get(&e.home_node).map(|ts| now_ms.saturating_sub(*ts) < ttl_ms))
+        .unwrap_or(false)
+}
+
 /// 把群消息投递给「本节点负责的成员」：在线设备直投；本节点是其 home 则离线设备入库。
 /// 发送方自己的其它设备也会收到（已发同步），只跳过发出这条消息的连接 `skip_rid`。
 async fn deliver_group_here(gram: &Gram, members: &[Vec<u8>], skip_rid: &[u8], ctx: &Ctx) {
@@ -3104,13 +3153,23 @@ async fn deliver_direct(gram: &Gram, ctx: &Ctx) {
         body: Some(nm_proto::pb::group_gossip::Body::Direct(gram.clone())),
     };
     let bytes = gg.encode_to_vec();
+    let per_topic = ctx.per_topic.load(std::sync::atomic::Ordering::Relaxed);
     // F3：per_topic 开 → 投到收件人收件箱主题 nmspace-inbox:<to>（仅其 home 订阅 → 私密单播，
-    // 取代火管 Direct 全广播 + NAT 下常不通的 s2s 直投）。与火管双写；收端按 (sender,gram_id) 去重。
-    if ctx.per_topic.load(std::sync::atomic::Ordering::Relaxed) {
+    // 取代火管 Direct 全广播 + NAT 下常不通的 s2s 直投）。收端按 (sender,gram_id) 去重。
+    // 退火管：收件人 home 已在其收件箱主题存活（收到过其心跳）且收件箱发布成功 → 省略火管 Direct 副本；
+    // 否则（存活未知/过期/发布失败）仍发火管，自愈不漏投。
+    let retire = per_topic
+        && inbox_retireable(to, &ctx.node_id, &ctx.dir.entities, &ctx.per_group_live, now_ms(), LIVE_TTL_MS);
+    let mut inbox_ok = false;
+    if per_topic {
         let _ = ctx.fed.join_inbox(to, inbox_bootstrap(to, ctx)).await;
-        let _ = ctx.fed.publish_inbox(to, bytes.clone()).await;
+        inbox_ok = ctx.fed.publish_inbox(to, bytes.clone()).await.is_ok();
     }
-    let _ = ctx.group_pub.send(bytes); // 火管（兜底 / 未全迁移时；收件箱退役待投递 ACK，见 F3 说明）
+    if retire && inbox_ok {
+        tracing::debug!("firehose Direct suppressed (recipient home live on inbox topic)");
+    } else {
+        let _ = ctx.group_pub.send(bytes); // 火管（兜底 / 未全迁移时）
+    }
 }
 
 /// 尝试把 gram 经 uni 流推送给某在线会话；返回是否投递成功。
@@ -4027,6 +4086,34 @@ mod p0_tests {
         };
         live.get(&gid).unwrap().insert(node_b.clone(), now);
         assert!(!group_topic_retireable(&me, &ents, &live, &g2, now, ttl));
+    }
+
+    #[test]
+    fn inbox_retireable_predicate() {
+        let me = vec![0u8; 32];
+        let node_b = vec![1u8; 32];
+        let bob = vec![11u8; 32]; // home=B（远端收件人）
+        let alice = vec![10u8; 32]; // home=本节点（本地收件人）
+        let ents: DashMap<Vec<u8>, Entity> = DashMap::new();
+        let mk = |h: &Vec<u8>| Entity { home_node: h.clone(), ..Default::default() };
+        ents.insert(bob.clone(), mk(&node_b));
+        ents.insert(alice.clone(), mk(&me));
+        let now = 1_000_000u64;
+        let ttl = 12_000u64;
+        let live: GroupLive = GroupLive::new();
+        // bob 的 home(B) 无存活 → false（仍发火管）
+        assert!(!inbox_retireable(&bob, &me, &ents, &live, now, ttl));
+        // B 新鲜存活于 bob 收件箱 → true（可省略火管 Direct）
+        live.entry(bob.clone()).or_default().insert(node_b.clone(), now - 1_000);
+        assert!(inbox_retireable(&bob, &me, &ents, &live, now, ttl));
+        // 过期 → false（自愈恢复火管）
+        live.get(&bob).unwrap().insert(node_b.clone(), now - 20_000);
+        assert!(!inbox_retireable(&bob, &me, &ents, &live, now, ttl));
+        // 本地收件人（home==本节点）→ false（不走联邦路径）
+        assert!(!inbox_retireable(&alice, &me, &ents, &live, now, ttl));
+        // home 未知的收件人 → false（保守）
+        let carol = vec![12u8; 32];
+        assert!(!inbox_retireable(&carol, &me, &ents, &live, now, ttl));
     }
 
     #[test]
