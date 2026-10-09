@@ -21,7 +21,7 @@ members = [
     "bin/nm-domain",
     "xtask",
 ]
-exclude = ["old_space", "clients"]
+exclude = ["old_space", "clients", "crates/nm-agent-bridge"]
 
 [workspace.package]
 version = "0.1.0"

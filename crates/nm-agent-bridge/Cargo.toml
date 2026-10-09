@@ -1,0 +1,27 @@
+[package]
+name = "nm-agent-bridge"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "nanomesh 前门 façade：实现 cmx-agent 内核 ModelSeam，把模型调用接到 P2P 模型网络（C2）。A0 引用打通。"
+
+# A0 说明：本 crate **不在** 主 workspace members 内（见根 Cargo.toml exclude），
+# 以便主干构建（nmd 等，供测试者 pull）完全不受 cmx-agent 外部依赖影响；独立构建：
+#   cargo build  --manifest-path crates/nm-agent-bridge/Cargo.toml
+#   cargo test   --manifest-path crates/nm-agent-bridge/Cargo.toml
+
+[dependencies]
+# cmx-agent 内核（完整引用、不改一行）：core = 回合循环/工具路由/守卫/会话事件/ModelSeam；
+# tools = 内置工具平面。二者**零网络**（serde/async-trait/tokio/chrono/regex/walkdir/…）。
+# 以 git rev 固定引用（可移植、随上游改 rev/tag 升级；rev 85fa2a6 已在 origin/main，公网可 clone、已验证 build+test 绿）。
+# 本地开发（有 cmx-agent 同级 checkout、免 clone）可临时改为 path：
+#   cmx-agent-core  = { path = "../../../../../cmx-workspace/backend/cmx-agent/crates/cmx-agent-core" }
+#   cmx-agent-tools = { path = "../../../../../cmx-workspace/backend/cmx-agent/crates/cmx-agent-tools" }
+# cmx-agent-mcp（远程 MCP host，携 reqwest+rustls 网络栈）非 ModelSeam 所需，留待后续里程碑单独引用。
+cmx-agent-core = { git = "https://gitee.com/warpdrivelabs/cmx-agent.git", rev = "85fa2a6" }
+cmx-agent-tools = { git = "https://gitee.com/warpdrivelabs/cmx-agent.git", rev = "85fa2a6" }
+async-trait = "0.1"
+serde_json = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
