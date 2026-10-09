@@ -227,6 +227,38 @@ mod pkarr_rec {
     }
 }
 
+/// F6/M1 成员发现记录编解码：锚点把「某联邦的 bootstrap 成员节点集合」用**锚点自身私钥**签成 pkarr
+/// `SignedPacket`，PUT 到 relay（key=锚点公钥 z32）。新节点配置锚点公钥后 GET + 验签即得入网 bootstrap。
+/// 与 `pkarr_rec` 同构，仅 TXT 名不同（`_nmmember`，与群发现 `_nmspace` 记录隔离，可共用同一 relay/锚点公钥）。
+mod member_rec {
+    use super::{hex_decode_n, hex_encode};
+    use iroh_dns::pkarr::SignedPacket;
+    use nm_transport::SecretKey;
+
+    pub(super) const NAME: &str = "_nmmember"; // 成员索引挂载的 TXT 名
+    pub(super) const REC_TTL: u32 = 300; // 记录 TTL（秒）
+    pub(super) const MAX_MEMBERS: usize = 8; // bootstrap 种子上限（控制 DNS 包 < pkarr 上限）；非全量名册
+
+    /// 用锚点私钥把 bootstrap 成员节点集合签成 relay payload。
+    pub(super) fn build(secret: &SecretKey, members: &[[u8; 32]]) -> Result<Vec<u8>, String> {
+        let values: Vec<String> = members.iter().take(MAX_MEMBERS).map(|s| hex_encode(s)).collect();
+        let pkt = SignedPacket::from_txt_strings(secret, NAME, values, REC_TTL)
+            .map_err(|e| e.to_string())?;
+        Ok(pkt.to_relay_payload())
+    }
+
+    /// 校验并解析某锚点公钥下的 relay payload → bootstrap 成员集合（签名由锚点公钥校验，篡改即失败）。
+    pub(super) fn parse(anchor_pubkey: &[u8; 32], payload: &[u8]) -> Result<Vec<[u8; 32]>, String> {
+        let pk = nm_transport::Id::from_bytes(anchor_pubkey).map_err(|e| e.to_string())?;
+        let pkt = SignedPacket::from_relay_payload(&pk, payload).map_err(|e| e.to_string())?;
+        Ok(pkt
+            .txt_records(NAME)
+            .iter()
+            .filter_map(|t| hex_decode_n::<32>(t))
+            .collect())
+    }
+}
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -807,6 +839,16 @@ impl Node {
     fn pkarr_endpoint(&self) -> Option<String> {
         self.pkarr_url.read().unwrap().clone()
     }
+    /// F6/D5：relay 端点列表（`[dns] url` 支持逗号分隔多 relay；弱锚多副本，发布写多个、解析轮询）。
+    /// F2 群发现仍用 `pkarr_endpoint()`（首个）；成员索引 publish/resolve 用本列表。
+    fn pkarr_endpoints(&self) -> Vec<String> {
+        self.pkarr_url
+            .read()
+            .unwrap()
+            .as_deref()
+            .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+            .unwrap_or_default()
+    }
     /// F3 诊断/测试：当前已加入的联邦主题标签（群 gid 与收件人 account 混列）。
     pub async fn fed_joined(&self) -> Vec<Vec<u8>> {
         self.fed.joined().await
@@ -858,6 +900,93 @@ impl Node {
             _ => return Vec::new(),
         };
         pkarr_rec::parse(&gid_arr, &payload).unwrap_or_default()
+    }
+
+    /// F6/M1：锚点把「本联邦近期活跃成员」的 bootstrap 集合（本节点 + 已知活跃 peer，≤8）用**本节点私钥**
+    /// 签名 PUT 到 relay（key=本节点公钥 z32，TXT 名 `_nmmember`）。仅锚点调用；无 relay 则跳过。
+    /// 新节点据带外配置的锚点公钥 GET 此记录即得入网 bootstrap。pub 便于运维/测试直接触发。
+    pub async fn publish_member_index(&self) {
+        let endpoints = self.pkarr_endpoints();
+        if endpoints.is_empty() {
+            return;
+        }
+        let me = self.ep.id_bytes();
+        let mut members: Vec<[u8; 32]> = vec![me]; // 锚点自身为首 bootstrap
+        let now = now_secs();
+        for e in self.peer_info.iter() {
+            if members.len() >= member_rec::MAX_MEMBERS {
+                break;
+            }
+            // 只纳入近期活跃（TTL 内）的 peer；manual/seed（last_seen 可能为 0）也纳入。
+            let info = e.value();
+            let fresh = info.last_seen == 0 || now.saturating_sub(info.last_seen) < 300;
+            if !fresh {
+                continue;
+            }
+            if let Ok(id) = <[u8; 32]>::try_from(e.key().as_slice()) {
+                if id != me && !members.contains(&id) {
+                    members.push(id);
+                }
+            }
+        }
+        let Ok(payload) = member_rec::build(self.ep.secret_key(), &members) else { return };
+        let z32 = self.ep.id().to_z32();
+        for url in &endpoints {
+            let endpoint = format!("{}/{}", url.trim_end_matches('/'), z32);
+            match self.http.put(&endpoint).body(payload.clone()).send().await {
+                Ok(r) if r.status().is_success() => {
+                    tracing::debug!(members = members.len(), relay = %url, "member index published")
+                }
+                Ok(r) => tracing::debug!(status = %r.status(), relay = %url, "member index publish non-success"),
+                Err(e) => tracing::debug!("member index publish failed ({url}): {e}"),
+            }
+        }
+    }
+
+    /// F6/M1：据锚点公钥从 relay 解析本联邦 bootstrap 成员集合（GET + 验签），并把解析到的节点喂入
+    /// `peers`（满足 gossip bootstrap 契约）。返回学到的节点数。无 relay / 解析失败则 0。多 relay 时轮询，首个成功即用。
+    pub async fn resolve_member_index(&self, anchor_pubkey: &[u8; 32]) -> usize {
+        let endpoints = self.pkarr_endpoints();
+        if endpoints.is_empty() {
+            return 0;
+        }
+        let Ok(pk) = nm_transport::Id::from_bytes(anchor_pubkey) else { return 0 };
+        let z32 = pk.to_z32();
+        let mut payload: Option<Vec<u8>> = None;
+        for url in &endpoints {
+            let endpoint = format!("{}/{}", url.trim_end_matches('/'), z32);
+            if let Ok(r) = self.http.get(&endpoint).send().await {
+                if r.status().is_success() {
+                    if let Ok(b) = r.bytes().await {
+                        payload = Some(b.to_vec());
+                        break; // 首个成功的 relay 即用
+                    }
+                }
+            }
+        }
+        let Some(payload) = payload else { return 0 };
+        let members = match member_rec::parse(anchor_pubkey, &payload) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::debug!("member index parse/verify failed: {e}");
+                return 0;
+            }
+        };
+        let me = self.ep.id_bytes();
+        let mut learned = 0;
+        for id in members {
+            if id == me {
+                continue;
+            }
+            // 喂入 peers：按公钥解析地址（relay/发现服务在 dial 时解析），满足 gossip bootstrap 契约①。
+            if self.add_peer_by_id(id).is_ok() {
+                learned += 1;
+            }
+        }
+        if learned > 0 {
+            tracing::debug!(learned, "member index resolved → peers seeded");
+        }
+        learned
     }
     pub fn directory(&self) -> Arc<MemDirectory> {
         self.dir.clone()
@@ -1198,6 +1327,31 @@ impl Node {
                     self.sweep_discovered(ttl_secs);
                     last_sweep = tokio::time::Instant::now();
                 }
+            }
+        })
+    }
+
+    /// F6/M1 成员发现 relay 索引（叠加在 gossip 成员频道之上，灰度开关 `relay_index`）：
+    /// - 锚点（`anchor=true`）：周期把本联邦 bootstrap 成员集合 PUT 到 relay（key=本节点公钥）。
+    /// - 所有节点：周期 GET 配置的各锚点公钥记录，把解析到的节点喂入 `peers` 做冷启动 bootstrap。
+    /// 需 relay（`[dns] url`）已设；否则本任务空转。周期 60s（成员集合变动不频繁，与 F2 群 pkarr 同档）。
+    pub fn spawn_member_index(
+        self: Arc<Self>,
+        anchor: bool,
+        anchor_pubkeys: Vec<[u8; 32]>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let iv = std::time::Duration::from_secs(60);
+            loop {
+                if !self.pkarr_endpoints().is_empty() {
+                    if anchor {
+                        self.publish_member_index().await;
+                    }
+                    for ak in &anchor_pubkeys {
+                        self.resolve_member_index(ak).await;
+                    }
+                }
+                tokio::time::sleep(iv).await;
             }
         })
     }
@@ -4134,5 +4288,26 @@ mod p0_tests {
         let mut bad = payload.clone();
         *bad.last_mut().unwrap() ^= 0xff;
         assert!(pkarr_rec::parse(&gid, &bad).is_err(), "篡改载荷应校验失败");
+    }
+
+    #[test]
+    fn member_index_record_roundtrip() {
+        // F6/M1：锚点私钥 → 锚点公钥(=relay key)；签 bootstrap 成员集合 → relay payload → 解析回同一集合。
+        let sk = nm_transport::SecretKey::from_bytes(&[88u8; 32]);
+        let anchor = *sk.public().as_bytes();
+        let members = [[10u8; 32], [11u8; 32], [12u8; 32]];
+        let payload = member_rec::build(&sk, &members).expect("build");
+        let got = member_rec::parse(&anchor, &payload).expect("parse");
+        assert_eq!(got, members.to_vec(), "成员集合应原样往返");
+        // 非锚点公钥 → 校验失败（防投毒）。
+        let other = *nm_transport::SecretKey::from_bytes(&[9u8; 32]).public().as_bytes();
+        assert!(member_rec::parse(&other, &payload).is_err(), "非签名者公钥应校验失败");
+        // 篡改载荷 → 校验失败。
+        let mut bad = payload.clone();
+        *bad.last_mut().unwrap() ^= 0xff;
+        assert!(member_rec::parse(&anchor, &bad).is_err(), "篡改载荷应校验失败");
+        // 与群发现记录 TXT 名隔离：同一锚点公钥下 _nmspace 记录不会被当成员记录解析出来。
+        let as_group = pkarr_rec::parse(&anchor, &payload).unwrap_or_default();
+        assert!(as_group.is_empty(), "成员记录(_nmmember)不应被群发现(_nmspace)解析出内容");
     }
 }

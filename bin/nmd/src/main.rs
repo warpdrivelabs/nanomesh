@@ -133,6 +133,16 @@ struct MembershipCfg {
     mobile: String,
     #[serde(default)]
     gps: String,
+    /// F6/M1：成员发现 relay 索引灰度开关。开 = 在 gossip 成员频道之上叠加 relay bootstrap 索引
+    /// （需 `[dns] url`）；关（默认）= 纯 gossip 成员频道，零行为变化。
+    #[serde(default)]
+    relay_index: bool,
+    /// F6/M1：本节点是否为锚点。锚点周期把本联邦 bootstrap 成员集合 PUT 到 relay（key=本节点公钥）。
+    #[serde(default)]
+    anchor: bool,
+    /// F6/M1：要解析的锚点公钥（64-hex）列表。新节点据此 GET 锚点索引做零配置冷启动 bootstrap。
+    #[serde(default)]
+    anchors: Vec<String>,
 }
 
 impl Default for MembershipCfg {
@@ -147,6 +157,9 @@ impl Default for MembershipCfg {
             email: String::new(),
             mobile: String::new(),
             gps: String::new(),
+            relay_index: false,
+            anchor: false,
+            anchors: Vec::new(),
         }
     }
 }
@@ -450,6 +463,23 @@ async fn main() -> anyhow::Result<()> {
         node.set_per_topic(cfg.federation.per_topic); // F1–F5：[federation] per_topic（缺省开）启停每主题；火管仍双写兜底、存活后退火管
         node.set_pkarr(cfg.dns.url.clone()); // F2：群发现 pkarr relay（配置了 [dns] url 即启用；否则仅火管/home 锚点发现）
         node.clone().spawn_group_sync(m.federation.clone()); // 群联邦：发现 + 消息扇出走 gossip（免 s2s 中继）
+        // F6/M1：成员发现 relay 索引（灰度，需 [dns] url）。锚点发布、所有节点解析配置的锚点公钥做冷启动 bootstrap。
+        if m.relay_index {
+            let anchors: Vec<[u8; 32]> = m
+                .anchors
+                .iter()
+                .filter_map(|h| parse_id_hex(h).ok())
+                .collect();
+            if cfg.dns.url.is_none() {
+                tracing::warn!("[membership] relay_index=true 但未配 [dns] url —— 成员索引不发布/解析");
+            }
+            tracing::info!(
+                anchor = m.anchor,
+                anchors = anchors.len(),
+                "F6/M1 member relay index enabled"
+            );
+            node.clone().spawn_member_index(m.anchor, anchors);
+        }
         tracing::info!(
             federation = %cfg.membership.federation,
             "membership auto-discovery started"
