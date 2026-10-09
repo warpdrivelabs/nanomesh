@@ -629,6 +629,46 @@ impl Session {
         route_send(&self.conn, &msg).await
     }
 
+    // ── C2（P2P 模型消费便捷层）：发现 model.* provider + 一次 OpenAI 兼容推理 ──
+
+    /// C2：发现网络里的模型 provider（kind=model.*）。给了 `model` 名则按 attributes["model"]/["models"] 过滤。
+    pub async fn find_model_providers(&self, model: Option<&str>) -> Result<Vec<Entity>, ClientError> {
+        let mut list = self
+            .directory_query(DirectoryQuery { kind_prefix: "model.".into(), ..Default::default() })
+            .await?;
+        if let Some(m) = model {
+            list.retain(|e| {
+                e.attributes.get("model").map(|v| v == m).unwrap_or(false)
+                    || e.attributes
+                        .get("models")
+                        .map(|v| v.split(',').any(|x| x.trim() == m))
+                        .unwrap_or(false)
+            });
+        }
+        Ok(list)
+    }
+
+    /// C2：向某 provider 发一次 OpenAI 兼容推理（method=model.infer）。
+    /// 入参 `openai_request_json` 为 OpenAI `/chat/completions` 请求体字节；返回 completion JSON 字节。
+    pub async fn infer(&self, provider: [u8; 32], openai_request_json: &[u8]) -> Result<Vec<u8>, ClientError> {
+        self.infer_with_grant(provider, openai_request_json, None).await
+    }
+
+    /// C2：带 Grant 的推理（provider 要求授权时用）。
+    pub async fn infer_with_grant(
+        &self,
+        provider: [u8; 32],
+        openai_request_json: &[u8],
+        grant: Option<nm_proto::Grant>,
+    ) -> Result<Vec<u8>, ClientError> {
+        let params = Any { type_url: "openai.chat.v1".to_string(), value: openai_request_json.to_vec() };
+        let res = self.call_with_grant(provider, "model.infer", Some(params), grant).await?;
+        if !res.ok {
+            return Err(ClientError::Other(res.error));
+        }
+        Ok(res.result.map(|a| a.value).unwrap_or_default())
+    }
+
     async fn group_op(&self, method: &str, op: GroupOp) -> Result<(), ClientError> {
         let params = Any { type_url: "nmspace.v1.GroupOp".to_string(), value: op.encode_to_vec() };
         let res = rpc_over(&self.conn, self.my_id, method, Some(params)).await?;

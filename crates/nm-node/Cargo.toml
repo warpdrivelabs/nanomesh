@@ -28,6 +28,7 @@ argon2 = { workspace = true }
 [dev-dependencies]
 nm-client = { workspace = true }
 nm-entity = { workspace = true }
+nm-compute = { path = "../../bin/nm-compute" }
 tempfile = "3"
 tracing-subscriber = { workspace = true }
 axum = { workspace = true }   # F2：pkarr mock relay（本地验证 publish/resolve）

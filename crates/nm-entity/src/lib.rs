@@ -173,6 +173,19 @@ pub mod kinds {
         }
     }
 
+    /// 大语言模型 provider（P2P 模型能力网络 §13：kind=model.llm）。复用 InferenceProfile 的 models 列表。
+    pub struct ModelLlm;
+    impl EntityKind for ModelLlm {
+        const KIND: &'static str = "model.llm";
+        type Profile = InferenceProfile;
+        fn capabilities() -> &'static [Capability] {
+            &[Capability::Command, Capability::Stream, Capability::Job]
+        }
+        fn summary() -> &'static str {
+            "大语言模型 provider"
+        }
+    }
+
     /// 物联网传感器设备。
     pub struct IotDevice;
     impl EntityKind for IotDevice {

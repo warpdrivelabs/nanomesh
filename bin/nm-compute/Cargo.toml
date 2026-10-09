@@ -1,0 +1,27 @@
+[package]
+name = "nm-compute"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "nm_compute"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nm-compute"
+path = "src/main.rs"
+
+[dependencies]
+nm-client = { workspace = true }
+nm-entity = { workspace = true }
+nm-proto = { workspace = true }
+nm-transport = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }

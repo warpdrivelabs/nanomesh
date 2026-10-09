@@ -16,6 +16,7 @@ members = [
     "bin/nm-gatewayd",
     "bin/nm-agent",
     "bin/nm-echo",
+    "bin/nm-compute",
     "bin/nm-admind",
     "bin/nm-domain",
     "xtask",
