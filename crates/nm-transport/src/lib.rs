@@ -57,11 +57,13 @@ pub enum Infra {
 }
 
 /// QUIC 传输配置：显式设定连接级空闲保活——每 3s 发一次 keep-alive PING，
-/// 连接级最大空闲 30s。keep-alive < idle 才有效，从而空闲连接不会被超时掐断。
-/// （iroh 默认只设了 per-path 保活，未设连接级 max_idle_timeout。）
+/// 连接级最大空闲：keep-alive(3s) < idle 才有效，空闲连接不被误掐。
+/// Bug 4：idle 从 30s 收紧到 10s —— ungraceful 掉线（崩溃/休眠/断网）后，死连接在 ~10s 内被 QUIC
+/// 检测并触发 `watch_conn.closed()` → 会话移除，后续消息据此正确落离线库，而非对 30s 内的「假在线」
+/// 死连接 fire-and-forget 假投递后静默丢失。keep-alive 3s 保证健康连接在 10s 内有多次心跳、不误超时。
 fn keepalive_config() -> QuicTransportConfig {
     let mut b = QuicTransportConfig::builder().keep_alive_interval(Duration::from_secs(3));
-    if let Ok(idle) = Duration::from_secs(30).try_into() {
+    if let Ok(idle) = Duration::from_secs(10).try_into() {
         b = b.max_idle_timeout(Some(idle));
     }
     b.build()

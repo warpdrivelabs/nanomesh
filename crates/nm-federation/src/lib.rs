@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use iroh_gossip::Gossip;
 use nm_gossip::{ChannelHub, ChannelSender};
@@ -64,11 +65,14 @@ pub enum FederationError {
     Gossip(String),
 }
 
-/// 一个已加入主题的订阅：发送端 + 后台泵任务（收播 → 事件流）+ 路由标签。
+/// 一个已加入主题的订阅：发送端 + 后台泵任务（收播 → 事件流）+ 路由标签 + 当前邻居数快照。
 struct Sub {
     sender: ChannelSender,
     pump: JoinHandle<()>,
     label: GroupId,
+    /// 该主题叠加网当前直接邻居数（泵每 ≤2s 刷新）。0 = 叠加网尚未成型 → publish 会被丢弃（无缓冲）。
+    /// 供宿主判断「发布是否真能到达」，避免向空叠加网 publish 后误以为已投递（Bug 1）。
+    neighbors: Arc<AtomicUsize>,
 }
 
 impl Drop for Sub {
@@ -143,10 +147,13 @@ impl Federation {
         let events = self.events.clone();
         let label_v = label.clone();
         let heal_sender = sender.clone();
+        let neighbors = Arc::new(AtomicUsize::new(0));
+        let neigh_w = neighbors.clone();
         let pump = tokio::spawn(async move {
             loop {
                 match tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await {
                     Ok(Some(msg)) => {
+                        neigh_w.store(rx.neighbor_count(), Ordering::Relaxed);
                         let fed = FedMsg { group: label_v.clone(), content: msg.content, from: msg.from };
                         if events.send(fed).is_err() {
                             break; // 事件接收端已丢弃 → 收摊
@@ -155,14 +162,16 @@ impl Federation {
                     Ok(None) => break, // 流结束
                     Err(_) => {
                         // 自愈引导：无邻居且有 bootstrap 时重新注入对端，直到叠加网成型。
-                        if !heal_boot.is_empty() && rx.neighbor_count() == 0 {
+                        let n = rx.neighbor_count();
+                        neigh_w.store(n, Ordering::Relaxed);
+                        if !heal_boot.is_empty() && n == 0 {
                             let _ = heal_sender.join_peers(heal_boot.clone()).await;
                         }
                     }
                 }
             }
         });
-        subs.insert(key, Sub { sender, pump, label });
+        subs.insert(key, Sub { sender, pump, label, neighbors });
         Ok(())
     }
 
@@ -184,6 +193,17 @@ impl Federation {
     /// F3：向某收件箱主题广播字节（须先 [`Federation::join_inbox`]）。私聊单播投递用。
     pub async fn publish_inbox(&self, account: &[u8], payload: Vec<u8>) -> Result<(), FederationError> {
         self.publish_topic(inbox_topic_key(account), payload).await
+    }
+
+    /// Bug 1：某收件箱主题当前的直接邻居数（0 = 叠加网未成型，publish 会被丢弃）。
+    /// 供宿主判断「收件箱 publish 是否真能送达」——未成型时不应据此退火管（否则私聊单向/丢失）。
+    pub async fn inbox_neighbors(&self, account: &[u8]) -> usize {
+        self.subs
+            .lock()
+            .await
+            .get(&inbox_topic_key(account))
+            .map(|s| s.neighbors.load(Ordering::Relaxed))
+            .unwrap_or(0)
     }
 
     /// F4：向某域名命名主题广播字节（须先 [`Federation::join_names`]）。`NameRecord` 复制用。

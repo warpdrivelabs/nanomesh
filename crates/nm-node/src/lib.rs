@@ -3319,7 +3319,12 @@ async fn deliver_direct(gram: &Gram, ctx: &Ctx) {
         let _ = ctx.fed.join_inbox(to, inbox_bootstrap(to, ctx)).await;
         inbox_ok = ctx.fed.publish_inbox(to, bytes.clone()).await.is_ok();
     }
-    if retire && inbox_ok {
+    // Bug 1：仅当收件箱主题**当前确有邻居**（叠加网已成型，publish 真能扩散到收件人 home）才退火管。
+    // 否则——典型是本节点刚上线/刚 join 该主题，overlay 0 邻居——publish 被静默丢弃（gossip 无缓冲），
+    // 若此时退火管则该方向私聊彻底丢失（表现为「单向通道」：一侧 overlay 先成型、另一侧未成型）。
+    // 保留火管兜底直到 overlay 成型；node 侧 (sender,gram_id) 去重会合并火管+收件箱双份。
+    let inbox_has_neighbors = per_topic && ctx.fed.inbox_neighbors(to).await > 0;
+    if retire && inbox_ok && inbox_has_neighbors {
         tracing::debug!("firehose Direct suppressed (recipient home live on inbox topic)");
     } else {
         let _ = ctx.group_pub.send(bytes); // 火管（兜底 / 未全迁移时）
