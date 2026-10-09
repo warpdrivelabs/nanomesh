@@ -39,9 +39,12 @@ struct Args {
     /// 可选系统提示（AGENTS.md 式项目指令）。
     #[arg(long, default_value = "")]
     system: String,
-    /// 一次性：跑一个回合即退出；省略则进入交互 REPL。
+    /// 一次性：跑一个回合即退出；省略则进入交互 REPL（除非 --serve）。
     #[arg(long)]
     prompt: Option<String>,
+    /// bot 模式：注册后收 P2P DM，每条交给 agent 回合处理并回包（服务他人）。与 --prompt/REPL 互斥。
+    #[arg(long, default_value_t = false)]
+    serve: bool,
 }
 
 fn hex8(b: &[u8]) -> String {
@@ -92,7 +95,20 @@ async fn main() -> anyhow::Result<()> {
         args.model
     );
 
-    // 组装 P2P 模型缝（driver 独占 p2p 会话）→ cmx-agent Agent（其余工具/守卫/审批走内核默认）。
+    // serve 模式：把本进程变成服务他人的 P2P agent bot（收 DM → 回合 → 回包）。
+    let sys_opt = if args.system.is_empty() { None } else { Some(args.system.as_str()) };
+    if args.serve {
+        eprintln!(
+            "nm-agentd: serve 模式已就绪——别人向 id={} 发消息即可（Ctrl-C 退出）。",
+            hex8(&client.id_bytes())
+        );
+        nm_agent_bridge::serve::serve(p2p, provider_id, &args.model, sys_opt)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        return Ok(());
+    }
+
+    // 本地模式：组装 P2P 模型缝（driver 独占 p2p 会话）→ cmx-agent Agent（工具/守卫/审批走内核默认）。
     let channel = SessionInferChannel::spawn(p2p, provider_id);
     let seam = P2pModelSeam::new(channel, &args.model);
     let agent = Agent::builder()

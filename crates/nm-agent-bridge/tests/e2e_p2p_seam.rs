@@ -15,7 +15,7 @@ use cmx_agent_core::{Agent, ModelContext, ModelMessage, ModelSeam, Session, Stop
 use nm_agent_bridge::{P2pModelSeam, SessionInferChannel};
 use nm_compute::{Backend, METHOD_INFER, RESP_TYPE_URL};
 use nm_entity::kinds;
-use nm_proto::pb::{InferenceProfile, PersonProfile};
+use nm_proto::pb::{AgentProfile, InferenceProfile, PersonProfile};
 use nm_transport::Addr;
 
 /// 起一个本地节点 + 一个 Demo 模型 provider（model.llm）。返回节点地址 + **provider Client**
@@ -137,4 +137,54 @@ async fn agent_turn_uses_model_over_p2p() {
         final_text.contains("ping through agent"),
         "助手最终文本应含 demo provider 对用户输入的回声；实得: {final_text}"
     );
+}
+
+/// 用例 3：①agent 作为 P2P bot 服务他人——另一个对端发 DM，bot 经 agent 回合（模型走 P2P）回包。
+#[tokio::test]
+async fn agent_bot_serves_a_peer_over_p2p() {
+    let (addr, _prov_client) = spawn_node_and_provider(61, 62).await;
+
+    // bot：上线 → 注册 agent.assistant → 发现 provider → spawn serve。
+    let bot_client = nm_client::Client::bind_local([63u8; 32]).await.expect("bind bot");
+    let mut bot = bot_client.online(addr.clone()).await.expect("bot online");
+    let mut attrs = HashMap::new();
+    attrs.insert("model".to_string(), "demo-llm".to_string());
+    bot.register_as::<kinds::AgentAssistant>(
+        &AgentProfile { backend: "nmspace-p2p".into(), ..Default::default() },
+        "服务 bot",
+        attrs,
+    )
+    .await
+    .expect("bot register");
+    let bot_id = bot_client.id_bytes();
+    let found = bot.find_model_providers(Some("demo-llm")).await.expect("discover");
+    let provider_id: [u8; 32] = found[0].entity_id.clone().try_into().expect("id 32 bytes");
+    tokio::spawn(async move {
+        let _ = nm_agent_bridge::serve::serve(bot, provider_id, "demo-llm", None).await;
+    });
+
+    // peer：上线 → 向 bot 发 DM → 收回复。
+    let peer_client = nm_client::Client::bind_local([64u8; 32]).await.expect("bind peer");
+    let mut peer = peer_client.online(addr).await.expect("peer online");
+    peer.register_as::<kinds::Person>(&PersonProfile::default(), "用户", HashMap::new())
+        .await
+        .expect("peer register");
+    peer.send_to(bot_id, "hello bot").await.expect("send to bot");
+
+    // bot 的回复（经 agent 回合 + P2P 模型）回到 peer 的收件箱。
+    let reply = loop {
+        let gram = tokio::time::timeout(Duration::from_secs(20), peer.recv())
+            .await
+            .expect("等 bot 回复超时")
+            .expect("peer 收件箱关闭");
+        if gram.kind() != nm_proto::GramKind::Message {
+            continue;
+        }
+        break gram
+            .payload
+            .as_ref()
+            .map(|p| String::from_utf8_lossy(&p.value).to_string())
+            .unwrap_or_default();
+    };
+    assert!(reply.contains("hello bot"), "bot 应经 agent 回合回声用户输入；实得: {reply}");
 }

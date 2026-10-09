@@ -144,6 +144,125 @@ pub mod p2p {
 #[cfg(feature = "nm-client")]
 pub use p2p::SessionInferChannel;
 
+/// ①：把 agent 作为 **P2P bot** 跑在节点上，服务他人——注册后收 DM，每条交给 cmx-agent 回合处理，
+/// 结果回包给发送方。模型调用仍走 P2P。
+///
+/// 单一 `Session` 要同时：收 DM、回消息、调模型 provider（infer）——而 `Session` 非 `Sync`，
+/// 且回合内会再调 infer。解法：
+/// - **io task** 独占 `Session`，只服务统一的 [`AgentOp`]（`Infer` / `Send`）队列；
+/// - **serve loop** 用 `take_inbox()` 拿到的收件流 + 每对端一个 cmx 会话，**内联**跑回合——回合的
+///   `infer` 发到 io task（**另一个** task），故不自锁。
+///
+/// v1 串行（一次一个回合）：模型时延期间不取下一条（收件箱无界会缓冲）。并发（每消息 spawn + 每对端
+/// 会话加锁）留待后续。
+#[cfg(feature = "nm-client")]
+pub mod serve {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use cmx_agent_core::{Agent, ModelSeam, Session as Convo};
+    use nm_proto::GramKind;
+    use tokio::sync::{mpsc, oneshot};
+
+    use super::{P2pInferChannel, P2pModelSeam};
+
+    /// io task 的统一作业：要么向 provider 发一次推理，要么给某对端发一条文本回包。
+    enum AgentOp {
+        Infer { request: Vec<u8>, reply: oneshot::Sender<Result<Vec<u8>, String>> },
+        Send { to: [u8; 32], text: String },
+    }
+
+    /// `P2pInferChannel`：把推理作业投递给 io task（而非自己持 `Session`——`Session` 由 io task 独占）。
+    struct OpInferChannel {
+        ops: mpsc::Sender<AgentOp>,
+    }
+
+    #[async_trait]
+    impl P2pInferChannel for OpInferChannel {
+        async fn infer(&self, request_json: Vec<u8>) -> Result<Vec<u8>, String> {
+            let (rtx, rrx) = oneshot::channel();
+            self.ops
+                .send(AgentOp::Infer { request: request_json, reply: rtx })
+                .await
+                .map_err(|_| "agent io task 已停".to_string())?;
+            rrx.await.map_err(|_| "agent io task 未回结果".to_string())?
+        }
+    }
+
+    /// io task：独占 `Session`，顺序执行 infer / send。
+    async fn io_task(session: nm_client::Session, provider: [u8; 32], mut ops_rx: mpsc::Receiver<AgentOp>) {
+        while let Some(op) = ops_rx.recv().await {
+            match op {
+                AgentOp::Infer { request, reply } => {
+                    let r = session.infer(provider, &request).await.map_err(|e| e.to_string());
+                    let _ = reply.send(r);
+                }
+                AgentOp::Send { to, text } => {
+                    let _ = session.send_to(to, &text).await;
+                }
+            }
+        }
+    }
+
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    /// 把 agent 作为 bot 跑起来：`session` 须已 `online` 且注册完毕（presence 由调用方做）。
+    /// `provider` = 模型 provider 的 entity_id；`model` 写入请求；`system` 为每对端会话的系统提示。
+    /// 返回 = 收件流关闭（连接断）为止。
+    pub async fn serve(
+        mut session: nm_client::Session,
+        provider: [u8; 32],
+        model: &str,
+        system: Option<&str>,
+    ) -> Result<(), String> {
+        let mut inbox = session.take_inbox().ok_or("inbox 已被取走")?;
+        let (ops_tx, ops_rx) = mpsc::channel::<AgentOp>(32);
+        tokio::spawn(io_task(session, provider, ops_rx));
+
+        let seam = P2pModelSeam::new(OpInferChannel { ops: ops_tx.clone() }, model);
+        let agent = Agent::builder()
+            .model(Arc::new(seam) as Arc<dyn ModelSeam>)
+            .build()
+            .map_err(|e| format!("build agent: {e}"))?;
+
+        // 每对端一个持久 cmx 会话（记住上下文）；串行处理。
+        let mut convos: HashMap<[u8; 32], Convo> = HashMap::new();
+        while let Some(gram) = inbox.recv().await {
+            if gram.kind() != GramKind::Message {
+                continue;
+            }
+            let Ok(sender) = <[u8; 32]>::try_from(gram.sender.clone()) else { continue };
+            let text = gram
+                .payload
+                .as_ref()
+                .map(|p| String::from_utf8_lossy(&p.value).to_string())
+                .unwrap_or_default();
+            if text.is_empty() {
+                continue;
+            }
+
+            let convo = convos.entry(sender).or_insert_with(|| {
+                let c = Convo::new(hex(&sender));
+                match system {
+                    Some(s) => c.with_system(s),
+                    None => c,
+                }
+            });
+            let reply = match agent.run_turn(convo, &text).await {
+                Ok(out) => out.final_text.unwrap_or_default(),
+                Err(e) => format!("[agent 出错] {e}"),
+            };
+            if ops_tx.send(AgentOp::Send { to: sender, text: reply }).await.is_err() {
+                break; // io task 没了
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
