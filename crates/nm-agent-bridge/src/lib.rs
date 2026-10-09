@@ -340,6 +340,8 @@ pub mod serve {
         let convos: Arc<std::sync::Mutex<HashMap<[u8; 32], PeerConvo>>> =
             Arc::new(std::sync::Mutex::new(HashMap::new()));
         let mut stream_ctr: u64 = 0;
+        // Bug 2 去重集：已处理过的 (sender, gram_id)，防同一条消息多路径到达时重复跑回合。
+        let mut seen: std::collections::HashSet<([u8; 32], u64)> = std::collections::HashSet::new();
         while let Some(gram) = inbox.recv().await {
             if gram.kind() != GramKind::Message {
                 continue;
@@ -355,6 +357,12 @@ pub mod serve {
                 .map(|p| String::from_utf8_lossy(&p.value).to_string())
                 .unwrap_or_default();
             if text.is_empty() {
+                continue;
+            }
+            // Bug 2 防复读：同一条消息可能经多路径到达（本地直投 + 火管/收件箱主题双写；上游 node 的
+            // (sender,gram_id) 去重不覆盖「发给本 agent」的本地直投）。按 (sender, gram_id) 去重，
+            // 确保一条用户消息只跑一次回合、只回一次——否则 agent 会对同一输入重复回复。
+            if !seen.insert((sender, gram.gram_id)) {
                 continue;
             }
 
