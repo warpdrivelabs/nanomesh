@@ -149,9 +149,9 @@ pub use p2p::SessionInferChannel;
 ///
 /// 单一 `Session` 要同时：收 DM、回消息、调模型 provider（infer）——而 `Session` 非 `Sync`，
 /// 且回合内会再调 infer。解法：
-/// - **io task** 独占 `Session`，只服务统一的 [`AgentOp`]（`Infer` / `Send`）队列；
+/// - **io task** 独占 `Session`，只服务统一的 [`AgentOp`]（`Infer` / `SendDelta`）队列；
 /// - **serve loop** 用 `take_inbox()` 拿到的收件流 + 每对端一个 cmx 会话，**内联**跑回合——回合的
-///   `infer` 发到 io task（**另一个** task），故不自锁。
+///   `infer` 发到 io task（**另一个** task），故不自锁；回复经 `SendDelta` 分块流式发回（打字机）。
 ///
 /// v1 串行（一次一个回合）：模型时延期间不取下一条（收件箱无界会缓冲）。并发（每消息 spawn + 每对端
 /// 会话加锁）留待后续。
@@ -167,10 +167,14 @@ pub mod serve {
 
     use super::{P2pInferChannel, P2pModelSeam};
 
-    /// io task 的统一作业：要么向 provider 发一次推理，要么给某对端发一条文本回包。
+    /// agent→对端**流式回复**的载荷类型：app 据此把 delta 帧增量长成**同一个**气泡（而非每帧新开消息）。
+    /// 帧体 JSON：`{streamId, seq, text(累计全文), done}`。每帧带累计全文 → 乱序/丢帧自愈、done 帧收敛正确。
+    pub const AGENT_DELTA_TYPE_URL: &str = "nmspace.agent.delta.v1";
+
+    /// io task 的统一作业：向 provider 发一次推理，或给某对端发一帧流式回复。
     enum AgentOp {
         Infer { request: Vec<u8>, reply: oneshot::Sender<Result<Vec<u8>, String>> },
-        Send { to: [u8; 32], text: String },
+        SendDelta { to: [u8; 32], body: Vec<u8> },
     }
 
     /// `P2pInferChannel`：把推理作业投递给 io task（而非自己持 `Session`——`Session` 由 io task 独占）。
@@ -190,7 +194,7 @@ pub mod serve {
         }
     }
 
-    /// io task：独占 `Session`，顺序执行 infer / send。
+    /// io task：独占 `Session`，顺序执行 infer / 发送流式回复帧。
     async fn io_task(session: nm_client::Session, provider: [u8; 32], mut ops_rx: mpsc::Receiver<AgentOp>) {
         while let Some(op) = ops_rx.recv().await {
             match op {
@@ -198,11 +202,41 @@ pub mod serve {
                     let r = session.infer(provider, &request).await.map_err(|e| e.to_string());
                     let _ = reply.send(r);
                 }
-                AgentOp::Send { to, text } => {
-                    let _ = session.send_to(to, &text).await;
+                AgentOp::SendDelta { to, body } => {
+                    let _ = session.send_typed(to, AGENT_DELTA_TYPE_URL, &body).await;
                 }
             }
         }
+    }
+
+    /// 把一段回复按小块（**累计全文**）逐帧发给对端，制造打字机节奏；末帧 `done=true` 带完整文本。
+    /// 空回复也至少发一帧 done。帧间小睡 30ms。返回 `Err` 表示 io task 已停。
+    async fn stream_reply(
+        ops_tx: &mpsc::Sender<AgentOp>,
+        to: [u8; 32],
+        stream_id: &str,
+        text: &str,
+    ) -> Result<(), ()> {
+        let chars: Vec<char> = text.chars().collect();
+        let step = 2usize;
+        let mut idx = 0usize;
+        let mut seq = 0u32;
+        loop {
+            idx = (idx + step).min(chars.len());
+            let done = idx >= chars.len();
+            let cumulative: String = chars[..idx].iter().collect();
+            let frame = serde_json::json!({
+                "streamId": stream_id, "seq": seq, "text": cumulative, "done": done,
+            });
+            let body = serde_json::to_vec(&frame).unwrap_or_default();
+            ops_tx.send(AgentOp::SendDelta { to, body }).await.map_err(|_| ())?;
+            if done {
+                break;
+            }
+            seq += 1;
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+        Ok(())
     }
 
     fn hex(b: &[u8]) -> String {
@@ -219,6 +253,7 @@ pub mod serve {
         system: Option<&str>,
     ) -> Result<(), String> {
         let mut inbox = session.take_inbox().ok_or("inbox 已被取走")?;
+        let my_tag = hex(&session.id_bytes()[..4]); // 流 id 前缀，避免多 agent 的流 id 撞车
         let (ops_tx, ops_rx) = mpsc::channel::<AgentOp>(32);
         tokio::spawn(io_task(session, provider, ops_rx));
 
@@ -230,6 +265,7 @@ pub mod serve {
 
         // 每对端一个持久 cmx 会话（记住上下文）；串行处理。
         let mut convos: HashMap<[u8; 32], Convo> = HashMap::new();
+        let mut stream_ctr: u64 = 0;
         while let Some(gram) = inbox.recv().await {
             if gram.kind() != GramKind::Message {
                 continue;
@@ -255,7 +291,10 @@ pub mod serve {
                 Ok(out) => out.final_text.unwrap_or_default(),
                 Err(e) => format!("[agent 出错] {e}"),
             };
-            if ops_tx.send(AgentOp::Send { to: sender, text: reply }).await.is_err() {
+            // 流式回包：把最终文本按节奏分块发给对端（app 增量长出同一个气泡）。
+            stream_ctr += 1;
+            let stream_id = format!("{my_tag}-{stream_ctr}");
+            if stream_reply(&ops_tx, sender, &stream_id, &reply).await.is_err() {
                 break; // io task 没了
             }
         }

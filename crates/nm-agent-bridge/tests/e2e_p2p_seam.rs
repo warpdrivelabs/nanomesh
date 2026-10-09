@@ -171,7 +171,7 @@ async fn agent_bot_serves_a_peer_over_p2p() {
         .expect("peer register");
     peer.send_to(bot_id, "hello bot").await.expect("send to bot");
 
-    // bot 的回复（经 agent 回合 + P2P 模型）回到 peer 的收件箱。
+    // bot 的回复现在是**流式 delta 帧**（typed，累计全文）；收到 done 帧即为最终文本。
     let reply = loop {
         let gram = tokio::time::timeout(Duration::from_secs(20), peer.recv())
             .await
@@ -180,11 +180,14 @@ async fn agent_bot_serves_a_peer_over_p2p() {
         if gram.kind() != nm_proto::GramKind::Message {
             continue;
         }
-        break gram
-            .payload
-            .as_ref()
-            .map(|p| String::from_utf8_lossy(&p.value).to_string())
-            .unwrap_or_default();
+        let Some(p) = gram.payload.as_ref() else { continue };
+        if p.type_url != nm_agent_bridge::serve::AGENT_DELTA_TYPE_URL {
+            continue;
+        }
+        let frame: serde_json::Value = serde_json::from_slice(&p.value).expect("delta 帧 JSON");
+        if frame["done"].as_bool().unwrap_or(false) {
+            break frame["text"].as_str().unwrap_or_default().to_string();
+        }
     };
     assert!(reply.contains("hello bot"), "bot 应经 agent 回合回声用户输入；实得: {reply}");
 }
