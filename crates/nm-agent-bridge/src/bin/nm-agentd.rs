@@ -27,7 +27,11 @@ struct Args {
     /// 节点地址（nmd 启动时打印的 NM_NODE_ADDR JSON）。
     #[arg(long)]
     node: String,
-    /// 身份种子（0-255），决定本 agent 的公钥（固定=稳定 id）。
+    /// 持久化身份文件路径（首次运行时生成随机密钥并落盘；后续重启使用同一密钥 = 同一 entity_id）。
+    /// 省略则退回 --seed（仅用于开发/测试；任何知道 seed 值的人都能冒充这个 agent）。
+    #[arg(long)]
+    identity_file: Option<String>,
+    /// 开发/测试用种子（0-255），决定本 agent 的公钥。不提供 --identity-file 时生效。
     #[arg(long, default_value_t = 210)]
     seed: u8,
     /// 要使用的模型名（directory 过滤 + 请求体 model 字段）。
@@ -47,8 +51,42 @@ struct Args {
     serve: bool,
 }
 
-fn hex8(b: &[u8]) -> String {
-    b.iter().take(8).map(|x| format!("{x:02x}")).collect()
+/// 完整 64 hex entity_id。
+fn hex_full(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// 加载或生成持久化身份密钥（32 字节原始 ed25519 seed）。
+/// 文件不存在 → 随机生成并写入；已存在 → 读回。
+/// 文件格式：64 个 ASCII hex 字符，一行。
+fn load_or_create_identity(path: &str) -> anyhow::Result<[u8; 32]> {
+    use std::io::{Read, Write};
+    if let Ok(mut f) = std::fs::File::open(path) {
+        let mut s = String::new();
+        f.read_to_string(&mut s)?;
+        let hex = s.trim();
+        anyhow::ensure!(hex.len() == 64, "身份文件应含 64 hex 字符，实际 {} 字符", hex.len());
+        let bytes: Vec<u8> = (0..32)
+            .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16))
+            .collect::<Result<_, _>>()?;
+        Ok(bytes.try_into().unwrap())
+    } else {
+        // 首次：生成随机 32 字节种子。
+        let mut seed = [0u8; 32];
+        getrandom::getrandom(&mut seed).map_err(|e| anyhow::anyhow!("随机数生成失败: {e}"))?;
+        let hex: String = seed.iter().map(|b| format!("{b:02x}")).collect();
+        // 若父目录不存在，先建
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let mut f = std::fs::File::create(path)
+            .map_err(|e| anyhow::anyhow!("创建身份文件 {path} 失败: {e}"))?;
+        writeln!(f, "{hex}")?;
+        eprintln!("nm-agentd: 新身份已生成并保存至 {path}");
+        Ok(seed)
+    }
 }
 
 #[tokio::main]
@@ -58,9 +96,15 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
 
+    // 身份：优先持久化文件，回退 seed。
+    let seed: [u8; 32] = match &args.identity_file {
+        Some(path) => load_or_create_identity(path)?,
+        None => [args.seed; 32],
+    };
+
     // 连节点。client 必须存活到进程结束——Session 只持 conn，client 持 iroh endpoint。
     let addr = nm_transport::addr_from_string(&args.node)?;
-    let client = nm_client::Client::bind_local([args.seed; 32]).await?;
+    let client = nm_client::Client::bind_local(seed).await?;
     let p2p = client.online(addr).await?;
 
     // 注册为 agent.assistant（presence；backend 非空以过 validate）。
@@ -90,8 +134,8 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("provider entity_id 非 32 字节"))?;
     eprintln!(
         "nm-agentd: id={} 已上线；发现 provider {}（model={}）",
-        hex8(&client.id_bytes()),
-        hex8(&provider_id),
+        hex_full(&client.id_bytes()),
+        hex_full(&provider_id),
         args.model
     );
 
@@ -99,8 +143,8 @@ async fn main() -> anyhow::Result<()> {
     let sys_opt = if args.system.is_empty() { None } else { Some(args.system.as_str()) };
     if args.serve {
         eprintln!(
-            "nm-agentd: serve 模式已就绪——别人向 id={} 发消息即可（Ctrl-C 退出）。",
-            hex8(&client.id_bytes())
+            "nm-agentd: serve 模式已就绪\n  entity_id (完整): {}\n  别人向此 id 发消息即可（Ctrl-C 退出）。",
+            hex_full(&client.id_bytes())
         );
         nm_agent_bridge::serve::serve(p2p, provider_id, &args.model, sys_opt)
             .await

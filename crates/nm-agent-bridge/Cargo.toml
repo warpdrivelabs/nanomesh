@@ -33,12 +33,13 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", 
 clap = { version = "4", features = ["derive"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 anyhow = { version = "1", optional = true }
+getrandom = { version = "0.2", optional = true }
 
 [features]
 # 开启后编译 SessionInferChannel + nm-agentd（经 nm-client C2 走真实 P2P 节点）。
 nm-client = [
     "dep:nm-client", "dep:nm-entity", "dep:nm-proto", "dep:nm-transport",
-    "dep:tokio", "dep:clap", "dep:tracing-subscriber", "dep:anyhow",
+    "dep:tokio", "dep:clap", "dep:tracing-subscriber", "dep:anyhow", "dep:getrandom",
 ]
 
 # nm-agentd：在一个 nmspace 节点上真跑一个 cmx-agent 智能体（模型经 P2P 取得）。需 feature=nm-client。
