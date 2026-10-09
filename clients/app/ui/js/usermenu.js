@@ -141,7 +141,8 @@ async function setMyStatus(st) {
 window.setMyStatus = setMyStatus;
 
 async function switchUser(pk) {
-  const svc = window.CURRENT_SVC;
+  // Bug 3: 优先用目标账号自己记住的节点服务；没有才回退当前节点（首次切到该账号时）。
+  const svc = Identity.svcOf(pk) || window.CURRENT_SVC;
   if (!svc) { if (window.toast) toast("无当前节点服务，请回启动页重连"); return; }
   if (window.toast) toast("切换到 " + Identity.label(pk) + "…");
   try { await NM.inv("disconnect"); } catch (_) {}

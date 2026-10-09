@@ -148,6 +148,7 @@ async function connectAs(user, svc, name) {
   });
   Identity.setCurrent(user);
   window.CURRENT_SVC = svc;
+  Identity.setSvc(user, svc); // Bug 3: 记住本账号连的节点，切号时各用各的，不串号
   showMainView();
   if (typeof updateUserChip === "function") updateUserChip();
   if (typeof imStart === "function") await imStart(myId);
