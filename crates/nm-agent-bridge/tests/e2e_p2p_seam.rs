@@ -171,12 +171,17 @@ async fn agent_bot_serves_a_peer_over_p2p() {
         .expect("peer register");
     peer.send_to(bot_id, "hello bot").await.expect("send to bot");
 
-    // bot 的回复现在是**流式 delta 帧**（typed，累计全文）；收到 done 帧即为最终文本。
-    let reply = loop {
+    let reply = recv_streamed_reply(&mut peer).await;
+    assert!(reply.contains("hello bot"), "bot 应经 agent 回合回声用户输入；实得: {reply}");
+}
+
+/// 收集一个对端收到的流式回复（delta 帧，累计全文），返回 done 帧的完整文本。
+async fn recv_streamed_reply(peer: &mut nm_client::Session) -> String {
+    loop {
         let gram = tokio::time::timeout(Duration::from_secs(20), peer.recv())
             .await
-            .expect("等 bot 回复超时")
-            .expect("peer 收件箱关闭");
+            .expect("等回复超时")
+            .expect("收件箱关闭");
         if gram.kind() != nm_proto::GramKind::Message {
             continue;
         }
@@ -184,10 +189,53 @@ async fn agent_bot_serves_a_peer_over_p2p() {
         if p.type_url != nm_agent_bridge::serve::AGENT_DELTA_TYPE_URL {
             continue;
         }
-        let frame: serde_json::Value = serde_json::from_slice(&p.value).expect("delta 帧 JSON");
+        let frame: serde_json::Value = serde_json::from_slice(&p.value).expect("delta JSON");
         if frame["done"].as_bool().unwrap_or(false) {
-            break frame["text"].as_str().unwrap_or_default().to_string();
+            return frame["text"].as_str().unwrap_or_default().to_string();
         }
-    };
-    assert!(reply.contains("hello bot"), "bot 应经 agent 回合回声用户输入；实得: {reply}");
+    }
+}
+
+/// ③ 并发：一个 bot 同时服务两个对端，各自拿到**自己**消息的回声（per-peer 会话不串味）。
+#[tokio::test]
+async fn agent_bot_serves_two_peers() {
+    let (addr, _prov_client) = spawn_node_and_provider(71, 72).await;
+
+    let bot_client = nm_client::Client::bind_local([73u8; 32]).await.expect("bind bot");
+    let mut bot = bot_client.online(addr.clone()).await.expect("bot online");
+    let mut attrs = HashMap::new();
+    attrs.insert("model".to_string(), "demo-llm".to_string());
+    bot.register_as::<kinds::AgentAssistant>(
+        &AgentProfile { backend: "nmspace-p2p".into(), ..Default::default() },
+        "服务 bot",
+        attrs,
+    )
+    .await
+    .expect("bot register");
+    let bot_id = bot_client.id_bytes();
+    let found = bot.find_model_providers(Some("demo-llm")).await.expect("discover");
+    let provider_id: [u8; 32] = found[0].entity_id.clone().try_into().expect("id 32 bytes");
+    tokio::spawn(async move {
+        let _ = nm_agent_bridge::serve::serve(bot, provider_id, "demo-llm", None).await;
+    });
+
+    // 两个对端各发不同消息。
+    let a_client = nm_client::Client::bind_local([74u8; 32]).await.expect("bind a");
+    let mut a = a_client.online(addr.clone()).await.expect("a online");
+    a.register_as::<kinds::Person>(&PersonProfile::default(), "甲", HashMap::new())
+        .await
+        .expect("a reg");
+    let b_client = nm_client::Client::bind_local([75u8; 32]).await.expect("bind b");
+    let mut b = b_client.online(addr).await.expect("b online");
+    b.register_as::<kinds::Person>(&PersonProfile::default(), "乙", HashMap::new())
+        .await
+        .expect("b reg");
+
+    a.send_to(bot_id, "from-alice").await.expect("a send");
+    b.send_to(bot_id, "from-bob").await.expect("b send");
+
+    // 并发收两路回复（不同对端的 handler 并行）。
+    let (ra, rb) = tokio::join!(recv_streamed_reply(&mut a), recv_streamed_reply(&mut b));
+    assert!(ra.contains("from-alice"), "甲应收到对自己输入的回声；实得: {ra}");
+    assert!(rb.contains("from-bob"), "乙应收到对自己输入的回声；实得: {rb}");
 }

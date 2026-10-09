@@ -153,8 +153,8 @@ pub use p2p::SessionInferChannel;
 /// - **serve loop** 用 `take_inbox()` 拿到的收件流 + 每对端一个 cmx 会话，**内联**跑回合——回合的
 ///   `infer` 发到 io task（**另一个** task），故不自锁；回复经 `SendDelta` 分块流式发回（打字机）。
 ///
-/// v1 串行（一次一个回合）：模型时延期间不取下一条（收件箱无界会缓冲）。并发（每消息 spawn + 每对端
-/// 会话加锁）留待后续。
+/// 并发：每条 DM 一个处理任务，不同对端并发；同一对端经 per-peer 锁串行有序。io task 仍是
+/// Session I/O 的单点（infer / 发送在此串行，均快；慢的回合逻辑 + 流式节奏在各自任务里并行）。收件箱无界缓冲。
 #[cfg(feature = "nm-client")]
 pub mod serve {
     use std::collections::HashMap;
@@ -258,16 +258,26 @@ pub mod serve {
         tokio::spawn(io_task(session, provider, ops_rx));
 
         let seam = P2pModelSeam::new(OpInferChannel { ops: ops_tx.clone() }, model);
-        let agent = Agent::builder()
-            .model(Arc::new(seam) as Arc<dyn ModelSeam>)
-            .build()
-            .map_err(|e| format!("build agent: {e}"))?;
+        let agent = Arc::new(
+            Agent::builder()
+                .model(Arc::new(seam) as Arc<dyn ModelSeam>)
+                .build()
+                .map_err(|e| format!("build agent: {e}"))?,
+        );
+        let system = system.map(|s| s.to_string());
 
-        // 每对端一个持久 cmx 会话（记住上下文）；串行处理。
-        let mut convos: HashMap<[u8; 32], Convo> = HashMap::new();
+        // 每对端一个持久 cmx 会话（记住上下文），各自加锁：同一对端的消息经锁串行（有序），不同对端并发。
+        // 外层 map 用 std Mutex（仅短暂持有、不跨 await）取/建每对端的锁。
+        type PeerConvo = Arc<tokio::sync::Mutex<Convo>>;
+        let convos: Arc<std::sync::Mutex<HashMap<[u8; 32], PeerConvo>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
         let mut stream_ctr: u64 = 0;
         while let Some(gram) = inbox.recv().await {
             if gram.kind() != GramKind::Message {
+                continue;
+            }
+            // 忽略入站的流式 delta 帧（避免把别的 agent 的 delta 当用户消息处理、形成回环）。
+            if gram.payload.as_ref().map(|p| p.type_url == AGENT_DELTA_TYPE_URL).unwrap_or(false) {
                 continue;
             }
             let Ok(sender) = <[u8; 32]>::try_from(gram.sender.clone()) else { continue };
@@ -280,23 +290,34 @@ pub mod serve {
                 continue;
             }
 
-            let convo = convos.entry(sender).or_insert_with(|| {
-                let c = Convo::new(hex(&sender));
-                match system {
-                    Some(s) => c.with_system(s),
-                    None => c,
-                }
-            });
-            let reply = match agent.run_turn(convo, &text).await {
-                Ok(out) => out.final_text.unwrap_or_default(),
-                Err(e) => format!("[agent 出错] {e}"),
+            let peer_convo: PeerConvo = {
+                let mut map = convos.lock().unwrap();
+                map.entry(sender)
+                    .or_insert_with(|| {
+                        let c = Convo::new(hex(&sender));
+                        let c = match &system {
+                            Some(s) => c.with_system(s.clone()),
+                            None => c,
+                        };
+                        Arc::new(tokio::sync::Mutex::new(c))
+                    })
+                    .clone()
             };
-            // 流式回包：把最终文本按节奏分块发给对端（app 增量长出同一个气泡）。
+
             stream_ctr += 1;
             let stream_id = format!("{my_tag}-{stream_ctr}");
-            if stream_reply(&ops_tx, sender, &stream_id, &reply).await.is_err() {
-                break; // io task 没了
-            }
+            let agent = agent.clone();
+            let ops_tx = ops_tx.clone();
+            // 每条 DM 一个处理任务：不同对端并发；同一对端经 peer_convo 锁串行有序。
+            tokio::spawn(async move {
+                let mut convo = peer_convo.lock().await;
+                let reply = match agent.run_turn(&mut convo, &text).await {
+                    Ok(out) => out.final_text.unwrap_or_default(),
+                    Err(e) => format!("[agent 出错] {e}"),
+                };
+                // 持锁至流式发完 → 同一对端的下一条在本条完整回完后才处理（有序、不交错 delta）。
+                let _ = stream_reply(&ops_tx, sender, &stream_id, &reply).await;
+            });
         }
         Ok(())
     }
