@@ -88,6 +88,62 @@ pub fn builtin_tool_specs() -> Vec<cmx_agent_core::ToolSpec> {
     cmx_agent_tools::default_registry().specs()
 }
 
+/// A1：经 nm-client 的 C2（`Session::infer`）走**真实 P2P 节点**的 [`P2pInferChannel`] 实现。
+///
+/// `nm_client::Session` 非 `Sync`（内部持 `mpsc::UnboundedReceiver`），不能直接塞进要求 `Send+Sync`
+/// 的 channel。故用一个 **driver task** 独占持有 `Session`，经 `mpsc` 收推理作业、`oneshot` 回结果；
+/// [`SessionInferChannel`] 只持 `mpsc::Sender`（`Send+Sync`），恰好满足 `P2pInferChannel: Send+Sync`。
+#[cfg(feature = "nm-client")]
+pub mod p2p {
+    use super::P2pInferChannel;
+    use async_trait::async_trait;
+    use tokio::sync::{mpsc, oneshot};
+
+    struct InferJob {
+        request: Vec<u8>,
+        reply: oneshot::Sender<Result<Vec<u8>, String>>,
+    }
+
+    /// 经 nm-client C2 走真实 P2P 的推理通道。用 [`SessionInferChannel::spawn`] 构造（须在 tokio 运行时内调用）。
+    pub struct SessionInferChannel {
+        tx: mpsc::Sender<InferJob>,
+    }
+
+    impl SessionInferChannel {
+        /// 用一个**已在线**的 `Session` + 目标 provider id 起 driver task。
+        /// driver 独占 `session`（move 进单任务，`Session: Send` 足矣），逐个作业调用 `session.infer`。
+        /// 返回的句柄 `Send+Sync`，可作 [`P2pInferChannel`] 注入 [`super::P2pModelSeam`]。
+        pub fn spawn(session: nm_client::Session, provider: [u8; 32]) -> Self {
+            let (tx, mut rx) = mpsc::channel::<InferJob>(16);
+            tokio::spawn(async move {
+                while let Some(job) = rx.recv().await {
+                    let r = session
+                        .infer(provider, &job.request)
+                        .await
+                        .map_err(|e| e.to_string());
+                    let _ = job.reply.send(r);
+                }
+            });
+            Self { tx }
+        }
+    }
+
+    #[async_trait]
+    impl P2pInferChannel for SessionInferChannel {
+        async fn infer(&self, request_json: Vec<u8>) -> Result<Vec<u8>, String> {
+            let (rtx, rrx) = oneshot::channel();
+            self.tx
+                .send(InferJob { request: request_json, reply: rtx })
+                .await
+                .map_err(|_| "P2P 推理通道已关闭（driver task 结束）".to_string())?;
+            rrx.await.map_err(|_| "P2P 推理通道未回结果（reply 被丢弃）".to_string())?
+        }
+    }
+}
+
+#[cfg(feature = "nm-client")]
+pub use p2p::SessionInferChannel;
+
 #[cfg(test)]
 mod tests {
     use super::*;
