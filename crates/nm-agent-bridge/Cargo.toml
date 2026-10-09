@@ -22,25 +22,37 @@ cmx-agent-core = { git = "https://gitee.com/warpdrivelabs/cmx-agent.git", rev = 
 cmx-agent-tools = { git = "https://gitee.com/warpdrivelabs/cmx-agent.git", rev = "85fa2a6" }
 async-trait = "0.1"
 serde_json = "1"
-# A1：可选接 nm-client 的 C2（Session::infer）实现 SessionInferChannel（真实 P2P 推理通道）。
-# 默认关 → lib 保持轻、无 iroh（纯 ModelSeam/A0 消费者不必背 P2P 栈）；开 `--features nm-client` 才拉 nm-client+tokio。
+# —— feature `nm-client`：真实 P2P（SessionInferChannel 走 nm-client C2）+ nm-agentd 可执行 agent ——
+# 默认关 → 纯 ModelSeam/A0 消费者保持轻、无 iroh；开 `--features nm-client` 才拉下面这组 + nm-agentd bin。
+# 全 optional、经 feature 一次性开启（bin 是 normal 目标，其依赖须为 normal 而非 dev）。
 nm-client = { path = "../nm-client", optional = true }
-tokio = { version = "1", features = ["rt", "sync"], optional = true }
+nm-entity = { path = "../nm-entity", optional = true }
+nm-proto = { path = "../nm-proto", optional = true }
+nm-transport = { path = "../nm-transport", optional = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "io-std", "io-util", "time"], optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+anyhow = { version = "1", optional = true }
 
 [features]
-# 开启后编译 SessionInferChannel（经 nm-client C2 走真实 P2P 节点）。
-nm-client = ["dep:nm-client", "dep:tokio"]
+# 开启后编译 SessionInferChannel + nm-agentd（经 nm-client C2 走真实 P2P 节点）。
+nm-client = [
+    "dep:nm-client", "dep:nm-entity", "dep:nm-proto", "dep:nm-transport",
+    "dep:tokio", "dep:clap", "dep:tracing-subscriber", "dep:anyhow",
+]
+
+# nm-agentd：在一个 nmspace 节点上真跑一个 cmx-agent 智能体（模型经 P2P 取得）。需 feature=nm-client。
+[[bin]]
+name = "nm-agentd"
+path = "src/bin/nm-agentd.rs"
+required-features = ["nm-client"]
 
 [dev-dependencies]
-# A1 端到端测试（tests/e2e_p2p_seam.rs，门控 feature=nm-client）：本地起节点 + nm-compute Demo provider
-# + nm-client 消费者，经 SessionInferChannel→P2pModelSeam 走真实 P2P。均为 workspace 内 path。
+# A1 端到端测试（tests/e2e_p2p_seam.rs，门控 feature=nm-client）：仅补测试独有的 node/compute + tokio 测试宏；
+# nm-client/entity/proto/transport 由 feature=nm-client 作为 normal 依赖提供。
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
-nm-client = { path = "../nm-client" }
 nm-node = { path = "../nm-node" }
 nm-compute = { path = "../../bin/nm-compute" }
-nm-entity = { path = "../nm-entity" }
-nm-proto = { path = "../nm-proto" }
-nm-transport = { path = "../nm-transport" }
 
 # 本 crate 独立（exclude）构建 → 根 Cargo.toml 的 [patch] 不生效；nm-node/nm-compute 的 reqwest 走
 # native-tls，需在此自带同款 vendored patch（与根一致）才能复用离线版本、避免版本分叉。
