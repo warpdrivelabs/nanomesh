@@ -13,6 +13,8 @@ pub const METHOD_INFER: &str = "model.infer";
 /// 请求 / 响应载荷 type_url（§13 固化，OpenAI 兼容）。
 pub const REQ_TYPE_URL: &str = "openai.chat.v1";
 pub const RESP_TYPE_URL: &str = "openai.chat.completion.v1";
+/// 流式中途帧载荷类型：JSON `{"delta":"<文字片段>"}`（终帧仍为完整 RESP_TYPE_URL）。
+pub const CHUNK_TYPE_URL: &str = "openai.chat.chunk.v1";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatMessage {
@@ -102,18 +104,57 @@ impl Backend {
             Backend::Demo => demo_infer(&req),
             Backend::Ollama { url, client } => ollama_infer(client, url, params_json).await?,
         };
-        let resp = ChatResponse {
-            id: format!("cmpl-{}", now_ms()),
-            object: "chat.completion".into(),
-            model,
-            choices: vec![Choice {
-                index: 0,
-                message: RespMessage { role: "assistant".into(), content },
-                finish_reason: "stop".into(),
-            }],
-            usage,
-        };
-        Ok(serde_json::to_vec(&resp)?)
+        Ok(serde_json::to_vec(&chat_response(&model, content, usage))?)
+    }
+
+    /// 流式推理：把 OpenAI 兼容结果**逐帧**产出到 `tx`——中途帧 `({"delta":"片段"}, false)`，
+    /// 终帧 `(完整 chat.completion, true)`。Demo 切块伪流式（带节奏）；Ollama 走真 SSE。
+    pub async fn stream_infer(
+        &self,
+        model_label: &str,
+        params_json: &[u8],
+        tx: tokio::sync::mpsc::UnboundedSender<(Vec<u8>, bool)>,
+    ) -> anyhow::Result<()> {
+        let req: ChatRequest = serde_json::from_slice(params_json)
+            .map_err(|e| anyhow::anyhow!("非法 OpenAI chat 请求: {e}"))?;
+        let model = if req.model.is_empty() { model_label.to_string() } else { req.model.clone() };
+        match self {
+            Backend::Demo => {
+                let (content, usage) = demo_infer(&req);
+                let chars: Vec<char> = content.chars().collect();
+                let mut i = 0;
+                while i < chars.len() {
+                    let j = (i + 3).min(chars.len());
+                    let piece: String = chars[i..j].iter().collect();
+                    let frame = serde_json::json!({ "delta": piece });
+                    if tx.send((serde_json::to_vec(&frame)?, false)).is_err() {
+                        return Ok(()); // 消费端已断
+                    }
+                    i = j;
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                let _ = tx.send((serde_json::to_vec(&chat_response(&model, content, usage))?, true));
+            }
+            Backend::Ollama { url, client } => {
+                ollama_stream(client, url, params_json, &model, &tx).await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 组装 OpenAI `chat.completion` 响应（流式终帧与非流式共用）。
+fn chat_response(model: &str, content: String, usage: Usage) -> ChatResponse {
+    ChatResponse {
+        id: format!("cmpl-{}", now_ms()),
+        object: "chat.completion".into(),
+        model: model.to_string(),
+        choices: vec![Choice {
+            index: 0,
+            message: RespMessage { role: "assistant".into(), content },
+            finish_reason: "stop".into(),
+        }],
+        usage,
     }
 }
 
@@ -148,6 +189,56 @@ async fn ollama_infer(client: &reqwest::Client, url: &str, params_json: &[u8]) -
         total_tokens: out["usage"]["total_tokens"].as_u64().unwrap_or(0) as u32,
     };
     Ok((content, usage))
+}
+
+/// Ollama SSE 流式：设 `stream:true`，逐行解析 `data: {...}` 的 `choices[0].delta.content`，逐片产出到 `tx`；
+/// 末尾产出完整 `chat.completion`（done=true）。需 reqwest `stream` 特性 + `futures-util`。
+async fn ollama_stream(
+    client: &reqwest::Client,
+    url: &str,
+    params_json: &[u8],
+    model: &str,
+    tx: &tokio::sync::mpsc::UnboundedSender<(Vec<u8>, bool)>,
+) -> anyhow::Result<()> {
+    use futures_util::StreamExt;
+    let endpoint = format!("{url}/v1/chat/completions");
+    let mut body: serde_json::Value = serde_json::from_slice(params_json)?;
+    body["stream"] = serde_json::json!(true);
+    body["stream_options"] = serde_json::json!({ "include_usage": true });
+    let resp = client.post(&endpoint).json(&body).send().await?.error_for_status()?;
+    let mut stream = resp.bytes_stream();
+    let mut buf = String::new();
+    let mut content = String::new();
+    let mut usage = Usage::default();
+    while let Some(chunk) = stream.next().await {
+        buf.push_str(&String::from_utf8_lossy(&chunk?));
+        while let Some(pos) = buf.find('\n') {
+            let line: String = buf.drain(..=pos).collect();
+            let Some(data) = line.trim().strip_prefix("data:").map(|s| s.trim().to_string()) else {
+                continue;
+            };
+            if data.is_empty() || data == "[DONE]" {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) else { continue };
+            if let Some(d) = v["choices"][0]["delta"]["content"].as_str() {
+                if !d.is_empty() {
+                    content.push_str(d);
+                    let frame = serde_json::json!({ "delta": d });
+                    if tx.send((serde_json::to_vec(&frame)?, false)).is_err() {
+                        return Ok(());
+                    }
+                }
+            }
+            if !v["usage"].is_null() {
+                usage.prompt_tokens = v["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
+                usage.completion_tokens = v["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;
+                usage.total_tokens = v["usage"]["total_tokens"].as_u64().unwrap_or(0) as u32;
+            }
+        }
+    }
+    let _ = tx.send((serde_json::to_vec(&chat_response(model, content, usage))?, true));
+    Ok(())
 }
 
 #[cfg(test)]

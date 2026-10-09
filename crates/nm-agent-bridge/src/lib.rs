@@ -13,7 +13,9 @@
 //! 节点的端到端在 A1 接 `nm-client` 后补。
 
 use async_trait::async_trait;
-use cmx_agent_core::{ModelContext, ModelError, ModelMessage, ModelResponse, ModelSeam, ModelUsage};
+use cmx_agent_core::{
+    ModelContext, ModelError, ModelMessage, ModelResponse, ModelSeam, ModelUsage, TurnObserver,
+};
 use serde_json::{json, Value};
 
 /// 送出一次 OpenAI 兼容请求（`openai.chat.v1` 字节）并取回 completion（`openai.chat.completion.v1` 字节）。
@@ -21,6 +23,16 @@ use serde_json::{json, Value};
 #[async_trait]
 pub trait P2pInferChannel: Send + Sync {
     async fn infer(&self, request_json: Vec<u8>) -> Result<Vec<u8>, String>;
+
+    /// 流式推理：provider 的 token 增量经 `on_delta(片段)` 实时回调（owned `String`，避开 HRTB）；
+    /// 返回终帧的**完整** completion 字节。默认回退到非流式 `infer`（无增量回调）。
+    async fn infer_streaming(
+        &self,
+        request_json: Vec<u8>,
+        _on_delta: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<Vec<u8>, String> {
+        self.infer(request_json).await
+    }
 }
 
 /// 走 P2P 的 [`ModelSeam`]：`complete` = 把内核上下文编为 OpenAI 请求 → 经 [`P2pInferChannel`]
@@ -42,6 +54,25 @@ impl<C: P2pInferChannel> ModelSeam for P2pModelSeam<C> {
     async fn complete(&self, ctx: &ModelContext) -> Result<ModelResponse, ModelError> {
         let req = encode_openai_request(&self.model, ctx)?;
         let resp = self.channel.infer(req).await.map_err(ModelError)?;
+        decode_openai_response(&resp)
+    }
+
+    /// 流式：请求带 `stream:true`，provider 的 token 增量经通道 `infer_streaming` 回调到内核 observer
+    /// （`on_text_delta`）；终帧的完整 completion 解析为 [`ModelResponse`]。
+    async fn complete_streaming(
+        &self,
+        ctx: &ModelContext,
+        observer: &dyn TurnObserver,
+    ) -> Result<ModelResponse, ModelError> {
+        // 请求注入 stream:true，让 provider 走流式。
+        let base = encode_openai_request(&self.model, ctx)?;
+        let mut v: Value = serde_json::from_slice(&base)
+            .map_err(|e| ModelError(format!("请求再编码失败: {e}")))?;
+        v["stream"] = json!(true);
+        let req = serde_json::to_vec(&v).map_err(|e| ModelError(format!("请求编码失败: {e}")))?;
+
+        let on_delta = move |d: String| observer.on_text_delta(&d);
+        let resp = self.channel.infer_streaming(req, &on_delta).await.map_err(ModelError)?;
         decode_openai_response(&resp)
     }
 }
@@ -149,9 +180,9 @@ pub use p2p::SessionInferChannel;
 ///
 /// 单一 `Session` 要同时：收 DM、回消息、调模型 provider（infer）——而 `Session` 非 `Sync`，
 /// 且回合内会再调 infer。解法：
-/// - **io task** 独占 `Session`，只服务统一的 [`AgentOp`]（`Infer` / `SendDelta`）队列；
-/// - **serve loop** 用 `take_inbox()` 拿到的收件流 + 每对端一个 cmx 会话，**内联**跑回合——回合的
-///   `infer` 发到 io task（**另一个** task），故不自锁；回复经 `SendDelta` 分块流式发回（打字机）。
+/// - **io task** 独占 `Session`，只服务统一的 [`AgentOp`]（`Infer` / `InferStream` 发起 / `SendDelta`），每项都快；
+/// - **serve loop** 每条 DM spawn 一个处理任务：`run_turn_observed` 跑回合，模型 token 增量经 observer 实时
+///   流给 app（`SendDelta` 帧）。读流帧在处理任务里（io task 只「发起流」并回传句柄），故 io task 得空并发发帧 → 边到边。
 ///
 /// 并发：每条 DM 一个处理任务，不同对端并发；同一对端经 per-peer 锁串行有序。io task 仍是
 /// Session I/O 的单点（infer / 发送在此串行，均快；慢的回合逻辑 + 流式节奏在各自任务里并行）。收件箱无界缓冲。
@@ -159,9 +190,10 @@ pub use p2p::SessionInferChannel;
 pub mod serve {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     use async_trait::async_trait;
-    use cmx_agent_core::{Agent, ModelSeam, Session as Convo};
+    use cmx_agent_core::{Agent, ModelSeam, Session as Convo, TurnObserver};
     use nm_proto::GramKind;
     use tokio::sync::{mpsc, oneshot};
 
@@ -171,15 +203,16 @@ pub mod serve {
     /// 帧体 JSON：`{streamId, seq, text(累计全文), done}`。每帧带累计全文 → 乱序/丢帧自愈、done 帧收敛正确。
     pub const AGENT_DELTA_TYPE_URL: &str = "nmspace.agent.delta.v1";
 
-    /// io task 的统一作业：向 provider 发一次推理，或给某对端发一帧流式回复。
+    /// io task 的统一作业：发一次单响应推理、**发起**一条流式推理（回传 InferStream 句柄）、或给对端发一帧。
     enum AgentOp {
         Infer { request: Vec<u8>, reply: oneshot::Sender<Result<Vec<u8>, String>> },
+        InferStream { request: Vec<u8>, reply: oneshot::Sender<Result<nm_client::InferStream, String>> },
         SendDelta { to: [u8; 32], body: Vec<u8> },
     }
 
     /// `P2pInferChannel`：把推理作业投递给 io task（而非自己持 `Session`——`Session` 由 io task 独占）。
     struct OpInferChannel {
-        ops: mpsc::Sender<AgentOp>,
+        ops: mpsc::UnboundedSender<AgentOp>,
     }
 
     #[async_trait]
@@ -188,18 +221,58 @@ pub mod serve {
             let (rtx, rrx) = oneshot::channel();
             self.ops
                 .send(AgentOp::Infer { request: request_json, reply: rtx })
-                .await
                 .map_err(|_| "agent io task 已停".to_string())?;
             rrx.await.map_err(|_| "agent io task 未回结果".to_string())?
         }
+
+        async fn infer_streaming(
+            &self,
+            request_json: Vec<u8>,
+            on_delta: &(dyn Fn(String) + Send + Sync),
+        ) -> Result<Vec<u8>, String> {
+            let (rtx, rrx) = oneshot::channel();
+            self.ops
+                .send(AgentOp::InferStream { request: request_json, reply: rtx })
+                .map_err(|_| "agent io task 已停".to_string())?;
+            // io task 只负责「发起流 + 回传 InferStream 句柄」（快）；读帧在**本处理任务**里循环，
+            // 故 io task 得空并发处理 SendDelta——token 增量才能边到边发给 app（而非攒到最后）。
+            let mut stream = rrx.await.map_err(|_| "agent io task 未回结果".to_string())??;
+            let mut final_bytes: Option<Vec<u8>> = None;
+            while let Some(cr) = stream.next().await {
+                if !cr.ok {
+                    return Err(if cr.error.is_empty() { "provider 流式错误".into() } else { cr.error });
+                }
+                if cr.done {
+                    final_bytes = cr.result.map(|a| a.value);
+                    break;
+                }
+                if let Some(a) = cr.result {
+                    // 取出 owned String 后再回调，避免把 `v` 的借用绑到 on_delta 的生命周期（HRTB 问题）。
+                    let delta = serde_json::from_slice::<serde_json::Value>(&a.value)
+                        .ok()
+                        .and_then(|v| v["delta"].as_str().map(|s| s.to_string()));
+                    if let Some(d) = delta {
+                        if !d.is_empty() {
+                            on_delta(d);
+                        }
+                    }
+                }
+            }
+            final_bytes.ok_or_else(|| "流在无终帧情况下结束".to_string())
+        }
     }
 
-    /// io task：独占 `Session`，顺序执行 infer / 发送流式回复帧。
-    async fn io_task(session: nm_client::Session, provider: [u8; 32], mut ops_rx: mpsc::Receiver<AgentOp>) {
+    /// io task：独占 `Session`，顺序执行 infer / 发起流 / 发送回复帧（每项都快，不占 token 延迟）。
+    async fn io_task(session: nm_client::Session, provider: [u8; 32], mut ops_rx: mpsc::UnboundedReceiver<AgentOp>) {
         while let Some(op) = ops_rx.recv().await {
             match op {
                 AgentOp::Infer { request, reply } => {
                     let r = session.infer(provider, &request).await.map_err(|e| e.to_string());
+                    let _ = reply.send(r);
+                }
+                AgentOp::InferStream { request, reply } => {
+                    // 只「发起」流（发命令 + 注册关联，快）并回传句柄；读帧在调用方任务里进行。
+                    let r = session.infer_stream(provider, &request).await.map_err(|e| e.to_string());
                     let _ = reply.send(r);
                 }
                 AgentOp::SendDelta { to, body } => {
@@ -209,34 +282,29 @@ pub mod serve {
         }
     }
 
-    /// 把一段回复按小块（**累计全文**）逐帧发给对端，制造打字机节奏；末帧 `done=true` 带完整文本。
-    /// 空回复也至少发一帧 done。帧间小睡 30ms。返回 `Err` 表示 io task 已停。
-    async fn stream_reply(
-        ops_tx: &mpsc::Sender<AgentOp>,
+    /// 回合 observer：把模型 token 增量实时转成对端 app 的 delta 帧。每次 `on_text_delta` 发一帧
+    /// **累计全文**（streamId + 递增 seq），app 据此原地长出同一个气泡。
+    struct StreamObserver {
+        ops: mpsc::UnboundedSender<AgentOp>,
         to: [u8; 32],
-        stream_id: &str,
-        text: &str,
-    ) -> Result<(), ()> {
-        let chars: Vec<char> = text.chars().collect();
-        let step = 2usize;
-        let mut idx = 0usize;
-        let mut seq = 0u32;
-        loop {
-            idx = (idx + step).min(chars.len());
-            let done = idx >= chars.len();
-            let cumulative: String = chars[..idx].iter().collect();
-            let frame = serde_json::json!({
-                "streamId": stream_id, "seq": seq, "text": cumulative, "done": done,
-            });
-            let body = serde_json::to_vec(&frame).unwrap_or_default();
-            ops_tx.send(AgentOp::SendDelta { to, body }).await.map_err(|_| ())?;
-            if done {
-                break;
-            }
-            seq += 1;
-            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        stream_id: String,
+        acc: std::sync::Mutex<String>,
+        seq: AtomicU32,
+    }
+
+    impl TurnObserver for StreamObserver {
+        fn on_text_delta(&self, delta: &str) {
+            let text = {
+                let mut acc = self.acc.lock().unwrap();
+                acc.push_str(delta);
+                acc.clone()
+            };
+            let seq = self.seq.fetch_add(1, Ordering::SeqCst);
+            let frame = serde_json::json!({ "streamId": self.stream_id, "seq": seq, "text": text, "done": false });
+            let _ = self
+                .ops
+                .send(AgentOp::SendDelta { to: self.to, body: serde_json::to_vec(&frame).unwrap_or_default() });
         }
-        Ok(())
     }
 
     fn hex(b: &[u8]) -> String {
@@ -254,7 +322,7 @@ pub mod serve {
     ) -> Result<(), String> {
         let mut inbox = session.take_inbox().ok_or("inbox 已被取走")?;
         let my_tag = hex(&session.id_bytes()[..4]); // 流 id 前缀，避免多 agent 的流 id 撞车
-        let (ops_tx, ops_rx) = mpsc::channel::<AgentOp>(32);
+        let (ops_tx, ops_rx) = mpsc::unbounded_channel::<AgentOp>();
         tokio::spawn(io_task(session, provider, ops_rx));
 
         let seam = P2pModelSeam::new(OpInferChannel { ops: ops_tx.clone() }, model);
@@ -311,12 +379,22 @@ pub mod serve {
             // 每条 DM 一个处理任务：不同对端并发；同一对端经 peer_convo 锁串行有序。
             tokio::spawn(async move {
                 let mut convo = peer_convo.lock().await;
-                let reply = match agent.run_turn(&mut convo, &text).await {
+                // observer 把模型 token 增量边生成边流给 app（done=false 帧）。
+                let observer = StreamObserver {
+                    ops: ops_tx.clone(),
+                    to: sender,
+                    stream_id: stream_id.clone(),
+                    acc: std::sync::Mutex::new(String::new()),
+                    seq: AtomicU32::new(0),
+                };
+                let final_text = match agent.run_turn_observed(&mut convo, &text, Some(&observer)).await {
                     Ok(out) => out.final_text.unwrap_or_default(),
                     Err(e) => format!("[agent 出错] {e}"),
                 };
-                // 持锁至流式发完 → 同一对端的下一条在本条完整回完后才处理（有序、不交错 delta）。
-                let _ = stream_reply(&ops_tx, sender, &stream_id, &reply).await;
+                // 终帧：完整文本（seq 取增量数 → 必 >= 所有 delta 帧 seq，app 以此收敛）。持锁至此 → 同对端有序。
+                let done_seq = observer.seq.load(Ordering::SeqCst);
+                let frame = serde_json::json!({ "streamId": stream_id, "seq": done_seq, "text": final_text, "done": true });
+                let _ = ops_tx.send(AgentOp::SendDelta { to: sender, body: serde_json::to_vec(&frame).unwrap_or_default() });
             });
         }
         Ok(())

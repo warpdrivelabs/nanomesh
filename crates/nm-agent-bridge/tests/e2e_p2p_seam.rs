@@ -45,20 +45,46 @@ async fn spawn_node_and_provider(node_seed: u8, prov_seed: u8) -> (Addr, nm_clie
         .expect("provider register failed");
 
     tokio::spawn(async move {
-        let backend = Backend::Demo;
+        let backend = std::sync::Arc::new(Backend::Demo);
         while let Some((req, cmd)) = provider.next_command().await {
             if cmd.method != METHOD_INFER {
                 let _ = provider.reply(&req, false, None, "unsupported method").await;
                 continue;
             }
             let params = cmd.params.as_ref().map(|p| p.value.clone()).unwrap_or_default();
-            match backend.handle_infer("demo-llm", &params).await {
-                Ok(json) => {
-                    let any = nm_proto::Any { type_url: RESP_TYPE_URL.to_string(), value: json };
-                    let _ = provider.reply(&req, true, Some(any), "").await;
+            let streaming = serde_json::from_slice::<serde_json::Value>(&params)
+                .ok()
+                .and_then(|v| v["stream"].as_bool())
+                .unwrap_or(false);
+            if streaming {
+                // 真流式：Backend::stream_infer 产帧 → reply_frame 逐帧回（中途 chunk + 终帧完整）。
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(Vec<u8>, bool)>();
+                let backend2 = backend.clone();
+                tokio::spawn(async move {
+                    let _ = backend2.stream_infer("demo-llm", &params, tx).await;
+                });
+                let mut seq = 0u32;
+                while let Some((value, done)) = rx.recv().await {
+                    let type_url =
+                        if done { RESP_TYPE_URL } else { nm_compute::CHUNK_TYPE_URL }.to_string();
+                    if provider
+                        .reply_frame(&req, true, Some(nm_proto::Any { type_url, value }), "", seq, done)
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    seq += 1;
                 }
-                Err(e) => {
-                    let _ = provider.reply(&req, false, None, &format!("infer failed: {e}")).await;
+            } else {
+                match backend.handle_infer("demo-llm", &params).await {
+                    Ok(json) => {
+                        let any = nm_proto::Any { type_url: RESP_TYPE_URL.to_string(), value: json };
+                        let _ = provider.reply(&req, true, Some(any), "").await;
+                    }
+                    Err(e) => {
+                        let _ = provider.reply(&req, false, None, &format!("infer failed: {e}")).await;
+                    }
                 }
             }
         }
@@ -171,12 +197,14 @@ async fn agent_bot_serves_a_peer_over_p2p() {
         .expect("peer register");
     peer.send_to(bot_id, "hello bot").await.expect("send to bot");
 
-    let reply = recv_streamed_reply(&mut peer).await;
+    let (reply, deltas) = recv_streamed_reply(&mut peer).await;
     assert!(reply.contains("hello bot"), "bot 应经 agent 回合回声用户输入；实得: {reply}");
+    assert!(deltas >= 2, "应为多帧 token 流式（打字机），实收中途帧数: {deltas}");
 }
 
-/// 收集一个对端收到的流式回复（delta 帧，累计全文），返回 done 帧的完整文本。
-async fn recv_streamed_reply(peer: &mut nm_client::Session) -> String {
+/// 收集一个对端收到的流式回复（delta 帧，累计全文），返回 (done 帧的完整文本, 收到的中途帧数)。
+async fn recv_streamed_reply(peer: &mut nm_client::Session) -> (String, usize) {
+    let mut deltas = 0usize;
     loop {
         let gram = tokio::time::timeout(Duration::from_secs(20), peer.recv())
             .await
@@ -191,8 +219,9 @@ async fn recv_streamed_reply(peer: &mut nm_client::Session) -> String {
         }
         let frame: serde_json::Value = serde_json::from_slice(&p.value).expect("delta JSON");
         if frame["done"].as_bool().unwrap_or(false) {
-            return frame["text"].as_str().unwrap_or_default().to_string();
+            return (frame["text"].as_str().unwrap_or_default().to_string(), deltas);
         }
+        deltas += 1; // 中途（非 done）token 帧
     }
 }
 
@@ -235,7 +264,7 @@ async fn agent_bot_serves_two_peers() {
     b.send_to(bot_id, "from-bob").await.expect("b send");
 
     // 并发收两路回复（不同对端的 handler 并行）。
-    let (ra, rb) = tokio::join!(recv_streamed_reply(&mut a), recv_streamed_reply(&mut b));
+    let ((ra, _), (rb, _)) = tokio::join!(recv_streamed_reply(&mut a), recv_streamed_reply(&mut b));
     assert!(ra.contains("from-alice"), "甲应收到对自己输入的回声；实得: {ra}");
     assert!(rb.contains("from-bob"), "乙应收到对自己输入的回声；实得: {rb}");
 }

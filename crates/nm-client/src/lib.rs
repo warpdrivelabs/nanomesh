@@ -100,11 +100,13 @@ impl Client {
     pub async fn online(&self, to: impl Into<Addr>) -> Result<Session, ClientError> {
         let conn = self.ep.connect(to).await.map_err(err)?;
         let pending: Arc<DashMap<u64, oneshot::Sender<Gram>>> = Arc::new(DashMap::new());
+        let pending_streams: Arc<DashMap<u64, mpsc::UnboundedSender<Gram>>> = Arc::new(DashMap::new());
         let (in_tx, in_rx) = mpsc::unbounded_channel(); // 消息 & 未匹配
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel(); // 收到的命令（供被调方）
 
         let rconn = conn.clone();
         let pend = pending.clone();
+        let streams = pending_streams.clone();
         let task = tokio::spawn(async move {
             // 节点经 uni 流推送 gram；按类型分派。
             while let Ok(mut recv) = rconn.accept_uni().await {
@@ -113,10 +115,25 @@ impl Client {
                 };
                 match gram.kind() {
                     GramKind::CommandResult => {
-                        // 用 ref_gram_id 关联请求；命中 pending 则唤醒等待者。
+                        // 用 ref_gram_id 关联请求：先命中单响应 pending（oneshot），否则命中流式 pending_streams。
                         if let Some(n) = gram.ref_gram_id {
                             if let Some((_, tx)) = pend.remove(&n) {
                                 let _ = tx.send(gram);
+                                continue;
+                            }
+                            if let Some(entry) = streams.get(&n) {
+                                // 流式帧：转发；done 帧后移除流（接收端随之关闭）。
+                                let done = gram
+                                    .payload
+                                    .as_ref()
+                                    .and_then(|p| CommandResult::decode(p.value.as_slice()).ok())
+                                    .map(|cr| cr.done)
+                                    .unwrap_or(true);
+                                let _ = entry.value().send(gram);
+                                drop(entry);
+                                if done {
+                                    streams.remove(&n);
+                                }
                                 continue;
                             }
                         }
@@ -145,6 +162,7 @@ impl Client {
             inbox: Some(in_rx),
             commands: cmd_rx,
             pending,
+            pending_streams,
             next_corr: Arc::new(AtomicU64::new(1)),
             _task: task,
         })
@@ -228,6 +246,8 @@ pub struct Session {
     inbox: Option<mpsc::UnboundedReceiver<Gram>>,
     commands: mpsc::UnboundedReceiver<(Gram, Command)>,
     pending: Arc<DashMap<u64, oneshot::Sender<Gram>>>,
+    /// 流式命令关联：一个请求的多帧 CommandResult 转发到此（done 帧后移除）。供 `call_stream`/`infer_stream`。
+    pending_streams: Arc<DashMap<u64, mpsc::UnboundedSender<Gram>>>,
     next_corr: Arc<AtomicU64>,
     _task: tokio::task::JoinHandle<()>,
 }
@@ -314,12 +334,16 @@ impl Session {
     }
 
     /// 对某条命令请求作出响应（CommandResult 经节点路由回请求方）。
-    pub async fn reply(
+    /// 对某条命令请求回**一帧**响应。`seq` 为帧序（0 基），`done=true` 表示终帧。
+    /// 单响应（非流式）用 [`Self::reply`]；流式 provider 逐帧用本方法（`done=false` 多帧 + 终帧 `done=true`）。
+    pub async fn reply_frame(
         &self,
         request: &Gram,
         ok: bool,
         result: Option<Any>,
         error: &str,
+        seq: u32,
+        done: bool,
     ) -> Result<(), ClientError> {
         let corr = request
             .payload
@@ -332,6 +356,8 @@ impl Session {
             ok,
             result,
             error: error.to_string(),
+            seq,
+            done,
         };
         let mut gram = build_gram(
             GramKind::CommandResult,
@@ -345,6 +371,17 @@ impl Session {
         // 用 ref_gram_id 携带请求的 gram_id 作为关联键。
         gram.ref_gram_id = Some(request.gram_id);
         route_send(&self.conn, &gram).await.map(|_| ())
+    }
+
+    /// 对某条命令请求作出单个（终帧）响应（CommandResult 经节点路由回请求方）。
+    pub async fn reply(
+        &self,
+        request: &Gram,
+        ok: bool,
+        result: Option<Any>,
+        error: &str,
+    ) -> Result<(), ClientError> {
+        self.reply_frame(request, ok, result, error, 0, true).await
     }
 
     pub async fn register_as<K: EntityKind>(
@@ -737,6 +774,64 @@ impl Session {
             .payload
             .ok_or_else(|| ClientError::Other("command result has no payload".into()))?;
         CommandResult::decode(payload.value.as_slice()).map_err(err)
+    }
+
+    /// 流式路由命令 RPC：发出命令后立即返回一个 [`InferStream`]；多帧 `CommandResult` 陆续到达（done 帧止）。
+    /// 对端须按流式回（`reply_frame` 多帧）；否则只会收到单个终帧。帧乱序由上层按 `seq` 处理。
+    pub async fn call_stream(
+        &self,
+        target: [u8; 32],
+        method: &str,
+        params: Option<Any>,
+    ) -> Result<InferStream, ClientError> {
+        let n = self.next_corr.fetch_add(1, Ordering::SeqCst);
+        let cmd = Command {
+            method: method.to_string(),
+            params,
+            correlation_id: n,
+            timeout_ms: 0,
+            grant: None,
+        };
+        let gram = {
+            let mut g = build_gram(
+                GramKind::Command,
+                self.my_id,
+                target.to_vec(),
+                Some(Any { type_url: "nmspace.v1.Command".to_string(), value: cmd.encode_to_vec() }),
+            );
+            g.gram_id = n; // 关联键
+            g
+        };
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.pending_streams.insert(n, tx);
+        if let Err(e) = route_send(&self.conn, &gram).await {
+            self.pending_streams.remove(&n);
+            return Err(e);
+        }
+        Ok(InferStream { rx })
+    }
+
+    /// 流式推理（C2）：OpenAI 兼容请求（应带 `"stream": true`），返回逐帧 [`InferStream`]。
+    pub async fn infer_stream(
+        &self,
+        provider: [u8; 32],
+        openai_request_json: &[u8],
+    ) -> Result<InferStream, ClientError> {
+        let params = Any { type_url: "openai.chat.v1".to_string(), value: openai_request_json.to_vec() };
+        self.call_stream(provider, "model.infer", Some(params)).await
+    }
+}
+
+/// 流式命令的接收端：逐帧取 [`CommandResult`]（`done` 帧后通道关闭 → `next` 返回 `None`）。
+pub struct InferStream {
+    rx: mpsc::UnboundedReceiver<Gram>,
+}
+
+impl InferStream {
+    /// 取下一帧的 `CommandResult`；流结束（done 帧已消费或连接断）返回 `None`。
+    pub async fn next(&mut self) -> Option<CommandResult> {
+        let gram = self.rx.recv().await?;
+        gram.payload.and_then(|p| CommandResult::decode(p.value.as_slice()).ok())
     }
 }
 

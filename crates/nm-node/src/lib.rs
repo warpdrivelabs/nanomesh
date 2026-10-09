@@ -3596,6 +3596,8 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Op
         ok,
         result,
         error,
+        seq: 0,
+        done: true,
     };
     Some(command_result_gram(gram, &cr))
 }
@@ -3934,7 +3936,7 @@ fn push_command_denied(gram: &Gram, caller: &[u8], sessions: &Sessions, reason: 
     let Some(conn) = sessions.get(caller).map(|r| r.clone()) else {
         return;
     };
-    let cr = CommandResult { correlation_id: corr, ok: false, result: None, error: format!("denied: {reason}") };
+    let cr = CommandResult { correlation_id: corr, ok: false, result: None, error: format!("denied: {reason}"), seq: 0, done: true };
     let mut reply = reply_gram(gram, GramKind::CommandResult, Some(Any {
         type_url: "nmspace.v1.CommandResult".to_string(),
         value: cr.encode_to_vec(),

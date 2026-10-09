@@ -105,7 +105,7 @@ message Gram {
 // ---- 交互模式载荷 ----
 // Command / RPC（控制设备、调用工具/服务）
 message Command { string method = 1; Any params = 2; uint64 correlation_id = 3; uint32 timeout_ms = 4; Grant grant = 5; }
-message CommandResult { uint64 correlation_id = 1; bool ok = 2; Any result = 3; string error = 4; }
+message CommandResult { uint64 correlation_id = 1; bool ok = 2; Any result = 3; string error = 4; uint32 seq = 5; bool done = 6; }
 
 // 目录（Directory）查询与结果（E1：实体注册 + 发现）。
 message DirectoryQuery {

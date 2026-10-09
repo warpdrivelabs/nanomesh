@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use clap::Parser;
-use nm_compute::{Backend, METHOD_INFER, RESP_TYPE_URL};
+use nm_compute::{Backend, CHUNK_TYPE_URL, METHOD_INFER, RESP_TYPE_URL};
 use nm_entity::kinds;
 use nm_proto::pb::InferenceProfile;
 use nm_proto::Any;
@@ -97,13 +97,38 @@ async fn main() -> anyhow::Result<()> {
             continue;
         }
         let params = cmd.params.as_ref().map(|p| p.value.clone()).unwrap_or_default();
-        match backend.handle_infer(&model_label, &params).await {
-            Ok(json) => {
-                let any = Any { type_url: RESP_TYPE_URL.to_string(), value: json };
-                let _ = sess.reply(&req, true, Some(any), "").await;
+        let streaming = serde_json::from_slice::<serde_json::Value>(&params)
+            .ok()
+            .and_then(|v| v["stream"].as_bool())
+            .unwrap_or(false);
+        if streaming {
+            // 流式：provider 逐帧回（中途 chunk done=false + 终帧完整 completion done=true）。
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(Vec<u8>, bool)>();
+            let backend2 = backend.clone();
+            let model2 = model_label.clone();
+            let params2 = params.clone();
+            tokio::spawn(async move {
+                if let Err(e) = backend2.stream_infer(&model2, &params2, tx).await {
+                    tracing::warn!("stream_infer: {e}");
+                }
+            });
+            let mut seq = 0u32;
+            while let Some((value, done)) = rx.recv().await {
+                let type_url = if done { RESP_TYPE_URL } else { CHUNK_TYPE_URL }.to_string();
+                if sess.reply_frame(&req, true, Some(Any { type_url, value }), "", seq, done).await.is_err() {
+                    break;
+                }
+                seq += 1;
             }
-            Err(e) => {
-                let _ = sess.reply(&req, false, None, &format!("推理失败: {e}")).await;
+        } else {
+            match backend.handle_infer(&model_label, &params).await {
+                Ok(json) => {
+                    let any = Any { type_url: RESP_TYPE_URL.to_string(), value: json };
+                    let _ = sess.reply(&req, true, Some(any), "").await;
+                }
+                Err(e) => {
+                    let _ = sess.reply(&req, false, None, &format!("推理失败: {e}")).await;
+                }
             }
         }
     }
