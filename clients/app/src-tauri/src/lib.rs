@@ -65,6 +65,7 @@ fn person_entity_json(e: &nm_proto::pb::Entity) -> Value {
         "status": e.attributes.get("status").cloned().unwrap_or_default(),
         "presence": e.attributes.get("presence").cloned().unwrap_or_default(),
         "handle": e.attributes.get("name").cloned().unwrap_or_default(), // 去中心命名 local@domain（N1）
+        "model": e.attributes.get("model").cloned().unwrap_or_default(), // 模型 provider / agent 所用模型（智能体标签副标题）
         "bio": pp.as_ref().map(|p| p.bio.clone()).unwrap_or_default(),
         "statusText": pp.as_ref().map(|p| p.status_text.clone()).unwrap_or_default(),
         "avatar": pp.as_ref().map(|p| p.avatar_url.clone()).unwrap_or_default(),

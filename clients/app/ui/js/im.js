@@ -150,13 +150,15 @@ async function imRefresh() {
   if (window.Profile) Profile.resolveList(CONTACTS, () => renderPanels());
 }
 
-function renderPanels() { renderConversations(); renderEntities(); if (window.Tray) Tray.sync(); }
+function renderPanels() { renderConversations(); renderEntities(); renderAgents(); if (window.Tray) Tray.sync(); }
 
 function bindPanelUI() {
   const s1 = document.getElementById("im-search-input");
   if (s1 && !s1._bound) { s1._bound = true; s1.addEventListener("input", renderConversations); }
   const s2 = document.getElementById("entity-search-input");
   if (s2 && !s2._bound) { s2._bound = true; s2.addEventListener("input", renderEntities); }
+  const s3 = document.getElementById("agent-search-input");
+  if (s3 && !s3._bound) { s3._bound = true; s3.addEventListener("input", renderAgents); }
   const add = document.getElementById("ent-add-btn");
   if (add && !add._bound) { add._bound = true; add.addEventListener("click", toggleEntityForm); }
 }
@@ -205,6 +207,26 @@ function renderEntities() {
     g.classList.toggle("folded", folded);
     head.setAttribute("aria-expanded", folded ? "false" : "true");
   }));
+}
+
+// ── 🤖 智能体：目录里的 agent.* 实体，点击直接开聊（复用联系人会话管线）──
+function renderAgents() {
+  const box = document.getElementById("agents-list");
+  if (!box) return;
+  const q = (document.getElementById("agent-search-input").value || "").trim().toLowerCase();
+  const list = mergedEntities().filter((c) =>
+    c.id !== MY_ID && kindType(c.kind) === "agent" &&
+    (!q || (c.name || "").toLowerCase().includes(q) || (c.id || "").includes(q) || (c.handle || "").toLowerCase().includes(q)));
+  if (!list.length) {
+    const hint = window.t ? t("list.noAgent") : "未发现智能体。在节点上运行 nm-agentd --serve，刷新后即可在此对话。";
+    box.innerHTML = `<div class="im-empty">${hint}</div>`;
+    return;
+  }
+  box.innerHTML = list.map((c) => {
+    const sub = c.model ? escapeHtml(c.model) : (window.t ? t("agent.sub") : "AI 助手");
+    return itemHtml(c, sub, UNREAD[c.id] || 0, ACTIVE, { inlineHandle: false });
+  }).join("");
+  wireItems(box, selectContact);
 }
 function renderGroup(key, icon, label, items) {
   const q = (document.getElementById("entity-search-input").value || "").trim();

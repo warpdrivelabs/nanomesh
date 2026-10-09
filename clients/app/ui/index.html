@@ -223,6 +223,7 @@
     <div class="activitybar">
       <div class="act active" id="act-im" data-act="showPanel" data-panel="im" title="即时通讯"><span class="ico" data-ico="chat"></span></div>
       <div class="act" id="act-entities" data-act="showPanel" data-panel="entities" title="实体目录"><span class="ico" data-ico="contacts"></span></div>
+      <div class="act" id="act-agents" data-act="showPanel" data-panel="agents" title="智能体"><span class="ico" data-ico="agent"></span></div>
       <div class="act" id="act-nodesvc" data-act="showPanel" data-panel="nodesvc" title="节点服务"><span class="ico" data-ico="nodes"></span></div>
       <div class="act" id="act-groups" data-act="showPanel" data-panel="groups" title="群组"><span class="ico" data-ico="groups"></span></div>
       <div class="act" id="act-channels" data-act="showPanel" data-panel="channels" title="频道"><span class="ico" data-ico="channels"></span></div>
@@ -250,6 +251,11 @@
         <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="entity-search-input" type="text" placeholder="搜索实体" data-i18n-ph="search.entities" /></div>
         <div class="nodesvc-form entity-form" id="entity-form" style="display:none"></div>
         <div class="entity-list" id="entity-list"></div>
+      </div>
+      <div class="panel agents-panel" id="panel-agents">
+        <div class="brand"><span class="uname" data-i18n="panel.agents">智能体</span><span class="brand-tools"><button class="brand-refresh" data-act="imRefresh" title="刷新目录"><span class="ico" data-ico="refresh"></span></button></span></div>
+        <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="agent-search-input" type="text" placeholder="搜索智能体" data-i18n-ph="search.agents" /></div>
+        <div class="im-list" id="agents-list"></div>
       </div>
       <div class="panel nodesvc-panel" id="panel-nodesvc">
         <div class="brand"><span class="uname" data-i18n="panel.nodes">节点服务</span><span class="brand-tools"><button class="brand-refresh" id="ns-new" title="新增节点服务"><span class="ico" data-ico="plus"></span></button></span></div>
