@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use cmx_agent_core::{Agent, ModelContext, ModelMessage, ModelSeam, Session, StopReason};
 use nm_agent_bridge::{P2pModelSeam, SessionInferChannel};
-use nm_compute::{Backend, METHOD_INFER, RESP_TYPE_URL};
+use nm_compute::{Backend, CHUNK_TYPE_URL, METHOD_INFER, RESP_TYPE_URL};
 use nm_entity::kinds;
 use nm_proto::pb::{AgentProfile, InferenceProfile, PersonProfile};
 use nm_transport::Addr;
@@ -267,4 +267,118 @@ async fn agent_bot_serves_two_peers() {
     let ((ra, _), (rb, _)) = tokio::join!(recv_streamed_reply(&mut a), recv_streamed_reply(&mut b));
     assert!(ra.contains("from-alice"), "甲应收到对自己输入的回声；实得: {ra}");
     assert!(rb.contains("from-bob"), "乙应收到对自己输入的回声；实得: {rb}");
+}
+
+/// 实盘：真 Ollama 流式手验。起节点 + Ollama provider + 消费端，`infer_stream` 逐 token 打印(带时间戳)，
+/// 证真·模型 token 流式(provider→P2P→消费端)。需本机/可达 Ollama + 已拉模型。默认跳过。
+/// 运行：`OLLAMA_URL=http://127.0.0.1:11434 OLLAMA_MODEL=qwen2:0.5b \
+///   cargo test --manifest-path crates/nm-agent-bridge/Cargo.toml --features nm-client \
+///   --test e2e_p2p_seam ollama_stream_live -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "needs a running Ollama + pulled model; see doc comment"]
+async fn ollama_stream_live() {
+    let url = std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".into());
+    let model = std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "qwen2:0.5b".into());
+    eprintln!("ollama_stream_live: url={url} model={model}");
+
+    let node = nm_node::Node::bind_local([81u8; 32]).await.expect("bind node");
+    let addr = node.addr();
+    tokio::spawn(async move {
+        let _ = node.serve().await;
+    });
+
+    // Ollama provider（真流式）。
+    let prov_client = nm_client::Client::bind_local([82u8; 32]).await.expect("bind provider");
+    let mut provider = prov_client.online(addr.clone()).await.expect("provider online");
+    let mut attrs = HashMap::new();
+    attrs.insert("model".to_string(), model.clone());
+    provider
+        .register_as::<kinds::ModelLlm>(
+            &InferenceProfile { models: vec![model.clone()], ..Default::default() },
+            "ollama",
+            attrs,
+        )
+        .await
+        .expect("provider register");
+    let backend = Arc::new(Backend::ollama(&url));
+    let model_label = model.clone();
+    tokio::spawn(async move {
+        while let Some((req, cmd)) = provider.next_command().await {
+            if cmd.method != METHOD_INFER {
+                let _ = provider.reply(&req, false, None, "unsupported").await;
+                continue;
+            }
+            let params = cmd.params.as_ref().map(|p| p.value.clone()).unwrap_or_default();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(Vec<u8>, bool)>();
+            let b2 = backend.clone();
+            let ml = model_label.clone();
+            tokio::spawn(async move {
+                let _ = b2.stream_infer(&ml, &params, tx).await;
+            });
+            let mut seq = 0u32;
+            while let Some((value, done)) = rx.recv().await {
+                let type_url = if done { RESP_TYPE_URL } else { CHUNK_TYPE_URL }.to_string();
+                if provider
+                    .reply_frame(&req, true, Some(nm_proto::Any { type_url, value }), "", seq, done)
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                seq += 1;
+            }
+        }
+    });
+
+    // 消费端：infer_stream，逐 token 打印到达时间。
+    let cons_client = nm_client::Client::bind_local([83u8; 32]).await.expect("bind consumer");
+    let consumer = cons_client.online(addr).await.expect("consumer online");
+    consumer
+        .register_as::<kinds::Person>(&PersonProfile::default(), "user", HashMap::new())
+        .await
+        .expect("consumer register");
+    let found = consumer.find_model_providers(Some(&model)).await.expect("discover");
+    let provider_id: [u8; 32] = found[0].entity_id.clone().try_into().expect("id 32 bytes");
+
+    let req = serde_json::json!({
+        "model": model,
+        "messages": [{ "role": "user", "content": "用一句话介绍你自己" }],
+        "stream": true,
+    });
+    let mut stream = consumer
+        .infer_stream(provider_id, &serde_json::to_vec(&req).unwrap())
+        .await
+        .expect("infer_stream");
+
+    let t0 = std::time::Instant::now();
+    let mut chunks = 0usize;
+    let mut full = String::new();
+    while let Some(cr) = tokio::time::timeout(Duration::from_secs(60), stream.next())
+        .await
+        .expect("流超时")
+    {
+        assert!(cr.ok, "provider 错误: {}", cr.error);
+        let Some(a) = cr.result else { continue };
+        if cr.done {
+            let v: serde_json::Value = serde_json::from_slice(&a.value).unwrap_or_default();
+            let content = v["choices"][0]["message"]["content"].as_str().unwrap_or("");
+            eprintln!(
+                "[{:>6}ms] DONE  chunks={chunks}  完整文本({} 字): {content}",
+                t0.elapsed().as_millis(),
+                content.chars().count()
+            );
+            break;
+        }
+        let v: serde_json::Value = serde_json::from_slice(&a.value).unwrap_or_default();
+        if let Some(d) = v["delta"].as_str() {
+            if !d.is_empty() {
+                chunks += 1;
+                full.push_str(d);
+                eprintln!("[{:>6}ms] +{:?}", t0.elapsed().as_millis(), d);
+            }
+        }
+    }
+    eprintln!("累计: {full}");
+    assert!(chunks >= 2, "真 Ollama 应多帧 token 流；实收 {chunks} 帧");
+    assert!(!full.is_empty(), "流式累计文本不应为空");
 }
