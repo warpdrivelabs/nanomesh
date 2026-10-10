@@ -131,6 +131,7 @@
       case "prefs": PREFS = Object.assign(PREFS || {}, p.arg || {}); renderPrefs(); break;
       case "quit":
         try { if (window.imFlush) await imFlush(); } catch (_) {}
+        try { await NM.inv("disconnect"); } catch (_) {} // 退出前优雅下线，避免节点持「假在线」会话 10s 而丢消息
         try { await NM.inv("app_quit"); } catch (_) {}
         break;
     }

@@ -4,6 +4,7 @@
 let MY_ID = "";
 let CONTACTS = [];              // 当前身份会话所见的发现实体 [{id,kind,name}]
 let ADDED = [];                 // 当前身份手动添加的实体 [{id,kind,name}]
+let PRESENCE = {};              // A：id -> 在线状态（含跨节点好友），presence_query 批量刷新
 let CONVOS = {};                // 当前身份的会话：id -> [{id,from,body,ts}]
 let ACTIVE = null;              // 当前会话对端 id（消息视图高亮）
 let DETAIL_ID = null;          // 当前查看详情的实体 id（实体目录高亮）
@@ -34,6 +35,9 @@ function mergedEntities() {
   const map = {};
   ADDED.forEach((a) => { map[a.id] = { ...a, added: true }; });
   CONTACTS.forEach((c) => { map[c.id] = { ...map[c.id], ...c, added: !!(map[c.id] && map[c.id].added) }; });
+  // A：用批量查到的 presence 盖到所有项（跨节点 ADDED 好友本来无 presence）；
+  // 本地 directory 已带非空 presence 时以其为准（同节点权威）。
+  Object.values(map).forEach((c) => { if (!c.presence && PRESENCE[c.id]) c.presence = PRESENCE[c.id]; });
   return Object.values(map);
 }
 function entityById(id) { return mergedEntities().find((c) => c.id === id); }
@@ -148,7 +152,19 @@ async function imRefresh() {
   }
   renderPanels();
   if (window.Profile) Profile.resolveList(CONTACTS, () => renderPanels());
+  refreshPresence(); // A：每次刷新都重查在线态（不受 dir-sig 早退影响）
 }
+
+// A：批量查所有列表项的在线态（含跨节点 ADDED 好友），写入 PRESENCE 并重绘。
+async function refreshPresence() {
+  const ids = Array.from(new Set(mergedEntities().map((c) => c.id).filter((id) => id && id !== MY_ID)));
+  if (!ids.length) return;
+  try {
+    const m = await NM.inv("presence_query", { ids });
+    if (m && typeof m === "object") { PRESENCE = m; renderPanels(); }
+  } catch (_) { /* 节点不支持/暂不可达：保留旧值，不打扰 */ }
+}
+window.refreshPresence = refreshPresence;
 
 function renderPanels() { renderConversations(); renderEntities(); renderAgents(); if (window.Tray) Tray.sync(); }
 
@@ -802,7 +818,7 @@ async function pushMsg(peer, m) {
 async function imDisconnect() {
   if (window.ChatLog) ChatLog.setUnread(UNREAD);
   try { await NM.inv("disconnect"); } catch (_) {}
-  MY_ID = ""; CONTACTS = []; ADDED = []; CONVOS = {}; UNREAD = {}; ACTIVE = null; DETAIL_ID = null;
+  MY_ID = ""; CONTACTS = []; ADDED = []; PRESENCE = {}; CONVOS = {}; UNREAD = {}; ACTIVE = null; DETAIL_ID = null;
   window.CURRENT_SVC = null;
   if (typeof paintHomeNode === "function") paintHomeNode();
   if (window.Tabs) Tabs.closeAll();

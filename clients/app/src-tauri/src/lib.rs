@@ -1405,6 +1405,15 @@ async fn presence_set(state: State<'_, AppState>, status: String) -> Result<(), 
     session.presence_set(status.trim()).await.map_err(|e| e.to_string())
 }
 
+/// A：按 id 批量查在线状态（含跨节点好友）。前端刷新时调，盖到所有列表项。
+#[tauri::command]
+async fn presence_query(state: State<'_, AppState>, ids: Vec<String>) -> Result<std::collections::HashMap<String, String>, String> {
+    let session = session_of(&state).await?;
+    let parsed: Vec<[u8; 32]> = ids.iter().filter_map(|s| parse_id(s).ok()).collect();
+    if parsed.is_empty() { return Ok(std::collections::HashMap::new()); }
+    session.presence_query(&parsed).await.map_err(|e| e.to_string())
+}
+
 // ── 群组（P3）：建群 / 成员与角色管理 / 群消息 ──
 #[tauri::command]
 async fn group_create(state: State<'_, AppState>, name: String) -> Result<String, String> {
@@ -2082,7 +2091,10 @@ async fn name_reverse(state: State<'_, AppState>, pubkey: String) -> Result<Opti
 /// 断开当前连接（清空会话，便于切换节点/模式）。
 #[tauri::command]
 async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
-    *state.conn.lock().await = None;
+    // 优雅下线：先发 Logout + 关连接（节点即时移除会话，后续消息正确入离线库），再丢弃句柄。
+    if let Some(c) = state.conn.lock().await.take() {
+        c.session.disconnect().await;
+    }
     Ok(())
 }
 
@@ -2390,6 +2402,7 @@ pub fn run() {
             list_windows,
             capture_window,
             presence_set,
+            presence_query,
             group_create,
             group_list,
             group_add,

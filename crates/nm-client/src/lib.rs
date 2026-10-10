@@ -328,6 +328,14 @@ impl Session {
         self._task.abort();
     }
 
+    /// 主动下线（按引用，供 `Arc<Session>` 调用）：发 Logout 让节点即时移除会话，再关连接。
+    /// 带超时——`route_send` 无超时，节点无响应时不致挂死调用方（如 app 退出路径）。
+    pub async fn disconnect(&self) {
+        let bye = build_gram(GramKind::Logout, self.my_id, Vec::new(), None);
+        let _ = tokio::time::timeout(Duration::from_millis(800), route_send(&self.conn, &bye)).await;
+        self.conn.close(0u32.into(), b"bye");
+    }
+
     /// 作为被调方，等待下一条发给自己的命令（返回请求 gram 与解析后的 Command）。
     pub async fn next_command(&mut self) -> Option<(Gram, Command)> {
         self.commands.recv().await
@@ -545,6 +553,17 @@ impl Session {
         } else {
             Err(ClientError::Other(res.error))
         }
+    }
+
+    /// A：按 id 批量查询在线状态（含跨节点好友）。返回 {hex: "online|away|busy|dnd|offline"}。
+    pub async fn presence_query(&self, ids: &[[u8; 32]]) -> Result<std::collections::HashMap<String, String>, ClientError> {
+        let hexed: Vec<String> = ids.iter().map(|b| b.iter().map(|x| format!("{x:02x}")).collect()).collect();
+        let body = serde_json::json!({ "ids": hexed }).to_string();
+        let params = Any { type_url: "text/plain".to_string(), value: body.into_bytes() };
+        let res = rpc_over(&self.conn, self.my_id, "presence.query", Some(params)).await?;
+        if !res.ok { return Err(ClientError::Other(res.error)); }
+        let raw = res.result.map(|p| p.value).unwrap_or_default();
+        Ok(serde_json::from_slice(&raw).unwrap_or_default())
     }
 
     // ── 频道 / 主题（P4）──

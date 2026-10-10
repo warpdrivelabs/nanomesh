@@ -168,6 +168,8 @@ const CHANNEL_LOG_CAP: usize = 300; // 每频道内存日志上限（回填近�
 /// 在某群主题上收到某节点的消息 ⇒ 该节点此刻订阅并存活于此主题（心跳由成员 home 周期 announce 承载）。
 type GroupLive = DashMap<Vec<u8>, DashMap<Vec<u8>, u64>>;
 const LIVE_TTL_MS: u64 = 12_000; // 存活 TTL：sweep 每 ~3s 发一次心跳，容 3 次丢失
+const PENDING_FWD_TTL_SECS: u64 = 60; // Defect C：冷启动待发转发项最长保留，超时丢弃
+const PENDING_FWD_CAP: usize = 4096;  // Defect C：待发队列上限，防无界堆积
 
 /// 联邦成员发现配置（nmd 透传）。
 pub struct MembershipCfg {
@@ -313,6 +315,8 @@ struct Ctx {
     principals: Arc<Principals>,
     devices: Arc<Devices>,
     revoked: Arc<Revoked>,
+    // Defect C：冷启动待发转发队列 (to, GroupGossip字节, 入队秒)——inbox overlay 0 邻居时暂存，邻居成型后补发。
+    pending_fwd: Arc<std::sync::Mutex<std::collections::VecDeque<(Vec<u8>, Vec<u8>, u64)>>>,
 }
 
 /// 内存实体目录：`entity_id → Entity`，支持 kind 前缀 / 能力 / 属性过滤。
@@ -453,6 +457,8 @@ pub struct Node {
     principals: Arc<Principals>,
     devices: Arc<Devices>,
     revoked: Arc<Revoked>,
+    // Defect C：冷启动待发转发队列 (to, GroupGossip字节, 入队秒)——inbox overlay 0 邻居时暂存，邻居成型后补发。
+    pending_fwd: Arc<std::sync::Mutex<std::collections::VecDeque<(Vec<u8>, Vec<u8>, u64)>>>,
 }
 
 impl Node {
@@ -630,6 +636,7 @@ impl Node {
             principals: Arc::new(DashMap::new()),
             devices,
             revoked,
+            pending_fwd: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         })
     }
 
@@ -659,6 +666,7 @@ impl Node {
             principals: self.principals.clone(),
             devices: self.devices.clone(),
             revoked: self.revoked.clone(),
+            pending_fwd: self.pending_fwd.clone(),
         }
     }
 
@@ -1907,6 +1915,46 @@ impl Node {
             entity.to_vec(),
             PresenceRec { status: ann.status, last_seen: ann.ts, home_node: home.to_vec() },
         );
+    }
+
+    /// Defect C: cold-start pending-forward flush. Every ~2s: re-publish queued DMs whose
+    /// recipient inbox overlay now HAS neighbors; drop items past TTL. Recipient dedups on
+    /// (sender,gram_id), so a re-publish that overlaps the firehose copy is harmless.
+    pub fn spawn_pending_flush(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let ctx = self.ctx();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let items: Vec<(Vec<u8>, Vec<u8>, u64)> = {
+                    let mut q = ctx.pending_fwd.lock().unwrap();
+                    if q.is_empty() { continue; }
+                    q.drain(..).collect()
+                };
+                let now = now_secs();
+                let mut keep: std::collections::VecDeque<(Vec<u8>, Vec<u8>, u64)> = std::collections::VecDeque::new();
+                for (to, bytes, ts) in items {
+                    if now.saturating_sub(ts) > PENDING_FWD_TTL_SECS {
+                        tracing::warn!("pending-forward dropped (TTL expired)");
+                        continue;
+                    }
+                    // inbox overlay formed? re-publish there (private unicast to recipient home).
+                    let _ = ctx.fed.join_inbox(&to, inbox_bootstrap(&to, &ctx)).await; // idempotent
+                    if ctx.fed.inbox_neighbors(&to).await > 0 {
+                        let _ = ctx.fed.publish_inbox(&to, bytes.clone()).await;
+                        // belt-and-suspenders: also re-fire firehose (recipient dedups).
+                        let _ = ctx.group_pub.send(bytes);
+                        tracing::debug!("pending-forward flushed");
+                    } else {
+                        keep.push_back((to, bytes, ts));
+                    }
+                }
+                if !keep.is_empty() {
+                    let mut q = ctx.pending_fwd.lock().unwrap();
+                    for it in keep.into_iter().rev() { q.push_front(it); }
+                    while q.len() > PENDING_FWD_CAP { q.pop_front(); }
+                }
+            }
+        })
     }
 
     /// 后台 presence：周期广播本地在线会话状态；收播他人状态入缓存（TTL 在读时判定）。镜像 spawn_membership。
@@ -3327,7 +3375,16 @@ async fn deliver_direct(gram: &Gram, ctx: &Ctx) {
     if retire && inbox_ok && inbox_has_neighbors {
         tracing::debug!("firehose Direct suppressed (recipient home live on inbox topic)");
     } else {
-        let _ = ctx.group_pub.send(bytes); // 火管（兜底 / 未全迁移时）
+        let _ = ctx.group_pub.send(bytes.clone()); // 火管（兜底 / 未全迁移时）
+    }
+    // Defect C: inbox topic and firehose both cold (0 neighbors) -> publish silently dropped by gossip;
+    // shows as 'just-online first DM lost, works after a bit'. Enqueue; flush task re-publishes once neighbors form.
+    if per_topic && !inbox_has_neighbors {
+        let mut q = ctx.pending_fwd.lock().unwrap();
+        if q.len() < PENDING_FWD_CAP {
+            q.push_back((to.clone(), bytes, now_secs()));
+            tracing::debug!(qlen = q.len(), "pending-forward enqueued (cold overlay)");
+        }
     }
 }
 
@@ -3475,6 +3532,28 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Op
                 );
             }
             (true, None, String::new())
+        }
+        // A：按 id 批量查在线状态——供 app 给「跨节点好友」（不在本地 directory）盖 presence。
+        // params.value = JSON {"ids":["<hex>",...]}；结果 = JSON {"<hex>":"online|away|...|offline"}。
+        // 复用 presence_of 同源（本地会话priority + gossip 缓存 + TTL），节点间 presence 不额外 RPC。
+        "presence.query" => {
+            let ids: Vec<String> = cmd
+                .params
+                .as_ref()
+                .and_then(|p| serde_json::from_slice::<serde_json::Value>(&p.value).ok())
+                .and_then(|v| v.get("ids").and_then(|x| x.as_array()).map(|a| {
+                    a.iter().filter_map(|e| e.as_str().map(|s| s.to_string())).collect()
+                }))
+                .unwrap_or_default();
+            let mut out = serde_json::Map::new();
+            for id_hex in ids.into_iter().take(1024) {
+                if let Some(id) = hex_decode_n::<32>(&id_hex) {
+                    let st = presence_status(&ctx.sessions, &ctx.principals, &ctx.presence, &ctx.status_intent, &id);
+                    out.insert(id_hex, serde_json::Value::String(st));
+                }
+            }
+            let body = serde_json::Value::Object(out).to_string();
+            (true, Some(Any { type_url: "text/plain".into(), value: body.into_bytes() }), String::new())
         }
         // P1：内容寻址 blob —— 存头像等小媒体，档案只带 b3:hash，避免内联撑爆目录/gossip。
         "blob.put" => match cmd.params.as_ref().and_then(|p| BlobPut::decode(p.value.as_slice()).ok()) {

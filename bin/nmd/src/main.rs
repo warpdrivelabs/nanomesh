@@ -460,6 +460,7 @@ async fn main() -> anyhow::Result<()> {
             card,
         });
         node.clone().spawn_presence(m.federation.clone()); // P2：在线状态 gossip + TTL
+        node.clone().spawn_pending_flush(); // Defect C：冷启动待发转发补发（inbox overlay 成型后）
         node.set_per_topic(cfg.federation.per_topic); // F1–F5：[federation] per_topic（缺省开）启停每主题；火管仍双写兜底、存活后退火管
         node.set_pkarr(cfg.dns.url.clone()); // F2：群发现 pkarr relay（配置了 [dns] url 即启用；否则仅火管/home 锚点发现）
         node.clone().spawn_group_sync(m.federation.clone()); // 群联邦：发现 + 消息扇出走 gossip（免 s2s 中继）
