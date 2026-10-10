@@ -112,7 +112,19 @@ async function imStart(myId) {
   ACTIVE = null; DETAIL_ID = null;
   if (window.ListCache) await ListCache.bind(MY_ID);
   const snap = window.ListCache ? ListCache.snapshot() : {};
-  ADDED = (snap.added || []).slice();
+  ADDED = (snap.added || []).slice(); // local cache seed (fast start)
+  // Roster: sync from home node (authoritative, multi-device). Merge: server wins on conflicts.
+  try {
+    const remote = await NM.inv("roster_list", {});
+    if (Array.isArray(remote) && remote.length > 0) {
+      // Build a map of local entries keyed by id for O(1) merge.
+      const localMap = {};
+      ADDED.forEach((e) => { if (e.id) localMap[e.id] = e; });
+      remote.forEach((e) => { if (e.id) localMap[e.id] = e; }); // server wins
+      ADDED = Object.values(localMap);
+      if (window.ListCache) ListCache.put({ added: ADDED });
+    }
+  } catch (_) { /* home node unreachable: proceed with local cache */ }
   CONTACTS = snap.directory || [];
   lastDirSig = dirSig(CONTACTS);
   if (window.Groups && Groups.hydrate) Groups.hydrate(snap.groups || []);
@@ -162,6 +174,16 @@ async function refreshPresence() {
   try {
     const m = await NM.inv("presence_query", { ids });
     if (m && typeof m === "object") { PRESENCE = m; renderPanels(); }
+    // Sync handle for any ADDED contact whose directory entry now has a name.
+    ADDED.forEach((e) => {
+      if (!e.id) return;
+      const c = CONTACTS.find((x) => x.id === e.id);
+      const newHandle = c && c.handle ? c.handle : (c && c.name && c.name.includes("@") ? c.name : "");
+      if (newHandle && newHandle !== (e.handle || "")) {
+        e.handle = newHandle;
+        NM.inv("roster_update", { id: e.id, handle: newHandle }).catch(() => {});
+      }
+    });
   } catch (_) { /* 节点不支持/暂不可达：保留旧值，不打扰 */ }
 }
 window.refreshPresence = refreshPresence;
@@ -383,16 +405,30 @@ function toggleEntityForm() {
   });
   q(".ef-key").focus();
 }
-function addEntity(id, kind, name) {
+async function addEntity(id, kind, name, handle, remark) {
+  handle = handle || ""; remark = remark || "";
+  // Optimistic local update first so UI feels instant.
   ADDED = ADDED.filter((e) => e.id !== id);
-  ADDED.unshift({ id, kind, name });
+  ADDED.unshift({ id, kind, name: name || id.slice(0, 8), handle, remark });
+  if (window.ListCache) ListCache.put({ added: ADDED });
+  // Persist to home node (source of truth for multi-device sync).
+  try {
+    const entry = await NM.inv("roster_add", { id, kind, name: name || id.slice(0, 8), handle, remark });
+    if (entry && entry.id) {
+      // Replace optimistic entry with server-returned canonical entry.
+      ADDED = ADDED.filter((e) => e.id !== id);
+      ADDED.unshift(entry);
+      if (window.ListCache) ListCache.put({ added: ADDED });
+    }
+  } catch (e) { if (window.toast) toast("联系人已添加（离线，下次同步）"); }
   saveAdded();
   renderPanels();
   if (window.toast) toast("已添加到实体目录");
   showEntityDetail(id);
 }
-function removeEntity(id) {
-  ADDED = ADDED.filter((e) => e.id !== id);
+async function removeEntity(id) {
+  ADDED = ADDED.filter((e) => e.id !== id); // optimistic local remove
+  try { await NM.inv("roster_remove", { id }); } catch (_) {}
   saveAdded();
   DETAIL_ID = null;
   renderPanels();

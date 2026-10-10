@@ -1379,7 +1379,44 @@ async fn list_windows_mac(app: AppHandle) -> Result<Vec<Value>, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// 设置本人在线状态（P2）：online / away / busy / dnd。节点据此 gossip 广播，其他端按 TTL 判在线。
+/// 设置本人在线状态（P2）：online / away / busy / dnd。/// Roster — read the caller's contact list from home node.
+#[tauri::command]
+async fn roster_list(state: State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
+    let session = session_of(&state).await?;
+    session.roster_list().await
+        .map(|v| v.into_iter().map(|m| serde_json::json!(m)).collect())
+        .map_err(|e| e.to_string())
+}
+
+/// Roster — add or update one contact.
+#[tauri::command]
+async fn roster_add(state: State<'_, AppState>, id: String, kind: String, name: String,
+    handle: String, remark: String) -> Result<serde_json::Value, String> {
+    let parsed = parse_id(&id)?;
+    let session = session_of(&state).await?;
+    session.roster_add(parsed, &kind, &name, &handle, &remark).await.map_err(|e| e.to_string())
+}
+
+/// Roster — remove one contact.
+#[tauri::command]
+async fn roster_remove(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let parsed = parse_id(&id)?;
+    let session = session_of(&state).await?;
+    session.roster_remove(parsed).await.map_err(|e| e.to_string())
+}
+
+/// Roster — update name / handle / remark of one contact.
+#[tauri::command]
+async fn roster_update(state: State<'_, AppState>, id: String,
+    name: Option<String>, handle: Option<String>, remark: Option<String>)
+    -> Result<serde_json::Value, String> {
+    let parsed = parse_id(&id)?;
+    let session = session_of(&state).await?;
+    session.roster_update(parsed, name.as_deref(), handle.as_deref(), remark.as_deref())
+        .await.map_err(|e| e.to_string())
+}
+
+/// 节点据此 gossip 广播，其他端按 TTL 判在线。
 #[tauri::command]
 async fn presence_set(state: State<'_, AppState>, status: String) -> Result<(), String> {
     let session = session_of(&state).await?;
@@ -2414,6 +2451,10 @@ pub fn run() {
             list_windows,
             capture_window,
             presence_set,
+            roster_list,
+            roster_add,
+            roster_remove,
+            roster_update,
             group_create,
             group_list,
             group_add,

@@ -1405,6 +1405,44 @@ async fn presence_set(state: State<'_, AppState>, status: String) -> Result<(), 
     session.presence_set(status.trim()).await.map_err(|e| e.to_string())
 }
 
+/// Roster — read the caller's contact list from home node.
+#[tauri::command]
+async fn roster_list(state: State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
+    let session = session_of(&state).await?;
+    session.roster_list().await
+        .map(|v| v.into_iter().map(|m| serde_json::json!(m)).collect())
+        .map_err(|e| e.to_string())
+}
+
+/// Roster — add or update one contact.
+#[tauri::command]
+async fn roster_add(state: State<'_, AppState>, id: String, kind: String, name: String,
+    handle: String, remark: String) -> Result<serde_json::Value, String> {
+    let parsed = parse_id(&id)?;
+    let session = session_of(&state).await?;
+    session.roster_add(parsed, &kind, &name, &handle, &remark)
+        .await.map_err(|e| e.to_string())
+}
+
+/// Roster — remove one contact.
+#[tauri::command]
+async fn roster_remove(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let parsed = parse_id(&id)?;
+    let session = session_of(&state).await?;
+    session.roster_remove(parsed).await.map_err(|e| e.to_string())
+}
+
+/// Roster — update name / handle / remark of one contact.
+#[tauri::command]
+async fn roster_update(state: State<'_, AppState>, id: String,
+    name: Option<String>, handle: Option<String>, remark: Option<String>)
+    -> Result<serde_json::Value, String> {
+    let parsed = parse_id(&id)?;
+    let session = session_of(&state).await?;
+    session.roster_update(parsed, name.as_deref(), handle.as_deref(), remark.as_deref())
+        .await.map_err(|e| e.to_string())
+}
+
 /// A：按 id 批量查在线状态（含跨节点好友）。前端刷新时调，盖到所有列表项。
 #[tauri::command]
 async fn presence_query(state: State<'_, AppState>, ids: Vec<String>) -> Result<std::collections::HashMap<String, String>, String> {
@@ -2403,6 +2441,10 @@ pub fn run() {
             capture_window,
             presence_set,
             presence_query,
+            roster_list,
+            roster_add,
+            roster_remove,
+            roster_update,
             group_create,
             group_list,
             group_add,

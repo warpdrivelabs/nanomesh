@@ -28,6 +28,7 @@ const NAME_SECRETS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("name_s
 const GROUP_SECRETS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("group_secrets");
 // 本节点拥有的域名（N1，TOFU）：key = 域名字节，value = 占位（申请时间戳字符串）。
 const DOMAINS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("domains");
+const ROSTER: TableDefinition<&[u8], &[u8]> = TableDefinition::new("roster");
 /// 已登记设备：key = 设备公钥(32)，value = DeviceInfo 编码（证书 + 改名 + 最近在线）。
 const DEVICES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("devices");
 /// 已吊销设备：key = 设备公钥(32)，value = DeviceRevoke 编码。只增不删。
@@ -61,6 +62,7 @@ impl RedbStore {
         {
             wtx.open_table(INBOX).map_err(db_err)?;
             wtx.open_table(ENTITIES).map_err(db_err)?;
+            wtx.open_table(ROSTER).map_err(db_err)?;
             wtx.open_table(GROUPS).map_err(db_err)?;
             wtx.open_table(BLACKLIST).map_err(db_err)?;
             wtx.open_table(PEERS).map_err(db_err)?;
@@ -473,6 +475,46 @@ impl RedbStore {
             if let Ok(id) = <[u8; 32]>::try_from(k.value()) {
                 out.push((id, String::from_utf8_lossy(v.value()).into_owned()));
             }
+        }
+        Ok(out)
+    }
+
+    // ---- Roster: per-account contact list ----
+    // key = account_pubkey(32) ++ entry_id(32), value = RosterEntry JSON.
+
+    /// Write or replace one roster entry.
+    pub fn put_roster(&self, account: &[u8], entry_id: &[u8], json: &str) -> Result<()> {
+        let mut key = Vec::with_capacity(account.len() + entry_id.len());
+        key.extend_from_slice(account); key.extend_from_slice(entry_id);
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        { let mut t = wtx.open_table(ROSTER).map_err(db_err)?;
+          t.insert(key.as_slice(), json.as_bytes()).map_err(db_err)?; }
+        wtx.commit().map_err(db_err)?; Ok(())
+    }
+
+    /// Remove one roster entry (idempotent).
+    pub fn del_roster(&self, account: &[u8], entry_id: &[u8]) -> Result<()> {
+        let mut key = Vec::with_capacity(account.len() + entry_id.len());
+        key.extend_from_slice(account); key.extend_from_slice(entry_id);
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        { let mut t = wtx.open_table(ROSTER).map_err(db_err)?;
+          t.remove(key.as_slice()).map_err(db_err)?; }
+        wtx.commit().map_err(db_err)?; Ok(())
+    }
+
+    /// Return all roster entries for an account as JSON strings.
+    pub fn get_roster_all(&self, account: &[u8]) -> Result<Vec<String>> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(ROSTER).map_err(db_err)?;
+        let lo = account.to_vec();
+        let mut hi = lo.clone();
+        for i in (0..hi.len()).rev() {
+            if hi[i] < 0xFF { hi[i] += 1; break; } else { hi[i] = 0; }
+        }
+        let mut out = Vec::new();
+        for item in t.range::<&[u8]>(lo.as_slice()..hi.as_slice()).map_err(db_err)? {
+            let (_, v) = item.map_err(db_err)?;
+            out.push(String::from_utf8_lossy(v.value()).into_owned());
         }
         Ok(out)
     }

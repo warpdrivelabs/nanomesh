@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use nm_entity::kinds;
+use nm_entity::kinds; 
 use nm_proto::pb::PersonProfile;
 use nm_proto::GramKind;
 
