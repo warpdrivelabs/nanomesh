@@ -233,6 +233,7 @@
   function retitle(key, title, ico) { const t = find(key); if (t) { if (title != null) t.title = title; if (ico != null) t.ico = ico; renderStrip(); } }
 
   function syncSideLists() {
+    if (window.imOnTabChange) imOnTabChange();
     if (window.Groups && Groups.syncSelection) Groups.syncSelection();
     if (window.Channels && Channels.syncSelection) Channels.syncSelection();
   }

@@ -51,8 +51,10 @@
     color:var(--muted);position:relative;background:transparent}
   .act:hover{background:var(--hover);color:var(--ink)}
   .act.active{color:var(--aqua);background:var(--accent-soft)}
-  .act .badge{position:absolute;top:2px;right:2px;min-width:16px;height:16px;padding:0 3px;border-radius:999px;
-    background:var(--red);color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .act .badge{position:absolute;top:-2px;right:-4px;min-width:16px;height:16px;padding:0 4px;border-radius:999px;
+    background:var(--red);color:#fff;font-size:10px;font-weight:700;line-height:16px;
+    display:flex;align-items:center;justify-content:center;box-sizing:border-box;pointer-events:none;z-index:1}
+  .act .badge.badge-lg{min-width:22px;padding:0 3px;font-size:9px;letter-spacing:-0.02em}
   .act-sp{flex:1}
   /* 活动栏底部 cmx 按钮（图片） */
   .cmx-act{padding:0;overflow:hidden}
