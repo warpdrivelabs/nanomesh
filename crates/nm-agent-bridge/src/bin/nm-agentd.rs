@@ -105,7 +105,9 @@ async fn main() -> anyhow::Result<()> {
     // 连节点。client 必须存活到进程结束——Session 只持 conn，client 持 iroh endpoint。
     // addr 保留所有权供重连循环复用（每次 online 接受 clone）。
     let addr = nm_transport::addr_from_string(&args.node)?;
-    let client = nm_client::Client::bind_local(seed).await?;
+    // N0 预设（n0 公共中继 + DNS/pkarr 发现）：按公钥发现远程 home node、穿透 NAT。
+    // （原 bind_local=Infra::Local/Minimal，无中继无发现，仅同网直连——连不上远程服务器。）
+    let client = nm_client::Client::bind(seed).await?;
     let p2p = client.online(addr.clone()).await?;
 
     // 注册为 agent.assistant（presence；backend 非空以过 validate）。

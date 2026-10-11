@@ -61,7 +61,9 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let addr = nm_transport::addr_from_string(&args.node)?;
-    let client = nm_client::Client::bind_local([args.seed; 32]).await?;
+    // N0 预设（n0 公共中继 + DNS/pkarr 发现）：按公钥发现远程 home node、穿透 NAT。
+    // （原 bind_local=Infra::Local/Minimal，无中继无发现，仅同网直连——连不上远程服务器。）
+    let client = nm_client::Client::bind([args.seed; 32]).await?;
     let mut sess = client.online(addr).await?;
 
     // 发现标签（§13.2）：model / api / status（+ 可选 gpu/region）。
