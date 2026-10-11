@@ -103,9 +103,10 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // 连节点。client 必须存活到进程结束——Session 只持 conn，client 持 iroh endpoint。
+    // addr 保留所有权供重连循环复用（每次 online 接受 clone）。
     let addr = nm_transport::addr_from_string(&args.node)?;
     let client = nm_client::Client::bind_local(seed).await?;
-    let p2p = client.online(addr).await?;
+    let p2p = client.online(addr.clone()).await?;
 
     // 注册为 agent.assistant（presence；backend 非空以过 validate）。
     let mut attrs = HashMap::new();
@@ -140,16 +141,56 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // serve 模式：把本进程变成服务他人的 P2P agent bot（收 DM → 回合 → 回包）。
+    // 断线后自动重连：serve() 在 inbox channel 关闭（QUIC 连接断开）时返回，
+    // 此时重新 online() + 重注册 + 重找 provider，再次进入 serve loop，直到 Ctrl-C。
     let sys_opt = if args.system.is_empty() { None } else { Some(args.system.as_str()) };
     if args.serve {
         eprintln!(
             "nm-agentd: serve 模式已就绪\n  entity_id (完整): {}\n  别人向此 id 发消息即可（Ctrl-C 退出）。",
             hex_full(&client.id_bytes())
         );
-        nm_agent_bridge::serve::serve(p2p, provider_id, &args.model, sys_opt)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-        return Ok(());
+        // 首次连接已在上方建立（p2p + provider_id），直接进循环。
+        // 循环结构：先 serve（消耗 session），serve 退出后重连拿到新 session，再循环顶部继续。
+        let mut next_p2p = Some(p2p);
+        let mut cur_provider = provider_id;
+        let mut backoff = Duration::from_secs(2);
+        let addr = addr; // addr 不再移走，只 clone
+        loop {
+            // 取出本轮的 session（首次来自上方建立，后续来自重连）。
+            let cur_p2p = next_p2p.take().expect("next_p2p always set before loop top");
+            match nm_agent_bridge::serve::serve(cur_p2p, cur_provider, &args.model, sys_opt).await {
+                Ok(()) => eprintln!("nm-agentd: serve loop 退出（连接断开），{} 秒后重连…", backoff.as_secs()),
+                Err(e) => eprintln!("nm-agentd: serve 出错: {e}，{} 秒后重连…", backoff.as_secs()),
+            }
+            // 重连：睡一下，重新 online + 注册 + 找 provider，成功后放入 next_p2p。
+            loop {
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(30));
+                let new_p2p = match client.online(addr.clone()).await {
+                    Ok(s) => s,
+                    Err(e) => { eprintln!("nm-agentd: 重连失败: {e}，继续等待…"); continue; }
+                };
+                let mut attrs = HashMap::new();
+                attrs.insert("model".to_string(), args.model.clone());
+                if let Err(e) = new_p2p.register_as::<kinds::AgentAssistant>(
+                    &AgentProfile { backend: "nmspace-p2p".into(), ..Default::default() },
+                    &args.name,
+                    attrs,
+                ).await {
+                    eprintln!("nm-agentd: 重注册失败: {e}，继续等待…"); continue;
+                }
+                let providers = new_p2p.find_model_providers(Some(&args.model)).await.unwrap_or_default();
+                if let Some(prov) = providers.first() {
+                    if let Ok(pid) = <[u8; 32]>::try_from(prov.entity_id.clone()) {
+                        cur_provider = pid;
+                    }
+                }
+                next_p2p = Some(new_p2p);
+                backoff = Duration::from_secs(2);
+                eprintln!("nm-agentd: 重连成功，继续 serve…");
+                break;
+            }
+        }
     }
 
     // 本地模式：组装 P2P 模型缝（driver 独占 p2p 会话）→ cmx-agent Agent（工具/守卫/审批走内核默认）。
