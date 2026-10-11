@@ -33,6 +33,21 @@ struct Conn {
     _client: Client, // 保活 endpoint
     session: Arc<Session>,
     my_id: [u8; 32],
+    /// 连接世代：每次（重）连接 +1。供发送时"单飞重连"判重——并发发送只触发一次真正重连。
+    conn_gen: u64,
+}
+
+/// connect 的入参快照，供待机唤醒后"发送失败→自动重连"复用（不缓存 seed/cert：
+/// 重连经 devices::dial_account 从 vault 现解 seed + 现取 device cert，尊重锁库安全模型）。
+#[derive(Clone, Default)]
+struct ConnectArgs {
+    user: String,
+    mode: String,
+    node: String,
+    display_name: String,
+    relay_urls: Vec<String>,
+    pkarr_url: Option<String>,
+    dns_origin: Option<String>,
 }
 
 #[derive(Default)]
@@ -44,6 +59,12 @@ struct AppState {
     /// 前端就绪闸门：连接后消息事件循环先等它，直到 `imStart` 完成（监听器+用户+本地库就绪）才放水，
     /// 避免离线补投的消息早于前端监听器而丢失。每次 connect 重置。
     im_ready: Mutex<Option<oneshot::Sender<()>>>,
+    /// 最近一次成功 connect 的入参，供待机唤醒后自动重连复用。
+    last_connect: Mutex<Option<ConnectArgs>>,
+    /// 单飞守卫：并发发送同时判死时，只有一个协程真正拨号重连，其余复用结果。
+    reconnect_lock: Mutex<()>,
+    /// 供重连 helper 在任意位置取 AppHandle（setup 时写入）。
+    app_handle: std::sync::OnceLock<AppHandle>,
 }
 
 fn hex(b: &[u8]) -> String {
@@ -757,12 +778,16 @@ fn load_identity_seed(app: &AppHandle, vk: &[u8; 32], pubkey: &str) -> Result<[u
 }
 
 /// 完成会话建立：注册为 person、起消息推送循环、存入状态，返回自己的 id(hex)。
+/// `wait_ready`：首连 true（保留 im_ready 8s 门控，防登录瞬间补投的离线消息早于前端监听器丢失）；
+/// 重连 false（前端监听器早已在，立即放水，不白等 8s）。`gen`：写入 Conn 的连接世代，供单飞重连判重。
 async fn finish_session(
     app: &AppHandle,
     state: &State<'_, AppState>,
     client: Client,
     mut session: Session,
     display_name: &str,
+    wait_ready: bool,
+    conn_gen: u64,
 ) -> Result<String, String> {
     session
         .register_as::<nm_entity::kinds::Person>(
@@ -780,12 +805,19 @@ async fn finish_session(
     let session = Arc::new(session);
     let watch = session.clone();
     let apph = app.clone();
-    // 前端就绪闸门：imStart 完成后调用 im_ready 放水。避免节点在「连接建立」瞬间补投的离线消息
-    // 早于前端监听器而被丢弃（登录后看不到离线消息的根因）。最多等 8s 兜底，前端异常也不永久卡住。
-    let (ready_tx, ready_rx) = oneshot::channel::<()>();
-    *state.im_ready.lock().await = Some(ready_tx);
+    // 前端就绪闸门：首连等 imStart 完成后调用 im_ready 放水，避免节点在「连接建立」瞬间补投的
+    // 离线消息早于前端监听器而被丢弃。最多等 8s 兜底。重连时前端监听器早在，跳过门控立即放水。
+    let ready_rx = if wait_ready {
+        let (ready_tx, ready_rx) = oneshot::channel::<()>();
+        *state.im_ready.lock().await = Some(ready_tx);
+        Some(ready_rx)
+    } else {
+        None
+    };
     async_runtime::spawn(async move {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(8), ready_rx).await;
+        if let Some(ready_rx) = ready_rx {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(8), ready_rx).await;
+        }
         while let Some(gram) = inbox.recv().await {
             if let Some(p) = gram.payload.as_ref().filter(|p| p.type_url.starts_with(pair::PREFIX)) {
                 pairing::on_old_side(&apph, &p.type_url, &p.value, &gram.sender).await;
@@ -826,6 +858,7 @@ async fn finish_session(
         _client: client,
         session,
         my_id,
+        conn_gen,
     });
     Ok(hex(&my_id))
 }
@@ -852,9 +885,135 @@ async fn connect(
     if user.is_empty() {
         return Err("请先选择用户身份".into());
     }
+    // 存 AppHandle（供重连 helper 在任意位置取），缓存入参供待机唤醒后自动重连。
+    let _ = state.app_handle.set(app.clone());
+    let args = ConnectArgs {
+        user: user.to_string(),
+        mode: mode.clone(),
+        node: node.clone(),
+        display_name: display_name.clone(),
+        relay_urls: relay_urls.clone(),
+        pkarr_url: pkarr_url.clone(),
+        dns_origin: dns_origin.clone(),
+    };
     let (client, session) =
         devices::dial_account(&app, &vk, user, &mode, &node, relay_urls, pkarr_url, dns_origin).await?;
-    finish_session(&app, &state, client, session, &display_name).await
+    let out = finish_session(&app, &state, client, session, &display_name, true, 0).await?;
+    *state.last_connect.lock().await = Some(args);
+    Ok(out)
+}
+
+/// 发送短超时：待机唤醒后 QUIC 假死时，send 会一直等到底层 idle timeout(10s) 才报错；
+/// 用 5s 超时提前判死 → 触发重连，而非让用户干等。
+const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// 判断一次失败是否意味着"连接死了、该重连"（而非业务错误如目标非法/节点拒绝）。
+fn looks_dead(session: &Session, err: &nm_client::ClientError) -> bool {
+    session.close_reason().is_some() || matches!(err, nm_client::ClientError::Timeout)
+}
+
+/// 发送包装：短超时执行一次；超时或连接判死 → 自动重连一次 → 用新 session 重发一次。
+/// 业务错误（非连接问题）直接返回，不触发重连。`op` 是"给一个 &Session 执行一次发送"的闭包。
+async fn send_with_retry<T, F, Fut>(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    op: F,
+) -> Result<T, String>
+where
+    F: Fn(Arc<Session>) -> Fut,
+    Fut: std::future::Future<Output = Result<T, nm_client::ClientError>>,
+{
+    // 快照当前 session + gen。
+    let (session, cur_gen) = {
+        let g = state.conn.lock().await;
+        let c = g.as_ref().ok_or("尚未连接")?;
+        (c.session.clone(), c.conn_gen)
+    };
+
+    // 第一次尝试。
+    match tokio::time::timeout(SEND_TIMEOUT, op(session.clone())).await {
+        Ok(Ok(v)) => return Ok(v),
+        Ok(Err(e)) if !looks_dead(&session, &e) => return Err(e.to_string()), // 业务错误，不重连
+        _ => {} // 超时 或 连接死 → 重连
+    }
+
+    // 重连（单飞 + gen 判重），再用新 session 重发一次。
+    reconnect(app, state, cur_gen).await?;
+    let s2 = session_of(state).await?;
+    match tokio::time::timeout(SEND_TIMEOUT, op(s2)).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("发送失败：重连后仍无法送达".into()),
+    }
+}
+
+/// 自动重连：用缓存的 connect 入参 + vault 身份重新拨号，替换当前死连接。
+/// 单飞——并发发送同时触发时只有一个真正拨号，其余发现 gen 已前进即复用。
+/// 先拨号成功再换手：拨号失败时旧（死）Conn 原样保留，不清成 None。
+async fn reconnect(app: &AppHandle, state: &State<'_, AppState>, failed_gen: u64) -> Result<(), String> {
+    let _guard = state.reconnect_lock.lock().await; // 单飞守卫
+
+    // 别人已经重连过了（gen 前进）→ 直接复用，不再拨号。
+    {
+        let g = state.conn.lock().await;
+        if let Some(c) = g.as_ref() {
+            if c.conn_gen != failed_gen {
+                return Ok(());
+            }
+        }
+    }
+
+    let args = state
+        .last_connect
+        .lock()
+        .await
+        .clone()
+        .ok_or("无重连上下文（尚未成功连接过）")?;
+    let vk = vk_of(state)?; // 库已锁 → 直接失败，提示解锁
+
+    let _ = app.emit("core://event", json!({ "type": "reconnecting" }));
+
+    // 先拨号（12s 兜底）成功，再换手。
+    let dialed = tokio::time::timeout(
+        std::time::Duration::from_secs(12),
+        devices::dial_account(
+            app,
+            &vk,
+            &args.user,
+            &args.mode,
+            &args.node,
+            args.relay_urls.clone(),
+            args.pkarr_url.clone(),
+            args.dns_origin.clone(),
+        ),
+    )
+    .await;
+    let (client, session) = match dialed {
+        Ok(Ok(cs)) => cs,
+        _ => {
+            let _ = app.emit("core://event", json!({ "type": "reconnect_failed" }));
+            return Err("重连失败，请检查网络".into());
+        }
+    };
+
+    // gram_id 续号：从旧 session 高水位接着走，避免被节点 SeenGrams 误去重（群/跨节点消息静默丢失）。
+    let old = state.conn.lock().await.take();
+    if let Some(old) = &old {
+        session.seed_corr(old.session.current_corr());
+    }
+
+    // 装配新 session（重连跳过 im_ready 门控，立即放水）；gen+1。
+    let new_gen = failed_gen.wrapping_add(1);
+    finish_session(app, state, client, session, &args.display_name, false, new_gen).await?;
+
+    // 关旧连接 → 旧收流任务退出 → 旧 inbox 发送端 drop → 旧事件循环 recv()=None 退出，不双投。
+    // disconnect(&self) 自带 800ms 超时，死连接也不会挂住。
+    if let Some(old) = old {
+        old.session.disconnect().await;
+    }
+
+    let _ = app.emit("core://event", json!({ "type": "reconnected" }));
+    Ok(())
 }
 
 /// 前端在 `imStart` 完成（已注册 core://event 监听、已设 MY_ID、本地库就绪）后调用，放开消息事件循环，
@@ -962,11 +1121,13 @@ async fn session_of(state: &State<'_, AppState>) -> Result<Arc<Session>, String>
 }
 
 #[tauri::command]
-async fn send_to(state: State<'_, AppState>, target: String, text: String) -> Result<(), String> {
-    let id = parse_id(&target)?;
-    let session = session_of(&state).await?;
-    session.send_to(id, &text).await.map_err(|e| e.to_string())?;
-    Ok(())
+async fn send_to(app: AppHandle, state: State<'_, AppState>, target: String, text: String) -> Result<(), String> {
+    let id = parse_id(&target)?; // 业务校验先做，错了直接回，不触发重连
+    send_with_retry(&app, &state, move |s| {
+        let text = text.clone();
+        async move { s.send_to(id, &text).await.map(|_| ()) }
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1267,9 +1428,13 @@ fn simple_key(s: &str) -> u64 {
 
 /// 私聊或群发一条富消息。`body` 是 nmspace.v1/chat 的 JSON。
 #[tauri::command]
-async fn send_rich(state: State<'_, AppState>, target: String, body: String, group: bool) -> Result<(), String> {
-    let session = session_of(&state).await?;
-    session.send_rich(parse_id(&target)?, &body, group).await.map(|_| ()).map_err(|e| e.to_string())
+async fn send_rich(app: AppHandle, state: State<'_, AppState>, target: String, body: String, group: bool) -> Result<(), String> {
+    let id = parse_id(&target)?;
+    send_with_retry(&app, &state, move |s| {
+        let body = body.clone();
+        async move { s.send_rich(id, &body, group).await.map(|_| ()) }
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1400,9 +1565,13 @@ async fn list_windows_mac(app: AppHandle) -> Result<Vec<Value>, String> {
 
 /// 设置本人在线状态（P2）：online / away / busy / dnd。节点据此 gossip 广播，其他端按 TTL 判在线。
 #[tauri::command]
-async fn presence_set(state: State<'_, AppState>, status: String) -> Result<(), String> {
-    let session = session_of(&state).await?;
-    session.presence_set(status.trim()).await.map_err(|e| e.to_string())
+async fn presence_set(app: AppHandle, state: State<'_, AppState>, status: String) -> Result<(), String> {
+    let status = status.trim().to_string();
+    send_with_retry(&app, &state, move |s| {
+        let status = status.clone();
+        async move { s.presence_set(&status).await }
+    })
+    .await
 }
 
 /// Roster — read the caller's contact list from home node.
@@ -1544,9 +1713,13 @@ async fn group_leave(state: State<'_, AppState>, group_id: String) -> Result<(),
 }
 
 #[tauri::command]
-async fn send_group(state: State<'_, AppState>, group_id: String, text: String) -> Result<(), String> {
-    let session = session_of(&state).await?;
-    session.send_group(parse_id(&group_id)?, &text).await.map(|_| ()).map_err(|e| e.to_string())
+async fn send_group(app: AppHandle, state: State<'_, AppState>, group_id: String, text: String) -> Result<(), String> {
+    let gid = parse_id(&group_id)?;
+    send_with_retry(&app, &state, move |s| {
+        let text = text.clone();
+        async move { s.send_group(gid, &text).await.map(|_| ()) }
+    })
+    .await
 }
 
 // ── 频道 / 主题（P4）──
@@ -1603,9 +1776,13 @@ async fn channel_unsub(state: State<'_, AppState>, channel_id: String) -> Result
 }
 
 #[tauri::command]
-async fn channel_publish(state: State<'_, AppState>, channel_id: String, body: String) -> Result<(), String> {
-    let session = session_of(&state).await?;
-    session.channel_publish(parse_id(&channel_id)?, &body).await.map_err(|e| e.to_string())
+async fn channel_publish(app: AppHandle, state: State<'_, AppState>, channel_id: String, body: String) -> Result<(), String> {
+    let cid = parse_id(&channel_id)?;
+    send_with_retry(&app, &state, move |s| {
+        let body = body.clone();
+        async move { s.channel_publish(cid, &body).await }
+    })
+    .await
 }
 
 #[tauri::command]

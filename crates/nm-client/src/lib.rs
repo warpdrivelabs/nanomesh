@@ -271,6 +271,18 @@ impl Session {
         self.conn.close_reason().map(|r| r.to_string())
     }
 
+    /// 当前 gram_id 计数（下一条发送将用的值）。供重连时把高水位续到新 session，
+    /// 避免新 session 从 1 重置后与节点 `SeenGrams`（按 (sender,gram_id) 去重、无 TTL）里
+    /// 的旧值相撞而被静默丢弃（群消息 / 跨节点私聊）。
+    pub fn current_corr(&self) -> u64 {
+        self.next_corr.load(Ordering::SeqCst)
+    }
+
+    /// 把 gram_id 计数续到指定高水位（重连后调用，接着旧 session 的号往下发）。
+    pub fn seed_corr(&self, v: u64) {
+        self.next_corr.store(v, Ordering::SeqCst);
+    }
+
     // ---- 多设备 ----
 
     pub async fn device_list(&self) -> Result<Vec<DeviceInfo>, ClientError> {

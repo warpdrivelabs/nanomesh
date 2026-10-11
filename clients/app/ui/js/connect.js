@@ -20,6 +20,14 @@ function paintHomeNode() {
   const dot = document.getElementById("sb-dot");
   const host = document.getElementById("sb-node");
   if (!text) return;
+  // 重连进行中：状态行显示"重连中…" + 圆点转黄脉冲，盖过常规渲染。
+  if (window._nmReconnecting) {
+    text.textContent = "重连中…";
+    if (dot) { dot.classList.remove("on"); dot.classList.add("reconnecting"); }
+    if (host) host.title = "连接已断，正在自动重连";
+    return;
+  }
+  if (dot) dot.classList.remove("reconnecting");
   const svc = window.CURRENT_SVC;
   if (!svc || !svc.node) {
     text.textContent = "Home Node 未连接";
@@ -36,6 +44,13 @@ function paintHomeNode() {
   if (host) host.title = [pk || String(svc.node), short].filter(Boolean).join("\n");
 }
 window.paintHomeNode = paintHomeNode;
+
+/// 设置"重连中"态并重绘状态行。由 im.js 的 onCoreEvent 收到后端 reconnecting/reconnected 事件时调。
+function setReconnecting(on) {
+  window._nmReconnecting = !!on;
+  paintHomeNode();
+}
+window.setReconnecting = setReconnecting;
 window.showLoginView = showLoginView;
 window.showMainView = showMainView;
 

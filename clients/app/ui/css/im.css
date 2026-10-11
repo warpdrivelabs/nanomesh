@@ -429,6 +429,10 @@ main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .sb-node-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sb-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
 .sb-dot.on { background: var(--green); }
+/* 重连中：黄色脉冲圆点（状态行"重连中…"同步显示）。 */
+.sb-dot.reconnecting { background: #f59e0b; animation: sb-dot-pulse 1s ease-in-out infinite; }
+@keyframes sb-dot-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+@media (prefers-reduced-motion: reduce) { .sb-dot.reconnecting { animation: none; opacity: 0.8; } }
 .statusbar .tb-marquee { flex: 1 1 0; }
 .statusbar .tb-btn { flex: none; }
 .conv { flex: 1; min-height: 0; display: flex; flex-direction: column; }

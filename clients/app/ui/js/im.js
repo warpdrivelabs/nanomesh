@@ -6,9 +6,21 @@ let CONTACTS = [];              // 当前身份会话所见的发现实体 [{id,
 let ADDED = [];                 // 当前身份手动添加的实体 [{id,kind,name}]
 let PRESENCE = {};              // A：id -> 在线状态（含跨节点好友），presence_query 批量刷新
 let CONVOS = {};                // 当前身份的会话：id -> [{id,from,body,ts}]
-let ACTIVE = null;              // 当前会话对端 id（消息视图高亮）
+let ACTIVE = null;              // 当前打开的聊天对端 id（与主区聊天框一致；关闭 tab 后清空）
 let DETAIL_ID = null;          // 当前查看详情的实体 id（实体目录高亮）
 let UNREAD = {};                // 当前身份的未读：id -> 数
+/** 主区当前正在显示的聊天对端：以 tab 为准，不用列表选中残留。 */
+function viewingPeer() {
+  if (window.Tabs) {
+    const k = Tabs.active();
+    if (typeof k === "string" && k.startsWith("c:")) return k.slice(2);
+    return null;
+  }
+  return ACTIVE;
+}
+function isChatOpen(id) {
+  return !!id && viewingPeer() === id;
+}
 const ENT_FOLDED = new Set();  // 实体目录已收起的类型
 let _coreUnlisten = null;
 let SHOW_MEMBERS = true;
@@ -66,9 +78,17 @@ window.imBackfill = function (convId, msgs) {
   if (!list.length || !window.ChatLog) return;
   ChatLog.appendMany(convId, list).then((n) => {
     if (!n) return;
-    if (convId === ACTIVE) openView(convId, !!(window.Groups && Groups.byId(convId)) || !!(window.Channels && Channels.byId(convId)));
+    if (isChatOpen(convId)) openView(convId, !!(window.Groups && Groups.byId(convId)) || !!(window.Channels && Channels.byId(convId)));
     renderPanels();
   });
+};
+
+/** tab 切换/关闭后：把 ACTIVE 对齐到当前聊天框（关闭后不再当作「正在阅读」）。 */
+window.imOnTabChange = function () {
+  const peer = viewingPeer();
+  if (ACTIVE === peer) return;
+  ACTIVE = peer;
+  renderPanels();
 };
 
 function saveAdded() {
@@ -96,7 +116,39 @@ function slimMsg(m) {
 }
 window.slimMsg = slimMsg;
 let unreadTimer = null;
+/** 未读数展示：0 不显示；>99 显示「99+」表示太多。 */
+function formatUnread(n) {
+  n = Number(n) || 0;
+  if (n <= 0) return "";
+  if (n > 99) return "99+";
+  return String(n);
+}
+function unreadTotal() {
+  let n = 0;
+  for (const id of Object.keys(UNREAD || {})) n += Number(UNREAD[id]) || 0;
+  return n;
+}
+/** 左侧活动栏「消息」图标上的汇总未读气泡。 */
+function paintActUnread() {
+  const el = document.getElementById("act-im");
+  if (!el) return;
+  let badge = el.querySelector(".badge");
+  const label = formatUnread(unreadTotal());
+  if (!label) {
+    if (badge) badge.remove();
+    return;
+  }
+  if (!badge) {
+    badge = document.createElement("span");
+    badge.className = "badge";
+    badge.setAttribute("aria-hidden", "true");
+    el.appendChild(badge);
+  }
+  badge.textContent = label;
+  badge.classList.toggle("badge-lg", label.length > 2);
+}
 function scheduleUnread() {
+  paintActUnread();
   clearTimeout(unreadTimer);
   unreadTimer = setTimeout(() => { if (window.ChatLog) ChatLog.setUnread(UNREAD); }, 200);
 }
@@ -188,7 +240,7 @@ async function refreshPresence() {
 }
 window.refreshPresence = refreshPresence;
 
-function renderPanels() { renderConversations(); renderEntities(); renderAgents(); if (window.Tray) Tray.sync(); }
+function renderPanels() { renderConversations(); renderEntities(); renderAgents(); paintActUnread(); if (window.Tray) Tray.sync(); }
 
 function bindPanelUI() {
   const s1 = document.getElementById("im-search-input");
@@ -297,11 +349,13 @@ function itemHtml(c, sub, unread, sel, opts) {
   const dot = (window.Profile && c.presence) ? Profile.presenceDot(c.presence, 11) : "";
   const face = roomFace(c, 40, dot);
   const time = opts.time ? `<span class="tm">${escapeHtml(opts.time)}</span>` : "";
+  const u = formatUnread(unread);
+  const badge = u ? `<span class="unread">${u}</span>` : "";
   return `<div class="im-item ${c.id === sel ? "on" : ""}" data-id="${c.id}" title="${escapeHtml(c.id)}">
     ${face}
     <span class="mid">
       <span class="r1"><span class="nm">${escapeHtml(c.name || shortId(c.id))}</span>${time}${inlineHandle && c.handle ? `<span class="nm-handle nm-handle--inline">${escapeHtml(c.handle)}</span>` : ""}</span>
-      <span class="r2"><span class="msg">${sub || ""}</span>${unread ? `<span class="unread">${unread}</span>` : ""}</span>
+      <span class="r2"><span class="msg">${sub || ""}</span>${badge}</span>
     </span></div>`;
 }
 function roomFace(c, size, extra) {
@@ -702,14 +756,19 @@ async function sendMsg(text) {
   if (!text || !ACTIVE) return;
   const isGroup = !!(window.Groups && Groups.byId(ACTIVE));
   const isChannel = !isGroup && !!(window.Channels && Channels.byId(ACTIVE));
-  if (isChannel) {
-    await NM.inv("channel_publish", { channelId: ACTIVE, body: text }); // 节点会回投给本地订阅者(含自己)，不做乐观插入以免重复
-  } else if (isGroup) {
-    await NM.inv("send_group", { groupId: ACTIVE, text });
-    pushMsg(ACTIVE, { id: "l" + Date.now(), from: MY_ID, body: text, ts: Date.now(), group: true, to: ACTIVE });
-  } else {
-    await NM.inv("send_to", { target: ACTIVE, text });
-    pushMsg(ACTIVE, { id: "l" + Date.now(), from: MY_ID, body: text, ts: Date.now(), to: ACTIVE });
+  try {
+    if (isChannel) {
+      await NM.inv("channel_publish", { channelId: ACTIVE, body: text }); // 节点会回投给本地订阅者(含自己)，不做乐观插入以免重复
+    } else if (isGroup) {
+      await NM.inv("send_group", { groupId: ACTIVE, text });
+      pushMsg(ACTIVE, { id: "l" + Date.now(), from: MY_ID, body: text, ts: Date.now(), group: true, to: ACTIVE });
+    } else {
+      await NM.inv("send_to", { target: ACTIVE, text });
+      pushMsg(ACTIVE, { id: "l" + Date.now(), from: MY_ID, body: text, ts: Date.now(), to: ACTIVE });
+    }
+  } catch (e) {
+    // 发送失败（含重连后仍失败）：不乐观回显，避免幽灵本地消息；提示用户。
+    if (window.toast) toast("发送失败：" + (e && e.message ? e.message : e));
   }
 }
 
@@ -717,14 +776,18 @@ async function sendRich(media) {
   if (!ACTIVE || !window.Composer) return;
   const isGroup = !!(window.Groups && Groups.byId(ACTIVE));
   const isChannel = !isGroup && !!(window.Channels && Channels.byId(ACTIVE));
-  if (isChannel) {
-    await NM.inv("channel_publish", { channelId: ACTIVE, body: Composer.channelBody(media) });
-  } else {
-    await NM.inv("send_rich", { target: ACTIVE, body: Composer.encode(media), group: isGroup });
-    pushMsg(ACTIVE, {
-      id: "l" + Date.now(), from: MY_ID, to: ACTIVE, ts: Date.now(), group: isGroup,
-      typeUrl: "nmspace.v1/chat", body: Composer.encode(media),
-    });
+  try {
+    if (isChannel) {
+      await NM.inv("channel_publish", { channelId: ACTIVE, body: Composer.channelBody(media) });
+    } else {
+      await NM.inv("send_rich", { target: ACTIVE, body: Composer.encode(media), group: isGroup });
+      pushMsg(ACTIVE, {
+        id: "l" + Date.now(), from: MY_ID, to: ACTIVE, ts: Date.now(), group: isGroup,
+        typeUrl: "nmspace.v1/chat", body: Composer.encode(media),
+      });
+    }
+  } catch (e) {
+    if (window.toast) toast("发送失败：" + (e && e.message ? e.message : e));
   }
 }
 
@@ -733,7 +796,7 @@ window.imSnapshot = () => {
   const convos = {};
   const index = window.ChatLog ? (ChatLog.index().convos || {}) : {};
   for (const id of Object.keys(index)) if (index[id] && index[id].last) convos[id] = [index[id].last];
-  return { myId: MY_ID, unread: UNREAD, convos, active: ACTIVE };
+  return { myId: MY_ID, unread: UNREAD, convos, active: viewingPeer() };
 };
 window.imOpen = function (id) {
   if (!id || !MY_ID) return;
@@ -794,11 +857,11 @@ function handleAgentDelta(m) {
   if (seq < st.maxSeq) return;                         // 乱序旧帧丢弃（累计全文，大 seq 为准）
   st.maxSeq = seq;
   if (typeof d.text === "string") st.text = d.text;
-  if (peer === ACTIVE) growStreamBubble(sid, peer, st.text);
+  if (isChatOpen(peer)) growStreamBubble(sid, peer, st.text);
   if (!d.done) return;
   delete STREAMS[sid];
   const full = { id: sid, from: peer, to: MY_ID, body: st.text, ts: Date.now(), typeUrl: "" };
-  if (peer === ACTIVE) {
+  if (isChatOpen(peer)) {
     // 气泡已在视图里；落库一次（ChatLog 按 id 去重）+ 刷新会话列表预览。
     if (window.ChatLog) ChatLog.append(peer, window.Composer ? Composer.absorb(full) : full);
     renderPanels();
@@ -815,13 +878,33 @@ function handleAgentDelta(m) {
 }
 
 function onCoreEvent(ev) {
-  if (!ev || ev.type !== "message" || !ev.msg) return;
+  if (!ev) return;
+  // 重连生命周期：后端发送失败→自动重连时 emit 这些，驱动状态行进度提示。
+  if (ev.type === "reconnecting") {
+    if (window.setReconnecting) setReconnecting(true);
+    if (window.toast) toast("连接已断，正在重连…");
+    return;
+  }
+  if (ev.type === "reconnected") {
+    if (window.setReconnecting) setReconnecting(false);
+    if (window.paintHomeNode) paintHomeNode();
+    if (window.toast) toast("已重连");
+    return;
+  }
+  if (ev.type === "reconnect_failed") {
+    if (window.setReconnecting) setReconnecting(false);
+    if (window.paintHomeNode) paintHomeNode();
+    if (window.toast) toast("重连失败，请检查网络");
+    return;
+  }
+  if (ev.type !== "message" || !ev.msg) return;
   const m = ev.msg;
   if (m.typeUrl === AGENT_DELTA_TYPE) { handleAgentDelta(m); return; }
   const mine = m.from === MY_ID;
   const key = (m.group || m.channel || mine) ? m.to : m.from;
   pushMsg(key, m).then((fresh) => {
-    const seen = key === ACTIVE && (!window.Tray || Tray.focused());
+    // 「已读」只看主区是否正在显示该聊天框，不看消息列表残留选中。
+    const seen = isChatOpen(key) && (!window.Tray || Tray.focused());
     if (fresh && !mine && !seen) {
       UNREAD[key] = (UNREAD[key] || 0) + 1;
       scheduleUnread();
@@ -836,7 +919,7 @@ async function pushMsg(peer, m) {
   if (!window.ChatLog) return false;
   const stored = await ChatLog.append(peer, m);
   if (!stored) return false;
-  if (peer === ACTIVE) {
+  if (isChatOpen(peer)) {
     const coversTail = VIEW.start + VIEW.rows.length >= VIEW.total;
     VIEW.total = (ChatLog.meta(peer).count || VIEW.total + 1);
     if (coversTail) {
@@ -856,6 +939,7 @@ async function imDisconnect() {
   try { await NM.inv("disconnect"); } catch (_) {}
   MY_ID = ""; CONTACTS = []; ADDED = []; PRESENCE = {}; CONVOS = {}; UNREAD = {}; ACTIVE = null; DETAIL_ID = null;
   window.CURRENT_SVC = null;
+  paintActUnread();
   if (typeof paintHomeNode === "function") paintHomeNode();
   if (window.Tabs) Tabs.closeAll();
   if (window.Tray) Tray.sync();
