@@ -224,10 +224,9 @@ impl Registry {
         let domain = normalize_domain(domain)?;
         let node_id = normalize_pubkey(node_id)?;
         let email = normalize_email(email)?;
-        if let Some(rec) = self.resolve(&domain)? {
-            if rec.pubkey != node_id {
-                return Err(StoreError::Taken(rec.pubkey));
-            }
+        if let Some(rec) = self.resolve(&domain)?
+            && rec.pubkey != node_id {
+            return Err(StoreError::Taken(rec.pubkey));
         }
         let now = now_ms();
         let wtx = self.db.begin_write().map_err(db_err)?;

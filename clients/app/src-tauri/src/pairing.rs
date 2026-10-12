@@ -11,6 +11,7 @@ use zeroize::Zeroize;
 
 use super::*;
 use crate::pair;
+use crate::registry::{norm_account, open_device_vault, registry_phrase, resolve_home_node};
 
 const EVENT: &str = "pair://event";
 const MAX_PENDING: usize = 4;
@@ -57,7 +58,10 @@ fn clean_text(s: &str, max: usize) -> String {
 
 pub fn device_label() -> String {
     #[cfg(target_os = "macos")]
-    if let Ok(o) = std::process::Command::new("scutil").args(["--get", "ComputerName"]).output() {
+    if let Ok(o) = std::process::Command::new("scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+    {
         let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
         if !s.is_empty() {
             return s;
@@ -70,7 +74,11 @@ pub fn device_label() -> String {
 
 fn device_or_label(device: String) -> String {
     let d = device.trim();
-    if d.is_empty() { device_label() } else { d.to_string() }
+    if d.is_empty() {
+        device_label()
+    } else {
+        d.to_string()
+    }
 }
 
 fn emit(app: &AppHandle, v: Value) {
@@ -97,7 +105,10 @@ async fn start_new(
     let owner = match password {
         Some(pw) => {
             let body = json!({ "local": local, "domain": domain, "password": pw }).to_string();
-            let got = session.name_account("name.login", &body).await.map_err(|e| registry_phrase(&e.to_string()))?;
+            let got = session
+                .name_account("name.login", &body)
+                .await
+                .map_err(|e| registry_phrase(&e.to_string()))?;
             let got = got.trim().to_ascii_lowercase();
             let pk = pair::unhex32(&got).map_err(|_| "Home Node 返回的公钥无效".to_string())?;
             if devices::has_local(&app, &got) {
@@ -127,10 +138,16 @@ async fn start_new(
     match owner {
         Some(o) => {
             let body = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
-            session.send_typed(o, pair::T_REQUEST, &body).await.map_err(|e| e.to_string())?;
+            session
+                .send_typed(o, pair::T_REQUEST, &body)
+                .await
+                .map_err(|e| e.to_string())?;
         }
         None => {
-            out["ticket"] = json!(pair::encode_ticket(&pair::Ticket { req, eph: hex(&eph) })?);
+            out["ticket"] = json!(pair::encode_ticket(&pair::Ticket {
+                req,
+                eph: hex(&eph)
+            })?);
         }
     }
     *state.pair.new_side.lock().await = Some(NewSide {
@@ -150,7 +167,11 @@ async fn start_new(
     Ok(out)
 }
 
-fn spawn_new_listener(app: AppHandle, mut inbox: tokio::sync::mpsc::UnboundedReceiver<nm_proto::Gram>, rid: String) {
+fn spawn_new_listener(
+    app: AppHandle,
+    mut inbox: tokio::sync::mpsc::UnboundedReceiver<nm_proto::Gram>,
+    rid: String,
+) {
     async_runtime::spawn(async move {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(pair::TTL_MS);
         loop {
@@ -164,8 +185,12 @@ fn spawn_new_listener(app: AppHandle, mut inbox: tokio::sync::mpsc::UnboundedRec
                     break;
                 }
             };
-            let Some(p) = gram.payload.as_ref() else { continue };
-            let Ok(sender) = <[u8; 32]>::try_from(gram.sender.as_slice()) else { continue };
+            let Some(p) = gram.payload.as_ref() else {
+                continue;
+            };
+            let Ok(sender) = <[u8; 32]>::try_from(gram.sender.as_slice()) else {
+                continue;
+            };
             match on_new_side(&app, &rid, &p.type_url, &p.value, sender).await {
                 Ok(true) => break,
                 Ok(false) => {}
@@ -192,28 +217,49 @@ async fn clear_new(app: &AppHandle, rid: &str) -> bool {
 }
 
 /// 返回 Ok(true) 表示本次迁移已结束（成功、被拒或已被取代）。
-async fn on_new_side(app: &AppHandle, rid: &str, ty: &str, body: &[u8], sender: [u8; 32]) -> Result<bool, String> {
+async fn on_new_side(
+    app: &AppHandle,
+    rid: &str,
+    ty: &str,
+    body: &[u8],
+    sender: [u8; 32],
+) -> Result<bool, String> {
     let state = app.state::<AppState>();
     let mut g = state.pair.new_side.lock().await;
-    let Some(ns) = g.as_mut() else { return Ok(true) };
+    let Some(ns) = g.as_mut() else {
+        return Ok(true);
+    };
     if ns.rid != rid {
         return Ok(true);
     }
     match ty {
         pair::T_OFFER => {
-            let Ok(o) = serde_json::from_slice::<pair::Offer>(body) else { return Ok(false) };
+            let Ok(o) = serde_json::from_slice::<pair::Offer>(body) else {
+                return Ok(false);
+            };
             if o.rid != ns.rid || ns.key.is_some() || ns.owner.is_some_and(|w| w != sender) {
                 return Ok(false);
             }
             let xpk_old = pair::unhex32(&o.xpk)?;
-            let s = pair::derive(&ns.xsec, &xpk_old, &ns.rid, &sender, &ns.eph, &ns.xpk, &xpk_old, Some(&ns.dk))?;
+            let s = pair::derive(
+                &ns.xsec,
+                &xpk_old,
+                &ns.rid,
+                &sender,
+                &ns.eph,
+                &ns.xpk,
+                &xpk_old,
+                Some(&ns.dk),
+            )?;
             ns.owner = Some(sender);
             ns.key = Some(s.key);
             emit(app, json!({ "type": "sas", "rid": ns.rid, "sas": s.sas }));
             Ok(false)
         }
         pair::T_GRANT => {
-            let Ok(gr) = serde_json::from_slice::<pair::Grant>(body) else { return Ok(false) };
+            let Ok(gr) = serde_json::from_slice::<pair::Grant>(body) else {
+                return Ok(false);
+            };
             if gr.rid != ns.rid || ns.owner != Some(sender) {
                 return Ok(false);
             }
@@ -237,7 +283,15 @@ async fn on_new_side(app: &AppHandle, rid: &str, ty: &str, body: &[u8], sender: 
                 if body.seed.is_none() && cert.role == nm_crypto::DEVICE_ROLE_ADMIN {
                     return Err("管理设备授权缺少账号私钥".into());
                 }
-                devices::save(app, &vk, &user, &devices::DeviceKey { seed: ns.dk_seed, cert })?;
+                devices::save(
+                    app,
+                    &vk,
+                    &user,
+                    &devices::DeviceKey {
+                        seed: ns.dk_seed,
+                        cert,
+                    },
+                )?;
                 body.seed.take()
             };
             plain.zeroize();
@@ -258,11 +312,16 @@ async fn on_new_side(app: &AppHandle, rid: &str, ty: &str, body: &[u8], sender: 
             let name = ns.name.clone();
             let admin = devices::has_account_key(app, &user);
             *g = None;
-            emit(app, json!({ "type": "done", "rid": rid, "user": user, "name": name, "admin": admin }));
+            emit(
+                app,
+                json!({ "type": "done", "rid": rid, "user": user, "name": name, "admin": admin }),
+            );
             Ok(true)
         }
         pair::T_DENY => {
-            let Ok(d) = serde_json::from_slice::<pair::Deny>(body) else { return Ok(false) };
+            let Ok(d) = serde_json::from_slice::<pair::Deny>(body) else {
+                return Ok(false);
+            };
             if d.rid != ns.rid || ns.owner != Some(sender) {
                 return Ok(false);
             }
@@ -314,8 +373,12 @@ pub async fn on_old_side(app: &AppHandle, ty: &str, body: &[u8], sender: &[u8]) 
     if ty != pair::T_REQUEST {
         return;
     }
-    let Ok(peer) = <[u8; 32]>::try_from(sender) else { return };
-    let Ok(req) = serde_json::from_slice::<pair::Request>(body) else { return };
+    let Ok(peer) = <[u8; 32]>::try_from(sender) else {
+        return;
+    };
+    let Ok(req) = serde_json::from_slice::<pair::Request>(body) else {
+        return;
+    };
     if let Ok(v) = offer_for(app, req, peer).await {
         emit(app, v);
     }
@@ -344,7 +407,16 @@ async fn offer_for(app: &AppHandle, req: pair::Request, peer: [u8; 32]) -> Resul
     };
     let xpk_new = pair::unhex32(&req.xpk)?;
     let (xsec, xpk_old) = pair::keypair();
-    let s = pair::derive(&xsec, &xpk_new, &req.rid, &my_id, &peer, &xpk_new, &xpk_old, dk.as_ref())?;
+    let s = pair::derive(
+        &xsec,
+        &xpk_new,
+        &req.rid,
+        &my_id,
+        &peer,
+        &xpk_new,
+        &xpk_old,
+        dk.as_ref(),
+    )?;
     {
         let mut m = state.pair.old_side.lock().unwrap();
         m.retain(|_, o| pair::fresh(o.at));
@@ -366,9 +438,16 @@ async fn offer_for(app: &AppHandle, req: pair::Request, peer: [u8; 32]) -> Resul
             },
         );
     }
-    let offer = pair::Offer { v: 1, rid: req.rid.clone(), xpk: hex(&xpk_old) };
+    let offer = pair::Offer {
+        v: 1,
+        rid: req.rid.clone(),
+        xpk: hex(&xpk_old),
+    };
     let body = serde_json::to_vec(&offer).map_err(|e| e.to_string())?;
-    session.send_typed(peer, pair::T_OFFER, &body).await.map_err(|e| e.to_string())?;
+    session
+        .send_typed(peer, pair::T_OFFER, &body)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(json!({
         "type": "request",
         "rid": req.rid,
@@ -406,7 +485,13 @@ pub async fn pair_approve(
                 m.remove(&rid);
                 return Err("迁移请求已过期".into());
             }
-            Some(o) => o.sas.chars().filter(|c| c.is_ascii_digit()).collect::<String>() == typed,
+            Some(o) => {
+                o.sas
+                    .chars()
+                    .filter(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    == typed
+            }
         };
         if !ok {
             return Err("核对码不一致".into());
@@ -421,12 +506,18 @@ pub async fn pair_approve(
     let ct = match pending.dk {
         Some(dk) => {
             let cert = devices::certify(&seed, dk, &pending.device, admin);
-            let mut body = pair::GrantBody { cert: devices::cert_to_b64(&cert), seed: admin.then(|| hex(&seed)) };
+            let mut body = pair::GrantBody {
+                cert: devices::cert_to_b64(&cert),
+                seed: admin.then(|| hex(&seed)),
+            };
             let mut plain = serde_json::to_vec(&body).map_err(|e| e.to_string());
             if let Some(s) = body.seed.as_mut() {
                 s.zeroize();
             }
-            let ct = plain.as_ref().map_err(|e| e.clone()).and_then(|p| pair::seal(&pending.key, p));
+            let ct = plain
+                .as_ref()
+                .map_err(|e| e.clone())
+                .and_then(|p| pair::seal(&pending.key, p));
             if let Ok(p) = plain.as_mut() {
                 p.zeroize();
             }
@@ -437,7 +528,10 @@ pub async fn pair_approve(
     seed.zeroize();
     let grant = pair::Grant { v: 1, rid, ct: ct? };
     let body = serde_json::to_vec(&grant).map_err(|e| e.to_string())?;
-    session.send_typed(pending.peer, pair::T_GRANT, &body).await.map_err(|e| e.to_string())?;
+    session
+        .send_typed(pending.peer, pair::T_GRANT, &body)
+        .await
+        .map_err(|e| e.to_string())?;
     let event = match (pending.dk.is_some(), admin) {
         (true, false) => "pair:grant-cert",
         (true, true) => "pair:grant-admin",
@@ -448,7 +542,11 @@ pub async fn pair_approve(
 }
 
 #[tauri::command]
-pub async fn pair_reject(app: AppHandle, state: State<'_, AppState>, rid: String) -> Result<(), String> {
+pub async fn pair_reject(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    rid: String,
+) -> Result<(), String> {
     let pending = state.pair.old_side.lock().unwrap().remove(&rid);
     if let Some(p) = pending {
         if let Ok(session) = session_of(&state).await {

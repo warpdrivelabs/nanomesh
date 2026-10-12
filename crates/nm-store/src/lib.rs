@@ -683,7 +683,7 @@ mod blob_tests {
         let got = store.get_blob(&hash).unwrap().expect("blob present");
         assert_eq!(got.data, b"hello-avatar");
         assert_eq!(got.mime, "image/jpeg");
-        assert!(store.get_blob(&vec![9u8; 32]).unwrap().is_none(), "未知 hash 应 None");
+        assert!(store.get_blob(&[9u8; 32]).unwrap().is_none(), "未知 hash 应 None");
         let _ = std::fs::remove_file(&path);
     }
 }

@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use rand::rngs::OsRng;
 use rand::RngCore;
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
@@ -65,7 +65,8 @@ fn derive_mk(password: &str, salt: &[u8], m: u32, t: u32, p: u32) -> Result<[u8;
     let params = Params::new(m, t, p, Some(32)).map_err(|e| e.to_string())?;
     let a = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut out = [0u8; 32];
-    a.hash_password_into(password.as_bytes(), salt, &mut out).map_err(|e| e.to_string())?;
+    a.hash_password_into(password.as_bytes(), salt, &mut out)
+        .map_err(|e| e.to_string())?;
     Ok(out)
 }
 
@@ -73,7 +74,9 @@ fn seal(key: &[u8; 32], pt: &[u8]) -> Result<Vec<u8>, String> {
     let c = XChaCha20Poly1305::new(key.into());
     let mut nonce = [0u8; 24];
     OsRng.fill_bytes(&mut nonce);
-    let ct = c.encrypt(XNonce::from_slice(&nonce), pt).map_err(|_| "加密失败".to_string())?;
+    let ct = c
+        .encrypt(XNonce::from_slice(&nonce), pt)
+        .map_err(|_| "加密失败".to_string())?;
     let mut out = Vec::with_capacity(24 + ct.len());
     out.extend_from_slice(&nonce);
     out.extend_from_slice(&ct);
@@ -86,11 +89,14 @@ fn open(key: &[u8; 32], data: &[u8]) -> Result<Vec<u8>, String> {
     }
     let (n, ct) = data.split_at(24);
     let c = XChaCha20Poly1305::new(key.into());
-    c.decrypt(XNonce::from_slice(n), ct).map_err(|_| "解密失败（口令错误或数据损坏）".to_string())
+    c.decrypt(XNonce::from_slice(n), ct)
+        .map_err(|_| "解密失败（口令错误或数据损坏）".to_string())
 }
 
 fn pubkey_of_seed(seed: &[u8; 32]) -> [u8; 32] {
-    *nm_transport::SecretKey::from_bytes(seed).public().as_bytes()
+    *nm_transport::SecretKey::from_bytes(seed)
+        .public()
+        .as_bytes()
 }
 fn hexstr(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
@@ -145,7 +151,10 @@ pub fn export(dir: &Path, vk: &[u8; 32], password: &str) -> Result<String, Strin
                 if stem.len() == 64 {
                     if let Ok(data) = std::fs::read(e.path()) {
                         if let Ok(seed) = decrypt_seed(vk, &data) {
-                            items.push(BackupSeed { pk: stem.to_string(), seed: seed.to_vec() });
+                            items.push(BackupSeed {
+                                pk: stem.to_string(),
+                                seed: seed.to_vec(),
+                            });
                         }
                     }
                 }
@@ -213,7 +222,9 @@ pub fn generate_recovery(dir: &Path, vk: &[u8; 32]) -> Result<String, String> {
     let mut rk = [0u8; 32];
     OsRng.fill_bytes(&mut rk);
     let recovery_vk = seal(&rk, vk)?;
-    let mnemonic = bip39::Mnemonic::from_entropy(&rk).map_err(|e| e.to_string())?.to_string();
+    let mnemonic = bip39::Mnemonic::from_entropy(&rk)
+        .map_err(|e| e.to_string())?
+        .to_string();
     rk.zeroize();
     let mut meta = read_meta(dir)?;
     meta.recovery_vk = Some(recovery_vk);
@@ -223,7 +234,8 @@ pub fn generate_recovery(dir: &Path, vk: &[u8; 32]) -> Result<String, String> {
 
 /// 用恢复码重置主口令：助记词→RK→解出 VK→用新口令重封（保留恢复码）。
 pub fn recover(dir: &Path, mnemonic: &str, new_password: &str) -> Result<(), String> {
-    let m = bip39::Mnemonic::parse(mnemonic.trim().to_lowercase()).map_err(|_| "恢复码无效".to_string())?;
+    let m = bip39::Mnemonic::parse(mnemonic.trim().to_lowercase())
+        .map_err(|_| "恢复码无效".to_string())?;
     let ent = m.to_entropy();
     if ent.len() != 32 {
         return Err("恢复码长度不符（应为 24 词）".into());
@@ -247,13 +259,22 @@ pub fn recover(dir: &Path, mnemonic: &str, new_password: &str) -> Result<(), Str
     let verifier = seal(&mk, VERIFY)?;
     mk.zeroize();
     vk.zeroize();
-    write_meta(dir, &VaultMeta {
-        version: 1,
-        kdf: Kdf { alg: "argon2id".into(), m: M_COST, t: T_COST, p: P_COST, salt: salt.to_vec() },
-        verifier,
-        wrapped_vk,
-        recovery_vk: Some(rvk),
-    })
+    write_meta(
+        dir,
+        &VaultMeta {
+            version: 1,
+            kdf: Kdf {
+                alg: "argon2id".into(),
+                m: M_COST,
+                t: T_COST,
+                p: P_COST,
+                salt: salt.to_vec(),
+            },
+            verifier,
+            wrapped_vk,
+            recovery_vk: Some(rvk),
+        },
+    )
 }
 
 // ── 审计日志（P3）：追加式记录安全事件（unix 秒 + 事件）。 ──
@@ -264,7 +285,11 @@ pub fn audit(dir: &Path, event: &str) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("audit.log")) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("audit.log"))
+    {
         let _ = writeln!(f, "{ts} {event}");
     }
 }
@@ -273,7 +298,11 @@ pub fn audit(dir: &Path, event: &str) {
 pub fn read_audit(dir: &Path, n: usize) -> Vec<String> {
     std::fs::read_to_string(dir.join("audit.log"))
         .map(|s| {
-            let mut lines: Vec<String> = s.lines().filter(|x| !x.is_empty()).map(str::to_string).collect();
+            let mut lines: Vec<String> = s
+                .lines()
+                .filter(|x| !x.is_empty())
+                .map(str::to_string)
+                .collect();
             lines.reverse();
             lines.truncate(n);
             lines
@@ -304,13 +333,22 @@ pub fn setup(dir: &Path, password: &str) -> Result<[u8; 32], String> {
     let wrapped_vk = seal(&mk, &vk)?;
     let verifier = seal(&mk, VERIFY)?;
     mk.zeroize();
-    write_meta(dir, &VaultMeta {
-        version: 1,
-        kdf: Kdf { alg: "argon2id".into(), m: M_COST, t: T_COST, p: P_COST, salt: salt.to_vec() },
-        verifier,
-        wrapped_vk,
-        recovery_vk: None,
-    })?;
+    write_meta(
+        dir,
+        &VaultMeta {
+            version: 1,
+            kdf: Kdf {
+                alg: "argon2id".into(),
+                m: M_COST,
+                t: T_COST,
+                p: P_COST,
+                salt: salt.to_vec(),
+            },
+            verifier,
+            wrapped_vk,
+            recovery_vk: None,
+        },
+    )?;
     migrate_plaintext(dir, &vk)?;
     Ok(vk)
 }
@@ -319,7 +357,9 @@ pub fn setup(dir: &Path, password: &str) -> Result<[u8; 32], String> {
 pub fn unlock(dir: &Path, password: &str) -> Result<[u8; 32], String> {
     let meta = read_meta(dir)?;
     let mut mk = derive_mk(password, &meta.kdf.salt, meta.kdf.m, meta.kdf.t, meta.kdf.p)?;
-    let ok = open(&mk, &meta.verifier).map(|x| x == VERIFY).unwrap_or(false);
+    let ok = open(&mk, &meta.verifier)
+        .map(|x| x == VERIFY)
+        .unwrap_or(false);
     if !ok {
         mk.zeroize();
         return Err("主口令错误".into());
@@ -345,13 +385,22 @@ pub fn change(dir: &Path, old: &str, new: &str) -> Result<(), String> {
     let wrapped_vk = seal(&mk, &vk)?;
     let verifier = seal(&mk, VERIFY)?;
     mk.zeroize();
-    write_meta(dir, &VaultMeta {
-        version: 1,
-        kdf: Kdf { alg: "argon2id".into(), m: M_COST, t: T_COST, p: P_COST, salt: salt.to_vec() },
-        verifier,
-        wrapped_vk,
-        recovery_vk,
-    })
+    write_meta(
+        dir,
+        &VaultMeta {
+            version: 1,
+            kdf: Kdf {
+                alg: "argon2id".into(),
+                m: M_COST,
+                t: T_COST,
+                p: P_COST,
+                salt: salt.to_vec(),
+            },
+            verifier,
+            wrapped_vk,
+            recovery_vk,
+        },
+    )
 }
 
 /// 迁移已有明文种子（identities/*.seed + 旧 nmspace.identity）→ VK 加密的 .enc，并抹除明文。

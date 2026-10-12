@@ -136,18 +136,25 @@ pub fn derive(
     let th = th.finalize();
     let hk = Hkdf::<Sha256>::new(Some(&th), shared.as_bytes());
     let mut key = [0u8; 32];
-    hk.expand(b"key", &mut key).map_err(|_| "密钥派生失败".to_string())?;
+    hk.expand(b"key", &mut key)
+        .map_err(|_| "密钥派生失败".to_string())?;
     let mut s = [0u8; 4];
-    hk.expand(b"sas", &mut s).map_err(|_| "密钥派生失败".to_string())?;
+    hk.expand(b"sas", &mut s)
+        .map_err(|_| "密钥派生失败".to_string())?;
     let n = u32::from_be_bytes(s) % 1_000_000;
-    Ok(Session { key, sas: format!("{:03} {:03}", n / 1000, n % 1000) })
+    Ok(Session {
+        key,
+        sas: format!("{:03} {:03}", n / 1000, n % 1000),
+    })
 }
 
 pub fn seal(key: &[u8; 32], pt: &[u8]) -> Result<Vec<u8>, String> {
     let c = XChaCha20Poly1305::new(key.into());
     let mut nonce = [0u8; 24];
     OsRng.fill_bytes(&mut nonce);
-    let ct = c.encrypt(XNonce::from_slice(&nonce), pt).map_err(|_| "加密失败".to_string())?;
+    let ct = c
+        .encrypt(XNonce::from_slice(&nonce), pt)
+        .map_err(|_| "加密失败".to_string())?;
     let mut out = nonce.to_vec();
     out.extend_from_slice(&ct);
     Ok(out)
@@ -166,7 +173,10 @@ pub fn open(key: &[u8; 32], data: &[u8]) -> Result<Vec<u8>, String> {
 pub fn encode_ticket(t: &Ticket) -> Result<String, String> {
     use base64::Engine;
     let json = serde_json::to_vec(t).map_err(|e| e.to_string())?;
-    Ok(format!("{TICKET_PREFIX}{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)))
+    Ok(format!(
+        "{TICKET_PREFIX}{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
+    ))
 }
 
 pub fn decode_ticket(s: &str) -> Result<Ticket, String> {
@@ -189,7 +199,8 @@ pub fn unhex32(s: &str) -> Result<[u8; 32], String> {
     }
     let mut out = [0u8; 32];
     for (i, b) in out.iter_mut().enumerate() {
-        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).map_err(|_| "不是十六进制".to_string())?;
+        *b =
+            u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).map_err(|_| "不是十六进制".to_string())?;
     }
     Ok(out)
 }

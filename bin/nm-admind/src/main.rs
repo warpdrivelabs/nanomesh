@@ -12,7 +12,7 @@ use axum::{
     extract::{Query, Request, State},
     http::{header, HeaderMap, StatusCode},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -26,10 +26,10 @@ use auth::Auth;
 #[command(name = "nm-admind", about = "nmd 后端管理控制台")]
 struct Args {
     /// 管理台 HTTP 监听地址。
-    #[arg(long, default_value = "0.0.0.0:9610")]
+    #[arg(long, default_value = "127.0.0.1:9610")]
     listen: String,
     /// 管理台 HTTPS 监听地址。需要同时提供 `--tls-cert` 和 `--tls-key`。
-    #[arg(long, default_value = "0.0.0.0:8443")]
+    #[arg(long, default_value = "127.0.0.1:8443")]
     https: String,
     /// TLS 证书（PEM）。
     #[arg(long)]
@@ -64,6 +64,13 @@ const INDEX: &str = include_str!("../web/index.html");
 const APPJS: &str = include_str!("../web/app.js");
 const CSS: &str = include_str!("../web/styles.css");
 const LOGO_PNG: &[u8] = include_bytes!("../web/nanomesh-logo.png");
+// ES modules under web/js/admin/ — must be served or the page stays blank.
+const JS_API: &str = include_str!("../web/js/admin/api.js");
+const JS_COMPONENTS: &str = include_str!("../web/js/admin/components.js");
+const JS_HELPERS: &str = include_str!("../web/js/admin/helpers.js");
+const JS_I18N: &str = include_str!("../web/js/admin/i18n.js");
+const JS_PANELS: &str = include_str!("../web/js/admin/panels.js");
+const JS_PEER_GRAPH: &str = include_str!("../web/js/admin/peer_graph.js");
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -79,11 +86,11 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
 
-    let (auth, created) = Auth::load_or_init(args.state.clone().into())?;
-    if created {
+    let (auth, initial_password) = Auth::load_or_init(args.state.clone().into())?;
+    if let Some(password) = initial_password {
         tracing::warn!(
-            "首次运行：管理员账号 \"admin\"，初始密码 \"{}\"——首次登录后请立即修改",
-            auth::DEFAULT_PASSWORD
+            "首次运行：管理员账号 \"admin\"，随机初始密码 \"{}\"——仅本次显示，首次登录后请立即修改",
+            password
         );
     }
     if args.nmd_token.trim().is_empty() {
@@ -111,6 +118,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/app.js", get(appjs))
         .route("/styles.css", get(css))
         .route("/nanomesh-logo.png", get(logo_png))
+        .route("/js/admin/api.js", get(js_api))
+        .route("/js/admin/components.js", get(js_components))
+        .route("/js/admin/helpers.js", get(js_helpers))
+        .route("/js/admin/i18n.js", get(js_i18n))
+        .route("/js/admin/panels.js", get(js_panels))
+        .route("/js/admin/peer_graph.js", get(js_peer_graph))
         .route("/api/session", get(session))
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
@@ -189,6 +202,24 @@ async fn index() -> impl IntoResponse {
 }
 async fn appjs() -> impl IntoResponse {
     asset("text/javascript; charset=utf-8", APPJS)
+}
+async fn js_api() -> impl IntoResponse {
+    asset("text/javascript; charset=utf-8", JS_API)
+}
+async fn js_components() -> impl IntoResponse {
+    asset("text/javascript; charset=utf-8", JS_COMPONENTS)
+}
+async fn js_helpers() -> impl IntoResponse {
+    asset("text/javascript; charset=utf-8", JS_HELPERS)
+}
+async fn js_i18n() -> impl IntoResponse {
+    asset("text/javascript; charset=utf-8", JS_I18N)
+}
+async fn js_panels() -> impl IntoResponse {
+    asset("text/javascript; charset=utf-8", JS_PANELS)
+}
+async fn js_peer_graph() -> impl IntoResponse {
+    asset("text/javascript; charset=utf-8", JS_PEER_GRAPH)
 }
 async fn css() -> impl IntoResponse {
     asset("text/css; charset=utf-8", CSS)
@@ -276,10 +307,9 @@ fn cookie_tokens(headers: &HeaderMap) -> Vec<String> {
         return out;
     };
     for part in c.split(';') {
-        if let Some(v) = part.trim().strip_prefix("admind=") {
-            if !v.is_empty() {
-                out.push(v.to_string());
-            }
+        if let Some(v) = part.trim().strip_prefix("admind=")
+            && !v.is_empty() {
+            out.push(v.to_string());
         }
     }
     out
@@ -291,10 +321,9 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
 }
 
 fn session_ok(s: &AppState, headers: &HeaderMap) -> bool {
-    if let Some(t) = bearer_token(headers) {
-        if s.auth.valid(&t) {
-            return true;
-        }
+    if let Some(t) = bearer_token(headers)
+        && s.auth.valid(&t) {
+        return true;
     }
     cookie_tokens(headers).iter().any(|t| s.auth.valid(t))
 }
@@ -446,7 +475,7 @@ async fn names_pending(State(s): State<AppState>, headers: HeaderMap) -> Respons
     }
     let node_id = match local_node_id(&s).await {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let url = format!("{}/api/signup/list?nodeid={}", s.registry, node_id);
     match registry_get_async(url).await {
@@ -462,7 +491,7 @@ async fn names_pending(State(s): State<AppState>, headers: HeaderMap) -> Respons
     }
 }
 
-async fn local_node_id(s: &AppState) -> Result<String, Response> {
+async fn local_node_id(s: &AppState) -> Result<String, Box<Response>> {
     let ident = match s
         .http
         .get(format!("{}/identity", s.nmd_api))
@@ -472,21 +501,21 @@ async fn local_node_id(s: &AppState) -> Result<String, Response> {
     {
         Ok(r) => r,
         Err(e) => {
-            return Err((
+            return Err(Box::new((
                 StatusCode::BAD_GATEWAY,
                 Json(json!({ "ok": false, "error": format!("nmd 不可达: {}", err_chain(&e)) })),
             )
-                .into_response());
+                .into_response()));
         }
     };
     let ident: serde_json::Value = ident.json().await.unwrap_or_default();
     let node_id = ident.get("node_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
     if node_id.len() != 64 {
-        return Err((
+        return Err(Box::new((
             StatusCode::BAD_GATEWAY,
             Json(json!({ "ok": false, "error": "读不到本机 node id" })),
         )
-            .into_response());
+            .into_response()));
     }
     Ok(node_id)
 }
@@ -578,10 +607,9 @@ fn process_cwd(pid: u32) -> Option<std::path::PathBuf> {
     }
     let out = Command::new("lsof").args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"]).output().ok()?;
     for line in String::from_utf8_lossy(&out.stdout).lines() {
-        if let Some(path) = line.strip_prefix('n') {
-            if !path.is_empty() {
-                return Some(std::path::PathBuf::from(path));
-            }
+        if let Some(path) = line.strip_prefix('n')
+            && !path.is_empty() {
+            return Some(std::path::PathBuf::from(path));
         }
     }
     None

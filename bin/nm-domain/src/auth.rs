@@ -1,4 +1,4 @@
-//! 登录鉴权，和 nm-admind 同一套：固定用户 `admin`、argon2、首登强制改密、内存会话。
+//! 登录鉴权，和 nm-admind 同一套：固定用户 `admin`、随机初始密码、argon2、首登强制改密、内存会话。
 //! Cookie 名用 `nmdomain`，避免和同机的管理台 `admind` 串会话。
 
 use std::collections::HashMap;
@@ -11,7 +11,6 @@ use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use argon2::Argon2;
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_PASSWORD: &str = "nmspace-domain";
 const SESSION_TTL: Duration = Duration::from_secs(8 * 3600);
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -28,22 +27,22 @@ pub struct Auth {
 }
 
 impl Auth {
-    pub fn load_or_init(path: PathBuf) -> anyhow::Result<(Self, bool)> {
-        if let Ok(bytes) = std::fs::read(&path) {
-            if let Ok(cred) = serde_json::from_slice::<Cred>(&bytes) {
-                return Ok((
-                    Self {
-                        path,
-                        cred: Mutex::new(cred),
-                        sessions: Mutex::new(HashMap::new()),
-                    },
-                    false,
-                ));
-            }
+    pub fn load_or_init(path: PathBuf) -> anyhow::Result<(Self, Option<String>)> {
+        if let Ok(bytes) = std::fs::read(&path)
+            && let Ok(cred) = serde_json::from_slice::<Cred>(&bytes) {
+            return Ok((
+                Self {
+                    path,
+                    cred: Mutex::new(cred),
+                    sessions: Mutex::new(HashMap::new()),
+                },
+                None,
+            ));
         }
+        let initial_password = gen_initial_password();
         let cred = Cred {
             username: "admin".into(),
-            phc: hash_password(DEFAULT_PASSWORD)?,
+            phc: hash_password(&initial_password)?,
             must_change: true,
         };
         let auth = Self {
@@ -52,7 +51,7 @@ impl Auth {
             sessions: Mutex::new(HashMap::new()),
         };
         auth.persist()?;
-        Ok((auth, true))
+        Ok((auth, Some(initial_password)))
     }
 
     fn persist(&self) -> anyhow::Result<()> {
@@ -130,4 +129,9 @@ fn gen_token() -> String {
         .iter()
         .map(|x| format!("{x:02x}"))
         .collect()
+}
+
+fn gen_initial_password() -> String {
+    let token = gen_token();
+    format!("nm-{}", &token[..24.min(token.len())])
 }

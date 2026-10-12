@@ -14,7 +14,7 @@ use axum::{
     extract::{Query, Request, State},
     http::{header, HeaderMap, StatusCode},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -29,10 +29,10 @@ use store::{normalize_domain, RegisterOutcome, Registry, StoreError};
 #[command(name = "nm-domain", about = "Nano Mesh 全球域名注册中心")]
 struct Args {
     /// HTTP 监听地址。
-    #[arg(long, default_value = "0.0.0.0:80")]
+    #[arg(long, default_value = "127.0.0.1:8080")]
     listen: String,
     /// HTTPS 监听地址。需要同时提供 `--tls-cert` 和 `--tls-key`。
-    #[arg(long, default_value = "0.0.0.0:443")]
+    #[arg(long, default_value = "127.0.0.1:8444")]
     https: String,
     /// TLS 证书（PEM）。
     #[arg(long)]
@@ -76,11 +76,11 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let args = Args::parse();
-    let (auth, created) = Auth::load_or_init(args.state.clone().into())?;
-    if created {
+    let (auth, initial_password) = Auth::load_or_init(args.state.clone().into())?;
+    if let Some(password) = initial_password {
         tracing::warn!(
-            "首次运行：管理员账号 \"admin\"，初始密码 \"{}\"——首次登录后请立即修改",
-            auth::DEFAULT_PASSWORD
+            "首次运行：管理员账号 \"admin\"，随机初始密码 \"{}\"——仅本次显示，首次登录后请立即修改",
+            password
         );
     }
     let reg = Registry::open(&args.db)?;
@@ -197,10 +197,9 @@ fn cookie_tokens(headers: &HeaderMap) -> Vec<String> {
         return out;
     };
     for part in c.split(';') {
-        if let Some(v) = part.trim().strip_prefix("nmdomain=") {
-            if !v.is_empty() {
-                out.push(v.to_string());
-            }
+        if let Some(v) = part.trim().strip_prefix("nmdomain=")
+            && !v.is_empty() {
+            out.push(v.to_string());
         }
     }
     out
@@ -212,23 +211,22 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
 }
 
 fn session_ok(s: &AppState, headers: &HeaderMap) -> bool {
-    if let Some(t) = bearer_token(headers) {
-        if s.auth.valid(&t) {
-            return true;
-        }
+    if let Some(t) = bearer_token(headers)
+        && s.auth.valid(&t) {
+        return true;
     }
     cookie_tokens(headers).iter().any(|t| s.auth.valid(t))
 }
-fn require_session(s: &AppState, headers: &HeaderMap) -> Result<(), Response> {
+fn require_session(s: &AppState, headers: &HeaderMap) -> Result<(), Box<Response>> {
     if !session_ok(s, headers) {
-        return Err(StatusCode::UNAUTHORIZED.into_response());
+        return Err(Box::new(StatusCode::UNAUTHORIZED.into_response()));
     }
     if s.auth.must_change() {
-        return Err((
+        return Err(Box::new((
             StatusCode::FORBIDDEN,
             Json(json!({ "ok": false, "error": "请先修改初始密码" })),
         )
-            .into_response());
+            .into_response()));
     }
     Ok(())
 }
@@ -393,7 +391,7 @@ struct ListQuery {
 }
 async fn list_domains(State(s): State<AppState>, headers: HeaderMap, Query(q): Query<ListQuery>) -> Response {
     if let Err(resp) = require_session(&s, &headers) {
-        return resp;
+        return *resp;
     }
     let all = match s.reg.list() {
         Ok(v) => v,
@@ -410,7 +408,7 @@ async fn list_domains(State(s): State<AppState>, headers: HeaderMap, Query(q): Q
         })
         .collect();
     let page_size = 20u32;
-    let pages = ((filtered.len() as u32) + page_size - 1) / page_size;
+    let pages = (filtered.len() as u32).div_ceil(page_size);
     let pages = pages.max(1);
     let page = q.page.unwrap_or(1).clamp(1, pages);
     let start = ((page - 1) * page_size) as usize;
@@ -439,7 +437,7 @@ struct DomainBody {
 }
 async fn register_domain(State(s): State<AppState>, headers: HeaderMap, Json(b): Json<DomainBody>) -> Response {
     if let Err(resp) = require_session(&s, &headers) {
-        return resp;
+        return *resp;
     }
     match s.reg.register(&b.domain, &b.pubkey, &b.email) {
         Ok(RegisterOutcome::Created) => {
@@ -466,7 +464,7 @@ async fn enable_domain(State(s): State<AppState>, headers: HeaderMap, Json(b): J
 }
 fn set_domain_disabled(s: AppState, headers: HeaderMap, domain: &str, disabled: bool) -> Response {
     if let Err(resp) = require_session(&s, &headers) {
-        return resp;
+        return *resp;
     }
     match s.reg.set_disabled(domain, disabled) {
         Ok(true) => Json(json!({ "ok": true })).into_response(),
@@ -513,7 +511,7 @@ async fn signup_list(State(s): State<AppState>, Query(q): Query<SignupListQuery>
 
 async fn list_applications(State(s): State<AppState>, headers: HeaderMap) -> Response {
     if let Err(resp) = require_session(&s, &headers) {
-        return resp;
+        return *resp;
     }
     match s.reg.list_applications() {
         Ok(items) => Json(json!({ "ok": true, "items": items })).into_response(),
@@ -533,7 +531,7 @@ async fn reject_application(State(s): State<AppState>, headers: HeaderMap, Json(
 }
 async fn decide(s: &AppState, headers: &HeaderMap, domain: &str, approved: bool) -> Response {
     if let Err(resp) = require_session(s, headers) {
-        return resp;
+        return *resp;
     }
     let app = match s.reg.decide(domain, approved) {
         Ok(app) => app,

@@ -1,4 +1,4 @@
-//! `nm-gatewayd` — 浏览器网关守护进程（WebTransport/WebSocket ↔ iroh）。
+//! `nm-gatewayd` — 浏览器 WebSocket 网关守护进程（JSON `/ws` ↔ iroh）。
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

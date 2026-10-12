@@ -455,11 +455,10 @@ fn spawn_proc_sampler(slot: Arc<Mutex<ProcMetrics>>) {
         let pid = Pid::from_u32(std::process::id());
         loop {
             sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
-            if let Some(p) = sys.process(pid) {
-                if let Ok(mut m) = slot.lock() {
-                    m.rss_bytes = p.memory();
-                    m.cpu_pct = p.cpu_usage();
-                }
+            if let Some(p) = sys.process(pid)
+                && let Ok(mut m) = slot.lock() {
+                m.rss_bytes = p.memory();
+                m.cpu_pct = p.cpu_usage();
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }

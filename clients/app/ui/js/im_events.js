@@ -1,0 +1,116 @@
+// ── 🤖 agent 流式回复（打字机）：delta 帧按 streamId 增量长出**同一个**气泡 ──
+const AGENT_DELTA_TYPE = "nmspace.agent.delta.v1";
+const STREAMS = {}; // streamId -> { peer, text, maxSeq }
+
+function growStreamBubble(sid, peer, text) {
+  if (VIEW.id !== peer) return;                       // 该会话未在前台
+  let row = VIEW.rows.find((r) => r.id === sid);
+  if (!row) {
+    const raw = { id: sid, from: peer, to: MY_ID, body: text, ts: Date.now(), typeUrl: "" };
+    row = window.Composer ? Composer.absorb(raw) : raw;
+    VIEW.rows.push(row);
+    if (VIEW.rows.length > 400) { VIEW.rows.shift(); VIEW.start += 1; }
+    const log = document.getElementById("conv-log");
+    const stick = !log || log.scrollHeight - log.scrollTop - log.clientHeight < 120;
+    paintVirtual(stick);
+    return;
+  }
+  row.body = text; row.text = text;
+  const sel = (window.CSS && CSS.escape) ? CSS.escape(sid) : sid;
+  const el = document.querySelector(`.im-msg[data-mid="${sel}"] .im-bubble`);
+  if (el) {
+    el.textContent = text;                            // O(1) 原地更新，自动转义
+    const log = document.getElementById("conv-log");
+    if (log && log.scrollHeight - log.scrollTop - log.clientHeight < 160) log.scrollTop = log.scrollHeight;
+  } else {
+    paintVirtual(true);                               // 气泡在窗外/已被重绘 → 整窗重绘兜底
+  }
+}
+
+function handleAgentDelta(m) {
+  let d;
+  try { d = JSON.parse(m.body || "{}"); } catch (_) { return; }
+  if (!d || typeof d.streamId !== "string") return;
+  const peer = m.from;
+  const sid = d.streamId;
+  const seq = typeof d.seq === "number" ? d.seq : 0;
+  const st = STREAMS[sid] || (STREAMS[sid] = { peer, text: "", maxSeq: -1 });
+  if (seq < st.maxSeq) return;                         // 乱序旧帧丢弃（累计全文，大 seq 为准）
+  st.maxSeq = seq;
+  if (typeof d.text === "string") st.text = d.text;
+  if (isChatOpen(peer)) growStreamBubble(sid, peer, st.text);
+  if (!d.done) return;
+  delete STREAMS[sid];
+  const full = { id: sid, from: peer, to: MY_ID, body: st.text, ts: Date.now(), typeUrl: "" };
+  if (isChatOpen(peer)) {
+    // 气泡已在视图里；落库一次（ChatLog 按 id 去重）+ 刷新会话列表预览。
+    if (window.ChatLog) ChatLog.append(peer, window.Composer ? Composer.absorb(full) : full);
+    renderPanels();
+  } else {
+    // 会话未打开：按普通消息入库 + 列表 + 未读 + 托盘。
+    pushMsg(peer, full).then((fresh) => {
+      if (!fresh) return;
+      UNREAD[peer] = (UNREAD[peer] || 0) + 1;
+      scheduleUnread();
+      renderPanels();
+      if (window.Tray) Tray.onMessage(peer, full);
+    });
+  }
+}
+
+function onCoreEvent(ev) {
+  if (!ev) return;
+  // 重连生命周期：后端发送失败→自动重连时 emit 这些，驱动状态行进度提示。
+  if (ev.type === "reconnecting") {
+    if (window.setReconnecting) setReconnecting(true);
+    if (window.toast) toast("连接已断，正在重连…");
+    return;
+  }
+  if (ev.type === "reconnected") {
+    if (window.setReconnecting) setReconnecting(false);
+    if (window.paintHomeNode) paintHomeNode();
+    if (window.toast) toast("已重连");
+    return;
+  }
+  if (ev.type === "reconnect_failed") {
+    if (window.setReconnecting) setReconnecting(false);
+    if (window.paintHomeNode) paintHomeNode();
+    if (window.toast) toast("重连失败，请检查网络");
+    return;
+  }
+  if (ev.type !== "message" || !ev.msg) return;
+  const m = ev.msg;
+  if (m.typeUrl === AGENT_DELTA_TYPE) { handleAgentDelta(m); return; }
+  const mine = m.from === MY_ID;
+  const key = (m.group || m.channel || mine) ? m.to : m.from;
+  pushMsg(key, m).then((fresh) => {
+    // 「已读」只看主区是否正在显示该聊天框，不看消息列表残留选中。
+    const seen = isChatOpen(key) && (!window.Tray || Tray.focused());
+    if (fresh && !mine && !seen) {
+      UNREAD[key] = (UNREAD[key] || 0) + 1;
+      scheduleUnread();
+    }
+    renderPanels();
+    if (fresh && !mine && !seen && window.Tray) Tray.onMessage(key, m);
+  });
+}
+
+async function pushMsg(peer, m) {
+  m = window.Composer ? Composer.absorb(m) : m;
+  if (!window.ChatLog) return false;
+  const stored = await ChatLog.append(peer, m);
+  if (!stored) return false;
+  if (isChatOpen(peer)) {
+    const coversTail = VIEW.start + VIEW.rows.length >= VIEW.total;
+    VIEW.total = (ChatLog.meta(peer).count || VIEW.total + 1);
+    if (coversTail) {
+      VIEW.rows.push(m);
+      if (VIEW.rows.length > 400) { VIEW.rows.shift(); VIEW.start += 1; }
+      const log = document.getElementById("conv-log");
+      const stick = !log || log.scrollHeight - log.scrollTop - log.clientHeight < 120;
+      paintVirtual(stick);
+    }
+  }
+  renderPanels();
+  return true;
+}

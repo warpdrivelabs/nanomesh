@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
 use super::*;
+use crate::registry::{norm_account, registry_phrase, resolve_home_node};
 
 pub const EVENT: &str = "device://event";
 /// 节点推来的设备事件（吊销等）。
@@ -39,7 +40,9 @@ fn b64(b: &[u8]) -> String {
 
 fn unb64(s: &str) -> Result<Vec<u8>, String> {
     use base64::Engine;
-    base64::engine::general_purpose::STANDARD.decode(s.trim()).map_err(|_| "设备证书格式错误".to_string())
+    base64::engine::general_purpose::STANDARD
+        .decode(s.trim())
+        .map_err(|_| "设备证书格式错误".to_string())
 }
 
 pub fn cert_to_b64(c: &DeviceCert) -> String {
@@ -62,7 +65,9 @@ fn path_of(app: &AppHandle, account: &str) -> Result<std::path::PathBuf, String>
 
 pub fn load(app: &AppHandle, vk: &[u8; 32], account: &str) -> Result<Option<DeviceKey>, String> {
     let p = path_of(app, account)?;
-    let Ok(data) = std::fs::read(&p) else { return Ok(None) };
+    let Ok(data) = std::fs::read(&p) else {
+        return Ok(None);
+    };
     let mut pt = auth::decrypt_blob(vk, &data)?;
     let parsed = serde_json::from_slice::<Stored>(&pt);
     pt.zeroize();
@@ -75,7 +80,10 @@ pub fn load(app: &AppHandle, vk: &[u8; 32], account: &str) -> Result<Option<Devi
 }
 
 pub fn save(app: &AppHandle, vk: &[u8; 32], account: &str, key: &DeviceKey) -> Result<(), String> {
-    let mut st = Stored { seed: hex(&key.seed), cert: cert_to_b64(&key.cert) };
+    let mut st = Stored {
+        seed: hex(&key.seed),
+        cert: cert_to_b64(&key.cert),
+    };
     let mut pt = serde_json::to_vec(&st).map_err(|e| e.to_string())?;
     st.seed.zeroize();
     let enc = auth::encrypt_blob(vk, &pt);
@@ -113,7 +121,10 @@ pub fn has_local(app: &AppHandle, account: &str) -> bool {
 }
 
 pub fn has_account_key(app: &AppHandle, account: &str) -> bool {
-    identities_dir(app).is_ok_and(|d| d.join(format!("{}.enc", account.to_ascii_lowercase())).exists())
+    identities_dir(app).is_ok_and(|d| {
+        d.join(format!("{}.enc", account.to_ascii_lowercase()))
+            .exists()
+    })
 }
 
 pub fn new_seed() -> [u8; 32] {
@@ -121,17 +132,28 @@ pub fn new_seed() -> [u8; 32] {
 }
 
 pub fn certify(account_seed: &[u8; 32], device: [u8; 32], label: &str, admin: bool) -> DeviceCert {
-    let role = if admin { DEVICE_ROLE_ADMIN } else { DEVICE_ROLE_MEMBER };
+    let role = if admin {
+        DEVICE_ROLE_ADMIN
+    } else {
+        DEVICE_ROLE_MEMBER
+    };
     let sk = nm_crypto::SecretKey::from_bytes(account_seed);
     nm_crypto::sign_device_cert(&sk, device, label, role, pair::now_ms() as i64)
 }
 
 /// 取本机该账号的设备密钥；没有而本机持有账号私钥（老用户或首台设备）时，生成并自签管理证书。
-fn ensure(app: &AppHandle, vk: &[u8; 32], account: &str, account_seed: Option<&[u8; 32]>) -> Result<Option<DeviceKey>, String> {
+fn ensure(
+    app: &AppHandle,
+    vk: &[u8; 32],
+    account: &str,
+    account_seed: Option<&[u8; 32]>,
+) -> Result<Option<DeviceKey>, String> {
     if let Some(k) = load(app, vk, account)? {
         return Ok(Some(k));
     }
-    let Some(ak) = account_seed else { return Ok(None) };
+    let Some(ak) = account_seed else {
+        return Ok(None);
+    };
     let seed = new_seed();
     let cert = certify(ak, pubkey_of_seed(&seed), &pairing::device_label(), true);
     let key = DeviceKey { seed, cert };
@@ -155,9 +177,21 @@ pub async fn dial_account(
     let dev = ensure(app, vk, account, ak.as_ref());
     let out = match dev {
         Ok(Some(dev)) => {
-            match dial(dev.seed, mode, node, relay_urls.clone(), pkarr_url.clone(), dns_origin.clone(), Some(&dev.cert)).await {
+            match dial(
+                dev.seed,
+                mode,
+                node,
+                relay_urls.clone(),
+                pkarr_url.clone(),
+                dns_origin.clone(),
+                Some(&dev.cert),
+            )
+            .await
+            {
                 Err(e) if e.contains("unknown method") => match &ak {
-                    Some(seed) => dial(*seed, mode, node, relay_urls, pkarr_url, dns_origin, None).await,
+                    Some(seed) => {
+                        dial(*seed, mode, node, relay_urls, pkarr_url, dns_origin, None).await
+                    }
                     None => Err("Home Node 版本过旧，暂不支持用设备密钥登录".into()),
                 },
                 Err(e) if e.contains("device_revoked") => {
@@ -217,14 +251,26 @@ pub async fn device_list(state: State<'_, AppState>) -> Result<Vec<Value>, Strin
 }
 
 #[tauri::command]
-pub async fn device_rename(state: State<'_, AppState>, device: String, label: String) -> Result<(), String> {
+pub async fn device_rename(
+    state: State<'_, AppState>,
+    device: String,
+    label: String,
+) -> Result<(), String> {
     let session = session_of(&state).await?;
-    session.device_rename(parse_id(&device)?, label.trim()).await.map_err(|e| e.to_string())
+    session
+        .device_rename(parse_id(&device)?, label.trim())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// 吊销一台设备：用本机账号私钥签发吊销记录交给家节点。只有管理设备能做。
 #[tauri::command]
-pub async fn device_revoke(app: AppHandle, state: State<'_, AppState>, device: String, reason: String) -> Result<(), String> {
+pub async fn device_revoke(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    device: String,
+    reason: String,
+) -> Result<(), String> {
     let session = session_of(&state).await?;
     let device = parse_id(&device)?;
     if device == session.device_id() {
@@ -232,11 +278,13 @@ pub async fn device_revoke(app: AppHandle, state: State<'_, AppState>, device: S
     }
     let account = session.id_bytes();
     let vk = vk_of(&state)?;
-    let mut ak = load_identity_seed(&app, &vk, &hex(&account)).map_err(|_| "not_admin_device".to_string())?;
+    let mut ak = load_identity_seed(&app, &vk, &hex(&account))
+        .map_err(|_| "not_admin_device".to_string())?;
     let sk = nm_crypto::SecretKey::from_bytes(&ak);
     ak.zeroize();
     let reason = reason.trim().chars().take(64).collect::<String>();
-    let r = nm_crypto::sign_device_revoke(&sk, account, device, pair::now_ms() as i64, &reason, false);
+    let r =
+        nm_crypto::sign_device_revoke(&sk, account, device, pair::now_ms() as i64, &reason, false);
     session.device_revoke(&r).await.map_err(|e| e.to_string())?;
     auth::audit(&data_dir(&app)?, "device:revoke");
     Ok(())
@@ -254,7 +302,11 @@ pub async fn device_freeze(
     registry: String,
 ) -> Result<usize, String> {
     let (local, domain) = norm_account(&local, &domain)?;
-    let device = if device.trim().is_empty() { None } else { Some(parse_id(&device)?) };
+    let device = if device.trim().is_empty() {
+        None
+    } else {
+        Some(parse_id(&device)?)
+    };
     let node = resolve_home_node(&registry, &domain).await?;
     let (_client, session) = dial(new_seed(), "nat", &node, Vec::new(), None, None, None).await?;
     let n = session

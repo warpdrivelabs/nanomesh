@@ -1,4 +1,4 @@
-//! nm-admind 登录鉴权：固定用户 `admin` + 初始密码（首登强制改密），argon2 哈希持久化，内存会话。
+//! nm-admind 登录鉴权：固定用户 `admin` + 随机初始密码（首登强制改密），argon2 哈希持久化，内存会话。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -10,8 +10,6 @@ use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use argon2::Argon2;
 use serde::{Deserialize, Serialize};
 
-/// 初始密码：首次运行内置；`must_change=true`，首次登录后强制修改。
-pub const DEFAULT_PASSWORD: &str = "nmspace-admin";
 const SESSION_TTL: Duration = Duration::from_secs(8 * 3600);
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -28,23 +26,24 @@ pub struct Auth {
 }
 
 impl Auth {
-    /// 载入凭据；不存在则用默认初始密码创建(`must_change=true`)。返回 (Auth, 是否用默认密码新建)。
-    pub fn load_or_init(path: PathBuf) -> anyhow::Result<(Self, bool)> {
-        if let Ok(bytes) = std::fs::read(&path) {
-            if let Ok(cred) = serde_json::from_slice::<Cred>(&bytes) {
-                return Ok((
-                    Self {
-                        path,
-                        cred: Mutex::new(cred),
-                        sessions: Mutex::new(HashMap::new()),
-                    },
-                    false,
-                ));
-            }
+    /// 载入凭据；不存在则生成随机初始密码并创建(`must_change=true`)。
+    /// 返回的 `Some(password)` 仅用于首次启动打印一次。
+    pub fn load_or_init(path: PathBuf) -> anyhow::Result<(Self, Option<String>)> {
+        if let Ok(bytes) = std::fs::read(&path)
+            && let Ok(cred) = serde_json::from_slice::<Cred>(&bytes) {
+            return Ok((
+                Self {
+                    path,
+                    cred: Mutex::new(cred),
+                    sessions: Mutex::new(HashMap::new()),
+                },
+                None,
+            ));
         }
+        let initial_password = gen_initial_password();
         let cred = Cred {
             username: "admin".into(),
-            phc: hash_password(DEFAULT_PASSWORD)?,
+            phc: hash_password(&initial_password)?,
             must_change: true,
         };
         let auth = Self {
@@ -53,7 +52,7 @@ impl Auth {
             sessions: Mutex::new(HashMap::new()),
         };
         auth.persist()?;
-        Ok((auth, true))
+        Ok((auth, Some(initial_password)))
     }
 
     fn persist(&self) -> anyhow::Result<()> {
@@ -139,4 +138,9 @@ fn gen_token() -> String {
         .iter()
         .map(|x| format!("{x:02x}"))
         .collect()
+}
+
+fn gen_initial_password() -> String {
+    let token = gen_token();
+    format!("nm-{}", &token[..24.min(token.len())])
 }

@@ -221,13 +221,12 @@ async fn ollama_stream(
                 continue;
             }
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) else { continue };
-            if let Some(d) = v["choices"][0]["delta"]["content"].as_str() {
-                if !d.is_empty() {
-                    content.push_str(d);
-                    let frame = serde_json::json!({ "delta": d });
-                    if tx.send((serde_json::to_vec(&frame)?, false)).is_err() {
-                        return Ok(());
-                    }
+            if let Some(d) = v["choices"][0]["delta"]["content"].as_str()
+                && !d.is_empty() {
+                content.push_str(d);
+                let frame = serde_json::json!({ "delta": d });
+                if tx.send((serde_json::to_vec(&frame)?, false)).is_err() {
+                    return Ok(());
                 }
             }
             if !v["usage"].is_null() {

@@ -76,8 +76,5 @@ async fn membership_transitive_discovery() {
     assert_eq!(info.source, "discovered", "B 在 C 处应标记为自动发现");
     assert_eq!(info.name, "B-node", "应经签名卡片传播 B 的名称");
     assert_eq!(info.federation, "test-fed", "发现的 B 应标注所属联邦");
-    assert!(
-        c.peers_list().iter().any(|id| *id == b_id),
-        "C 的对等表应已纳入 B（可拨号）"
-    );
+    assert!(c.peers_list().contains(&b_id), "C 的对等表应已纳入 B（可拨号）");
 }

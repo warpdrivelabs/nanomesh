@@ -267,6 +267,9 @@ static GRAMS_OUT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::n
 static BYTES_IN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static BYTES_OUT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// 单个 prost `Gram` 帧的最大编码长度。大媒体应走 `blob.put` 的内容寻址路径。
+pub const MAX_GRAM_FRAME: usize = 4 * 1024 * 1024;
+
 /// 累计应用层流量快照。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TrafficStat {
@@ -291,6 +294,9 @@ pub fn traffic_snapshot() -> TrafficStat {
 pub async fn write_gram(send: &mut SendStream, gram: &Gram) -> Result<()> {
     use std::sync::atomic::Ordering::Relaxed;
     let buf = gram.encode_to_vec();
+    if buf.len() > MAX_GRAM_FRAME {
+        return Err(TransportError::Iroh(format!("gram frame too large: {} > {}", buf.len(), MAX_GRAM_FRAME)));
+    }
     let len = (buf.len() as u32).to_be_bytes();
     send.write_all(&len).await.map_err(err)?;
     send.write_all(&buf).await.map_err(err)?;
@@ -305,6 +311,9 @@ pub async fn read_gram(recv: &mut RecvStream) -> Result<Gram> {
     let mut len = [0u8; 4];
     recv.read_exact(&mut len).await.map_err(err)?;
     let n = u32::from_be_bytes(len) as usize;
+    if n > MAX_GRAM_FRAME {
+        return Err(TransportError::Iroh(format!("gram frame too large: {n} > {MAX_GRAM_FRAME}")));
+    }
     let mut buf = vec![0u8; n];
     recv.read_exact(&mut buf).await.map_err(err)?;
     let gram = Gram::decode(buf.as_slice()).map_err(err)?;

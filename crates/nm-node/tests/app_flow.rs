@@ -1,7 +1,7 @@
 //! App 流程回归：复刻桌面端真实用法——
 //! - 群：owner 建群后**主动添加**成员(group_add，而非成员自行 join)，再发群消息，成员应实时收到。
 //! - 频道：owner 建频道，第二个客户端 **channel_sub 订阅**后，owner publish，订阅者应实时收到。
-//! 单节点、两个在线客户端；用于定位"其他实体收不到群/频道消息"。
+//!   单节点、两个在线客户端；用于定位"其他实体收不到群/频道消息"。
 
 use std::collections::HashMap;
 use std::time::Duration;

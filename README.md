@@ -1,91 +1,148 @@
-# nmspace
+# NANO MESH / nmspace
 
-基于 **iroh** 的去中心化网格系统（方案 B）。支持 **P2P 消息、群组、频道订阅、多服务器联邦**；
-前端一套 UI 覆盖 **web / desktop / iOS / android**。
+基于 **iroh** 的去中心化网格通信系统。当前后端核心、原生客户端、管理台、域名注册中心、联邦同步和 WebSocket 浏览器网关已经落地。
 
-> 完整设计见 [`docs/PLAN_B_iroh_decentralized_im.md`](docs/PLAN_B_iroh_decentralized_im.md)；
-> 旧工程分析见 [`docs/ANALYSIS.md`](docs/ANALYSIS.md)；旧代码归档在 `old_space/`。
+## 当前状态
+
+- 已实现：P2P 私聊、离线信箱、群组、频道、presence、多设备、设备吊销、联系人册、内容寻址 blob、去中心命名、联邦成员发现、per-topic 联邦双写/退火管、selfhost relay/dns、管理台与域名注册中心。
+- 原生客户端：`clients/mobile`，Tauri 2 + 静态 JS/CSS UI + 进程内 `nm-client`，桌面/移动共用。
+- Web 端：`crates/nm-gateway` / `bin/nm-gatewayd` 提供最小可用 JSON WebSocket 桥 `/ws`，用于浏览器经 `nm-client` 接入 iroh；WebTransport 尚未实现。
+- 安全现状：iroh 连接身份基于公钥认证；多设备证书、吊销、Grant、命名/presence/成员卡片等已有签名能力。消息内容的端到端加密尚未接入，联邦 gossip 中的部分业务消息仍是明文载荷。
 
 ## 目录结构
 
-```
-nmspace/
-├── crates/              # 后端 Rust 库（cargo workspace）
-│   ├── nm-proto         # 线协议：ID / gram / 编解码（prost 生成）
-│   ├── nm-core          # 领域模型 + 核心 trait（Deliver / Store）
-│   ├── nm-transport     # iroh 端点：dial-by-key / 流 / 身份
-│   ├── nm-store         # 存储抽象 + redb 后端
-│   ├── nm-gossip        # 频道 pub/sub（iroh-gossip）
-│   ├── nm-federation    # 跨节点状态（iroh-docs）+ 路由/重试/防环
-│   ├── nm-crypto        # 身份 / 校验 / 口令；可选 E2E(openmls)
-│   ├── nm-entity        # 可扩展实体类型体系（EntityKind trait + 内置类型）
-│   ├── nm-node          # 服务端节点（装配各服务）
-│   ├── nm-client        # 客户端 SDK（原生端内嵌 / 网关复用）
-│   └── nm-gateway       # 浏览器网关：WebTransport/WS ↔ iroh
+```text
+.
+├── crates/
+│   ├── nm-proto         # prost 线协议
+│   ├── nm-transport     # iroh endpoint、dial-by-key、gram 帧收发
+│   ├── nm-store         # redb 持久化：inbox/entity/group/name/device/blob/roster
+│   ├── nm-gossip        # iroh-gossip topic 封装
+│   ├── nm-federation    # per-topic group/inbox/names 联邦封装
+│   ├── nm-crypto        # 签名、Grant、多设备证书/吊销
+│   ├── nm-entity        # 实体类型与 profile 打包
+│   ├── nm-node          # 节点服务编排与路由核心
+│   ├── nm-client        # 原生 SDK
+│   └── nm-gateway       # 浏览器 WebSocket 网关：JSON /ws ↔ nm-client ↔ iroh
 ├── bin/
-│   ├── nmd              # 节点守护进程
-│   ├── nm-gatewayd      # 网关守护进程
-│   ├── nm-echo          # 回声机器人（测试用：收到消息原样回发）
-│   └── nm-agent         # 无界面实体守护进程示例（compute.inference）
-├── clients/app/         # 前端：React+TS（web PWA）+ Tauri(desktop/iOS/android)
-├── xtask/               # 开发者任务编排
-├── docs/                # 设计文档
-└── old_space/           # 旧工程归档（勿动）
+│   ├── nmd              # 网格节点守护进程
+│   ├── nm-admind        # 本机管理台，反代 nmd 管理 API
+│   ├── nm-domain        # 全球域名注册中心
+│   ├── nm-compute       # compute.inference 示例服务
+│   ├── nm-agent         # agent 示例
+│   └── nm-echo          # echo 测试实体
+├── clients/mobile       # Tauri 原生客户端与静态 UI
+├── xtask                # 打包发布任务
+├── src/index.ts         # Cloudflare Container 入口，仅包装 nm-domain
+└── docs                 # 设计、部署、测试与安全文档
 ```
 
 ## 前置依赖
 
-- **Rust** 1.85+（`rustup`）
-- **protoc**（Protocol Buffers 编译器）：`nm-proto` 构建时需要。
-  - macOS：`brew install protobuf`
-  - Debian/Ubuntu：`apt install protobuf-compiler`
-  - Fedora：`dnf install protobuf-compiler`
-  - 其他：从 [github.com/protocolbuffers/protobuf/releases](https://github.com/protocolbuffers/protobuf/releases) 下载二进制，加入 `PATH`
-- **Node.js** 18+（前端，可选）
+- Rust 1.85+。
+- `protoc`，用于构建 `nm-proto`。
+- Node.js 18+，仅在构建 Tauri 前端、Cloudflare 容器入口或运行 wrangler 时需要。
+
+macOS:
+
+```bash
+brew install protobuf
+```
 
 ## 快速开始
 
+检查后端 workspace：
+
 ```bash
-# 后端（node + gateway）
 cargo check --workspace
-cargo run -p nmd
-
-# 测试辅助（与 nmd 配合）
-cargo run -p nm-echo -- --node '<nmd 打印的 NM_NODE_ADDR JSON>'
-cargo run -p nm-agent -- --node '<nmd 打印的 NM_NODE_ADDR JSON>'
-
-# 前端（详见 clients/README.md）
-cd clients/app && npm install
-npm run dev            # 浏览器（连 nm-gatewayd）
-npm run tauri dev      # 桌面原生（内嵌 iroh）
+cargo test --workspace --exclude xtask
 ```
 
-本机常驻运行：`./start-all.sh` / `./stop-all.sh` / `./restart-all.sh`（release 预编译 + nohup + PID + 日志；
-配置在仓库根 `nmd.toml`，模板见 `bin/nmd/src/main.rs` 顶部文档）。
-
-## 打包发布（mac / linux / windows，解压即可执行）
+启动一个节点：
 
 ```bash
-cargo xtask dist                                    # 当前主机平台
-cargo xtask dist --all                              # 官方矩阵：macos-arm64/x64 + linux-x64(musl 静态) + windows-x64
-cargo xtask dist --target x86_64-unknown-linux-musl # 指定 triple
-cargo xtask dist --bins nmd,nm-admind --no-build    # 自定二进制集 / 只打包不编译
+cargo run -p nmd
 ```
 
-产物在 `dist/nanomesh-<版本>-<平台>.zip`：`bin/`（nmd + nm-admind + nm-echo）+ 启停脚本
-（unix 为 `*.sh`，windows 为 `*.bat`/`*.ps1`）+ `nmd.toml.example` + README——解压后
-`./start-all.sh`（或双击 `start-all.bat`）即运行，首启自动生成含随机管理令牌的 `nmd.toml`。
+`nmd` 会打印：
 
-- mac 目标原生编译；linux(musl 静态)/windows(gnu) 交叉编译需 `brew install zig cargo-zigbuild`
-- 模板与脚本资产在 `xtask/assets/`，打包逻辑在 `xtask/src/main.rs`（`cargo xtask dist` 即 `cargo run -p xtask -- dist`）
+- `NM_NODE_ID`：稳定节点公钥，nat/selfhost 模式下对端优先用它拨号。
+- `NM_NODE_ADDR`：完整地址 JSON，LAN/本机测试可直接使用。
 
-## 架构要点
+启动辅助实体：
 
-- **原生端**(desktop/iOS/android)：Tauri 外壳 + 进程内 Rust `nm-client`(iroh)，App 即真实节点。
-- **Web 端**：同一套 React UI 构建为 PWA，经 `nm-gatewayd`(WebTransport/WS) 接入（浏览器不能直跑 QUIC）。
-- **接入抽象**：前端 `src/core` 里 `CoreTransport` 一个接口 + 两个适配器（Tauri IPC / 网关），界面写一次跑四端。
-- **去中心**：节点按 Ed25519 公钥互联(dial-by-key)，无中心 S2S 网关；频道走 iroh-gossip，联邦状态走 iroh-docs。
+```bash
+cargo run -p nm-echo -- --node '<NM_NODE_ADDR JSON>'
+cargo run -p nm-agent -- --node '<NM_NODE_ADDR JSON>'
+cargo run -p nm-compute -- --node '<NM_NODE_ADDR JSON>'
+```
 
-## 状态
+启动原生客户端：
 
-脚手架阶段：目录/crate 图/依赖/前端接入抽象已就位，业务逻辑为 TODO（对应 PLAN_B 各节 / 里程碑 M0–M3）。
+```bash
+cd clients/mobile
+npm install
+npm run tauri dev
+```
+
+启动浏览器网关：
+
+```bash
+cargo run -p nm-gatewayd
+```
+
+默认监听 `127.0.0.1:9620`，可用 `NM_GATEWAY_LISTEN=127.0.0.1:9700` 覆盖。`/health` 返回健康状态，`/ws` 接受 JSON 命令：`connect`、`disconnect`、`my_id`、`node_id`、`directory_query`、`send_to`、`send_group`、`group_list`；节点推送会转成 `{"type":"event","event":...}`。
+
+## 运行与管理
+
+本机常驻运行脚本：
+
+```bash
+./start-all.sh
+./stop-all.sh
+./restart-all.sh
+```
+
+运行配置为仓库根目录 `nmd.toml`，该文件包含本机 token/路径等敏感配置，已被 `.gitignore` 排除。
+
+`nm-admind` 和 `nm-domain` 默认只监听 `127.0.0.1`。首次创建 state 文件时会生成随机初始密码并只在本次启动日志中打印，登录后需要立即修改。生产对外暴露时请显式传 `--listen 0.0.0.0:PORT` 并配置 TLS 或反向代理。
+
+## 打包发布
+
+```bash
+cargo xtask dist
+cargo xtask dist --all
+cargo xtask dist --target x86_64-unknown-linux-musl
+cargo xtask dist --bins nmd,nm-admind --no-build
+```
+
+产物在 `dist/nanomesh-<版本>-<平台>.zip`，包含二进制、启停脚本、`nmd.toml.example` 和 README。
+
+Cloudflare Container 路径只构建和运行 `nm-domain`：
+
+```bash
+npm install
+npx wrangler deploy
+```
+
+## 测试说明
+
+默认测试套件中，非 ignored 用例应保持通过：
+
+```bash
+cargo test --workspace --exclude xtask
+```
+
+部分测试被标记为 `ignored`，原因通常是依赖 N0 公共网络、真实 iroh-dns-server、真实 seed，或 iroh Minimal-mode 跨节点 overlay 在本地/CI 中不稳定。这些用例用于手动验收真实网络路径，不适合作为默认 CI 阻塞项。
+
+严格 lint 目标：
+
+```bash
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+## 安全边界
+
+- `nmd.identity`、`*.identity`、`*.redb`、`*.state.json`、`nmd.toml` 均视为本机敏感运行态，不应提交。
+- 普通 gram 帧有固定大小上限；大媒体应走 `blob.put` 内容寻址路径。
+- 当前联邦 gossip 仍有明文业务载荷，公开联邦前应完成 E2E 加密与更完整的应用层签名策略。

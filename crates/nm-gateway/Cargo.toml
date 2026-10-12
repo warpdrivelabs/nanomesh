@@ -8,7 +8,11 @@ license.workspace = true
 nm-proto = { workspace = true }
 nm-core = { workspace = true }
 nm-client = { workspace = true }
-axum = { workspace = true }
+nm-transport = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }

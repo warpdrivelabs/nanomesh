@@ -68,7 +68,10 @@ async fn multi_device_send_receive_revoke() {
 
     // 不是自己的证书：设备公钥与连接不符。
     let stranger = nm_client::Client::bind_local([69u8; 32]).await.unwrap();
-    let err = stranger.online_as(addr.clone(), &c1).await.err().expect("mismatch must fail");
+    let err = match stranger.online_as(addr.clone(), &c1).await {
+        Ok(_) => panic!("mismatch must fail"),
+        Err(err) => err,
+    };
     assert!(err.to_string().contains("device_mismatch"), "{err}");
 
     let bob = nm_client::Client::bind_local([64u8; 32]).await.unwrap();
@@ -91,7 +94,7 @@ async fn multi_device_send_receive_revoke() {
 
     // 3) 普通设备不能改口令；管理设备可以。
     let reset = r#"{"local":"alice","domain":"md.test","password":"newpassword1"}"#;
-    let e = s2.name_account("name.reset", reset).await.err().expect("member must be denied");
+    let e = s2.name_account("name.reset", reset).await.expect_err("member must be denied");
     assert!(e.to_string().contains("not_admin_device"), "{e}");
     s1.name_account("name.reset", reset).await.expect("admin reset");
 
@@ -117,7 +120,10 @@ async fn multi_device_send_receive_revoke() {
     assert_eq!(ev["event"], "revoked");
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(s2.close_reason().is_some(), "revoked device session must be closed");
-    let e = dev2.online_as(addr.clone(), &c2).await.err().expect("revoked device must not reconnect");
+    let e = match dev2.online_as(addr.clone(), &c2).await {
+        Ok(_) => panic!("revoked device must not reconnect"),
+        Err(err) => err,
+    };
     assert!(e.to_string().contains("device_revoked"), "{e}");
     let list = s1.device_list().await.unwrap();
     assert!(list.iter().any(|d| d.revoked.is_some()));
@@ -128,7 +134,7 @@ async fn multi_device_send_receive_revoke() {
     let c3 = sign_device_cert(&ak, d3_pk, "phone", DEVICE_ROLE_MEMBER, 4);
     let dev3 = nm_client::Client::bind_local(d3_seed).await.unwrap();
     let s3 = dev3.online_as(addr.clone(), &c3).await.expect("d3 hello");
-    let e = sb.device_freeze("alice", "md.test", "wrong-password", Some(d3_pk)).await.err().expect("bad pw");
+    let e = sb.device_freeze("alice", "md.test", "wrong-password", Some(d3_pk)).await.expect_err("bad pw");
     assert!(e.to_string().contains("bad_password"), "{e}");
     assert_eq!(sb.device_freeze("alice", "md.test", "newpassword1", Some(d3_pk)).await.expect("freeze"), 1);
     tokio::time::sleep(Duration::from_millis(300)).await;

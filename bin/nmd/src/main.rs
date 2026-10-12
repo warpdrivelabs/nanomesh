@@ -352,12 +352,11 @@ async fn main() -> anyhow::Result<()> {
         Mode::Nat => {
             // 穿透 NAT + 同网通用（N0：n0 公共中继 + 打洞 + 发现）。
             // bind_port>0：固定 UDP 端口——同网可按固定端口直连(配合防火墙放行)，同时保留穿透 NAT。
-            let n = if cfg.bind_port != 0 {
+            if cfg.bind_port != 0 {
                 nm_node::Node::bind_persistent_on(seed, &cfg.db, cfg.bind_port).await?
             } else {
                 nm_node::Node::bind_persistent(seed, &cfg.db).await?
-            };
-            n
+            }
         }
         Mode::SelfHost => {
             // 自建中继 + 自建 dns/pkarr：自主可控地穿透 NAT。
@@ -370,7 +369,7 @@ async fn main() -> anyhow::Result<()> {
             }
             let origin = cfg.dns.origin.clone();
             tracing::info!(relays = ?relays, pkarr = %pkarr_url, dns_origin = ?origin, "selfhost 基础设施");
-            let n = nm_node::Node::bind_persistent_selfhosted(
+            nm_node::Node::bind_persistent_selfhosted(
                 seed,
                 &cfg.db,
                 relays,
@@ -378,13 +377,11 @@ async fn main() -> anyhow::Result<()> {
                 origin,
                 cfg.bind_port,
             )
-            .await?;
-            n
+            .await?
         }
         Mode::Lan => {
             // 仅同网直连（Minimal），固定端口便于对等配置。
-            let n = nm_node::Node::bind_local_persistent_on(seed, &cfg.db, cfg.bind_port).await?;
-            n
+            nm_node::Node::bind_local_persistent_on(seed, &cfg.db, cfg.bind_port).await?
         }
     };
     let node = Arc::new(node);
@@ -490,20 +487,18 @@ async fn main() -> anyhow::Result<()> {
     // 后端管理控制 API（若配置了 [admin] api_addr + api_token）：供 nm-admind 取数/下发控制。
     if let (Some(api_addr), Some(api_token)) =
         (cfg.admin.api_addr.clone(), cfg.admin.api_token.clone())
+        && !api_addr.trim().is_empty()
+        && !api_token.trim().is_empty()
     {
-        if !api_addr.trim().is_empty() && !api_token.trim().is_empty() {
-            let node_admin = node.clone();
-            let db_path = cfg.db.clone();
-            let admin_fed = cfg.membership.federation.clone();
-            tokio::spawn(async move {
-                if let Err(e) =
-                    admin::serve(node_admin, api_addr, api_token, db_path, admin_fed).await
-                {
-                    tracing::warn!("admin api exited: {e}");
-                }
-            });
-            tracing::info!("admin control API enabled");
-        }
+        let node_admin = node.clone();
+        let db_path = cfg.db.clone();
+        let admin_fed = cfg.membership.federation.clone();
+        tokio::spawn(async move {
+            if let Err(e) = admin::serve(node_admin, api_addr, api_token, db_path, admin_fed).await {
+                tracing::warn!("admin api exited: {e}");
+            }
+        });
+        tracing::info!("admin control API enabled");
     }
 
     // 供他方配置：nat/selfhost 对端用 NM_NODE_ID(公钥)；lan 对端用 NM_NODE_ADDR。
