@@ -102,11 +102,18 @@ pub(crate) async fn deliver_group_here(gram: &Gram, members: &[Vec<u8>], skip_ri
 
 /// 本节点是否为该账号的 home（目录登记 home_node 为本节点，或有设备在本节点登记）。
 pub(crate) fn is_home_here(ctx: &Ctx, account: &[u8]) -> bool {
+    // entity.home_node 是账号的**单一权威** home——有它就以它为准，不再 OR 设备判定。
+    // 否则：账号的旧设备 cert 一旦残留在**非 home** 节点（该账号曾在连本节点的设备登录过），
+    // 下面的 devices.any() 会让本节点也误判 "home 在我"，deliver_direct 遂投本地离线库并 return、
+    // 不往真正的 home 节点转发 → 跨节点消息困死在本节点（表现为"对方收不到"，且因 entity 同步时序
+    // 时有时无 → 忽通忽不通）。account 的全部设备必连同一 home node，故 home_node 唯一即正确。
     if let Some(e) = ctx.dir.entities.get(account) {
-        if e.home_node == ctx.node_id.as_slice() {
-            return true;
+        if !e.home_node.is_empty() {
+            return e.home_node == ctx.node_id.as_slice();
         }
     }
+    // 仅当 directory 无该账号的 home_node 记录时（老数据/entity 尚未同步），才回退到
+    // "本节点有其设备" —— 此时无更好的单一权威可依。
     ctx.devices.iter().any(|d| d.cert.as_ref().is_some_and(|c| c.account == account))
 }
 
@@ -290,3 +297,65 @@ pub(crate) async fn deliver_or_store(to: &[u8], gram: &Gram, ctx: &Ctx) {
     }
 }
 
+
+#[cfg(test)]
+mod home_here_tests {
+    use super::*;
+    use nm_proto::pb::{DeviceCert, DeviceInfo, Entity};
+    use crate::Node;
+
+    /// 回归：账号的 home 在**别的**节点，但其旧设备 cert 残留在本节点 devices 表时，
+    /// is_home_here 必须返回 false——否则 deliver_direct 会把跨节点消息误投本地离线库并 return、
+    /// 不往真正 home 节点转发（线上现象：对方收不到、忽通忽不通）。
+    #[tokio::test]
+    async fn stale_device_cert_does_not_claim_home() {
+        let node = Node::bind_local([7u8; 32]).await.unwrap();
+        let ctx = node.ctx();
+        let me = ctx.node_id;
+        let other_node = [9u8; 32]; // 账号真正的 home
+        let account = vec![42u8; 32];
+        let dev_key = vec![43u8; 32]; // 该账号在本节点登录过的旧设备公钥
+
+        // directory：账号的 entity.home_node 指向**另一个**节点。
+        ctx.dir.merge_lww(Entity {
+            entity_id: account.clone(),
+            home_node: other_node.to_vec(),
+            updated_at: 100,
+            ..Default::default()
+        });
+        // 本节点 devices 表残留该账号的设备 cert（曾在连本节点的设备上登录过）。
+        ctx.devices.insert(
+            dev_key.clone(),
+            DeviceInfo {
+                cert: Some(DeviceCert { account: account.clone(), device: dev_key.clone(), ..Default::default() }),
+                ..Default::default()
+            },
+        );
+
+        // 修复前：devices.any() 命中 → 误判 true（消息困死本节点）。修复后：以 home_node 为准 → false。
+        assert!(!is_home_here(&ctx, &account),
+            "home_node 指向他节点时，本地残留设备 cert 不应让本节点误判为 home");
+
+        // 对照：账号 home_node 正是本节点 → true（正常本地投递）。
+        let local_acct = vec![50u8; 32];
+        ctx.dir.merge_lww(Entity {
+            entity_id: local_acct.clone(),
+            home_node: me.to_vec(),
+            updated_at: 100,
+            ..Default::default()
+        });
+        assert!(is_home_here(&ctx, &local_acct), "home_node==本节点应为 home");
+
+        // 对照：directory 无 home_node 记录（老数据）但本地有设备 → 回退设备判定 true。
+        let legacy_acct = vec![60u8; 32];
+        let legacy_dev = vec![61u8; 32];
+        ctx.devices.insert(
+            legacy_dev.clone(),
+            DeviceInfo {
+                cert: Some(DeviceCert { account: legacy_acct.clone(), device: legacy_dev, ..Default::default() }),
+                ..Default::default()
+            },
+        );
+        assert!(is_home_here(&ctx, &legacy_acct), "无 entity 记录时回退到设备判定");
+    }
+}

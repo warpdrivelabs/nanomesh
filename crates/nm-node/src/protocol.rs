@@ -145,12 +145,33 @@ async fn handle_conn(conn: IrohConnection, ctx: Ctx, rid: Vec<u8>) {
         };
         tracing::info!(kind = ?gram.kind(), gram_id = gram.gram_id, "recv gram");
         let principal = ctx.principals.get(&rid).map(|p| p.clone()).unwrap_or_else(|| rid.clone());
-        if let Some(reply) = handle_gram(&gram, &ctx, &principal, &rid).await {
-            if let Err(e) = write_gram(&mut send, &reply).await {
-                tracing::warn!("write reply failed: {e}");
-            }
-            let _ = send.finish();
+        // 黑名单（纵深防御）：连接建立后才被拉黑的对端，其后续 gram 一律**静默**丢弃——
+        // 不回任何响应、直接关流，不向被拉黑者泄露"你被拉黑了"（区别于下方的明确拒绝）。
+        let blacklisted = [principal.as_slice(), rid.as_slice()].iter().any(|k| {
+            <[u8; 32]>::try_from(*k).map(|c| ctx.blacklist.contains(&c)).unwrap_or(false)
+        });
+        if blacklisted {
+            let _ = send.finish(); // 静默：关流不写，被拉黑方读到空流（符合"拉黑=隐身"）
+            continue;
         }
+        // 契约：非黑名单的请求必有响应。handle_gram 返回 None = 消息被拒（防冒名/未知 kind），
+        // 若直接关流，client 的 route_send 读到空流会报 "stream finished early(0 bytes read)"——
+        // 既误导用户（像连接坏了，实为被拒），又让重连无法自愈。故回明确的拒绝 Reply。
+        let reply = match handle_gram(&gram, &ctx, &principal, &rid).await {
+            Some(r) => r,
+            None => reply_gram(
+                &gram,
+                GramKind::Reply,
+                Some(nm_proto::pb::Any {
+                    type_url: "nmspace.v1/error".into(),
+                    value: b"rejected: message dropped by node (sender-principal mismatch / unsupported)".to_vec(),
+                }),
+            ),
+        };
+        if let Err(e) = write_gram(&mut send, &reply).await {
+            tracing::warn!("write reply failed: {e}");
+        }
+        let _ = send.finish();
     }
     let my_sid = conn.stable_id();
     let stale = ctx.sessions.get(&rid).map(|c| c.stable_id() == my_sid).unwrap_or(false);
@@ -163,7 +184,8 @@ async fn handle_conn(conn: IrohConnection, ctx: Ctx, rid: Vec<u8>) {
 
 /// `caller` 是账号身份（设备连接 hello 后为账号公钥，否则等于连接公钥）；`rid` 是连接公钥。
 async fn handle_gram(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Option<Gram> {
-    // 黑名单（纵深防御）：连接建立后才被拉黑的对端，其后续 gram 一律丢弃。
+    // 黑名单：主拦截在 handle_conn（静默关流、不泄露拉黑）。此处为纵深防御冗余——
+    // 正常走连接路径到不了（上游已拦），保留以防未来有其它调用方绕过 handle_conn。
     for k in [caller, rid] {
         if let Ok(c) = <[u8; 32]>::try_from(k) {
             if ctx.blacklist.contains(&c) {
@@ -172,9 +194,21 @@ async fn handle_gram(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Optio
         }
     }
     // 防冒名：聊天消息的 sender 必须是本连接的账号身份。
-    if matches!(gram.kind(), GramKind::Message | GramKind::GroupMessage) && gram.sender.as_slice() != caller {
-        tracing::warn!("message sender != connection principal; dropped");
-        return None;
+    // caller 是本连接 principal：device.hello 成功后 = 账号；未完成时 fallback = 设备密钥(rid)。
+    // 故 sender==caller 不够——online_as 的多设备连接里 sender 是账号、caller 可能还是设备密钥，
+    // 会把合法消息误判为冒名并静默丢弃（client 侧表现为 "stream finished early"）。
+    // 正确判据：sender 是本连接 principal，或是本连接设备(rid)的证书所声明的账号。
+    if matches!(gram.kind(), GramKind::Message | GramKind::GroupMessage) {
+        let sender_ok = gram.sender.as_slice() == caller
+            || ctx
+                .devices
+                .get(rid)
+                .and_then(|d| d.cert.as_ref().map(|c| c.account == gram.sender))
+                .unwrap_or(false);
+        if !sender_ok {
+            tracing::warn!("message sender != connection principal/device-account; dropped");
+            return None;
+        }
     }
     // 群消息：receiver 是 group_id，由节点扇出（不是直接路由目标）。
     // 扇出可能对每个离线/跨节点成员做目录查询/中继（各带网络超时），若同步等待会

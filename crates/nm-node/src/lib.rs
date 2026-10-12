@@ -160,6 +160,31 @@ pub struct Node {
     revoked: Arc<Revoked>,
     // Defect C：冷启动待发转发队列 (to, GroupGossip字节, 入队秒)——inbox overlay 0 邻居时暂存，邻居成型后补发。
     pending_fwd: Arc<std::sync::Mutex<PendingForwardQueue>>,
+    // 换网观测（P2 看板）：本端点地址变化次数 + 最近一次变化时间（Unix ms）。供 admin /system 展示。
+    roam: Arc<RoamStat>,
+}
+
+/// 换网观测计数（供 admin 看板）：记录本节点端点地址变化次数与最近一次时间。
+#[derive(Default)]
+pub struct RoamStat {
+    /// 本端点地址（IP/relay）变化累计次数（换网/漫游的近似计数）。
+    pub changes: std::sync::atomic::AtomicU64,
+    /// 最近一次地址变化的 Unix 毫秒（0 = 启动以来未变化）。
+    pub last_change_ms: std::sync::atomic::AtomicU64,
+}
+
+impl RoamStat {
+    /// 记一次地址变化（换网哨兵触发时调用）。
+    pub fn record(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.changes.fetch_add(1, Relaxed);
+        self.last_change_ms.store(now_ms(), Relaxed);
+    }
+    /// 读快照：(变化次数, 最近变化 Unix ms)。
+    pub fn snapshot(&self) -> (u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (self.changes.load(Relaxed), self.last_change_ms.load(Relaxed))
+    }
 }
 
 

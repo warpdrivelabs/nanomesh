@@ -110,6 +110,37 @@ impl Node {
         self.ep.online().await;
     }
 
+    /// 通知底层 iroh「网络可能已变化」（换网自愈兜底）。桌面(mac/Linux) iroh 多能自检，调用无害；
+    /// 换网哨兵据此补一脚，覆盖 iroh 漏检的场景（睡眠唤醒 / VPN / 同网卡改 IP）。
+    /// 见 `docs/NETWORK_ROAMING_RECOVERY_DESIGN.md` §5.2。
+    pub async fn notify_network_change(&self) {
+        self.ep.notify_network_change().await;
+    }
+
+    /// 后台监听本节点端点地址（IP/relay）变化并结构化日志（换网可观测）。端点关闭即任务退出。
+    pub fn spawn_addr_watch(&self, tag: &'static str) {
+        self.ep.spawn_addr_watch(tag);
+    }
+
+    /// 监听本节点端点地址变化，每次变化（换网）调用 `on_change`。供 nmd 据此重新 online + 重打印
+    /// NM_NODE_ADDR + `notify_network_change` 兜底。首个值为基线不触发；端点关闭即任务结束。
+    /// 每次变化自动累加 [`crate::RoamStat`]（供 admin 看板），再调用户回调。
+    pub fn spawn_addr_change<F>(&self, mut on_change: F)
+    where
+        F: FnMut() + Send + 'static,
+    {
+        let roam = self.roam.clone();
+        self.ep.spawn_addr_change(move || {
+            roam.record();
+            on_change();
+        });
+    }
+
+    /// 换网观测快照：(地址变化次数, 最近变化 Unix ms)。供 admin 看板。
+    pub fn roam_snapshot(&self) -> (u64, u64) {
+        self.roam.snapshot()
+    }
+
     fn from_ep(ep: NodeEndpoint, store: Option<Arc<RedbStore>>) -> Result<Self, NodeError> {
         let dir = Arc::new(MemDirectory::new());
         let groups: Arc<DashMap<Vec<u8>, Group>> = Arc::new(DashMap::new());
@@ -192,6 +223,7 @@ impl Node {
             devices,
             revoked,
             pending_fwd: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+            roam: Arc::new(crate::RoamStat::default()),
         })
     }
 

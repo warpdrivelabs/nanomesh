@@ -13,6 +13,7 @@ use std::time::Duration;
 use dashmap::DashMap;
 mod error;
 mod gram;
+mod reconnect;
 mod rpc;
 mod session_blob;
 mod session_calls;
@@ -26,6 +27,9 @@ mod session_roster;
 mod stream;
 
 pub use error::ClientError;
+pub use reconnect::{
+    online_by_id_retry, serve_with_reconnect, RECONNECT_BACKOFF_MAX, RECONNECT_BACKOFF_START,
+};
 pub use stream::InferStream;
 
 use error::err;
@@ -92,6 +96,27 @@ impl Client {
     /// N0/selfhost 有发现服务时无需调用（发现服务会自动解析）。
     pub fn add_peer_addr(&self, addr: Addr) {
         self.ep.add_addr(addr);
+    }
+
+    /// 后台监听本端点地址变化并结构化日志（换网可观测）。`tag` 区分角色（nm-compute/nm-agentd/...）。
+    /// 见 `docs/NETWORK_ROAMING_RECOVERY_DESIGN.md` §5.1。
+    pub fn watch_addr_log(&self, tag: &'static str) {
+        self.ep.spawn_addr_watch(tag);
+    }
+
+    /// 通知底层 iroh「网络可能已变化」（换网自愈）。移动端系统网络回调经桥接调用本方法。
+    pub async fn notify_network_change(&self) {
+        self.ep.notify_network_change().await;
+    }
+
+    /// 监听本端点地址（IP/relay）变化，每次变化调用 `on_change`。换网后地址一变即触发——
+    /// 客户端据此**主动重连**，恢复入站推送通道（不必等用户下一次发送）。
+    /// 见 `docs/NETWORK_ROAMING_RECOVERY_DESIGN.md` §5.5。端点关闭即任务结束。
+    pub fn spawn_addr_change_task<F>(&self, mut on_change: F)
+    where
+        F: FnMut() + Send + 'static,
+    {
+        self.ep.spawn_addr_change(move || on_change());
     }
 
     /// 作为资源所有者，用本地私钥签发一份能力授权(Grant)：

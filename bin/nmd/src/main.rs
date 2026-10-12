@@ -505,6 +505,31 @@ async fn main() -> anyhow::Result<()> {
     println!("NM_NODE_ID={}", hex(node.id().as_bytes()));
     println!("NM_NODE_ADDR={}", nm_transport::addr_to_string(&node.addr()));
     tracing::info!(id = %node.id().fmt_short(), "node serving");
+
+    // P2 换网自愈：nat/selfhost（有中继/发现）下监听本端点地址变化，换网时：
+    //  1) 重新 online()（重连中继、确保地址重发布到发现服务，使对端仍能按公钥找到本节点）；
+    //  2) 重新打印 NM_NODE_ADDR（供读完整地址的运维/脚本拿到新地址，不再陈旧）；
+    //  3) notify_network_change() 兜底 iroh 漏检的场景（睡眠唤醒 / VPN / 同网卡改 IP）。
+    // 见 docs/NETWORK_ROAMING_RECOVERY_DESIGN.md §5.2。lan 模式无中继/发现，换网重发布无意义，跳过。
+    if needs_online {
+        node.spawn_addr_watch("nmd"); // 地址变化结构化日志（可观测）
+        let roam_node = node.clone();
+        node.spawn_addr_change(move || {
+            let node = roam_node.clone();
+            tokio::spawn(async move {
+                tracing::info!("nmd 检测到本端点地址变化（疑似换网）——重新 online + 重发布地址");
+                node.notify_network_change().await; // 兜底：促使 iroh 重探测/重发布
+                // 重新 online（限时，避免网络瞬断时卡住哨兵）。
+                match tokio::time::timeout(Duration::from_secs(10), node.online()).await {
+                    Ok(()) => tracing::info!("nmd 换网后 online — 地址已重发布，可继续被按 id 发现"),
+                    Err(_) => tracing::warn!("nmd 换网后 online 超时（中继/网络暂不可达）——周期任务稍后自愈"),
+                }
+                // 重打印新地址（NM_NODE_ADDR 不再陈旧）。
+                println!("NM_NODE_ADDR={}", nm_transport::addr_to_string(&node.addr()));
+            });
+        });
+    }
+
     node.serve().await?;
     Ok(())
 }

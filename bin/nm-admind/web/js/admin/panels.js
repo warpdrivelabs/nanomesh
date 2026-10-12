@@ -132,13 +132,22 @@ export function renderPanel(tab, host, d, refresh) {
       <canvas class="chart"></canvas></div>`;
     drawChart(host.querySelector(".chart"));
   } else if (tab === "system") {
+    const relays = Array.isArray(d.relays) ? d.relays : [];
+    const ips = Array.isArray(d.ip_addrs) ? d.ip_addrs : [];
+    const roamN = Number(d.roam_changes) || 0;
     host.innerHTML = `<div class="grid">
       ${metric("进程 PID", d.pid)}
       ${metric("内存 RSS", fmtBytes(d.rss_bytes))}
       ${metric("CPU 占用", (Number(d.cpu_pct) || 0).toFixed(1) + "%")}
       ${metric("运行时长", fmtDur(d.uptime_s))}
       ${metric("在线连接", d.online)}
+      ${metric("换网次数", roamN)}
+      ${metric("最近换网", roamN ? sinceMs(Number(d.roam_last_ms)) + " 前" : "—")}
     </div>
+    <div class="card"><div class="card__title">网络地址（换网自愈可观测）</div>
+      <p class="muted">本节点当前对外地址：换网后由发现服务自动重发布，对端按公钥 id 仍可寻址。</p>
+      <div class="kv"><span>中继 relay</span><b>${relays.length ? relays.map(esc).join("<br>") : "—"}</b></div>
+      <div class="kv"><span>直连 IP</span><b>${ips.length ? ips.map(esc).join("<br>") : "—"}</b></div></div>
     <div class="card"><p class="muted">CPU / 内存为进程实时监控。真正的 CPU / 内存<strong>硬配额</strong>属部署级（systemd / cgroup），此处仅展示用量，不做强制限制。</p></div>`;
   } else if (tab === "identity") {
     host.innerHTML = `

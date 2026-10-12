@@ -103,12 +103,15 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // 连节点。client 必须存活到进程结束——Session 只持 conn，client 持 iroh endpoint。
-    // addr 保留所有权供重连循环复用（每次 online 接受 clone）。
+    // 换网自愈：按 home node 公钥 id 重连（而非缓存完整地址），发现服务换网后重解析其地址。
+    // 见 docs/NETWORK_ROAMING_RECOVERY_DESIGN.md §5.3/§5.4。
     let addr = nm_transport::addr_from_string(&args.node)?;
+    let home_id: [u8; 32] = *addr.id.as_bytes();
     // N0 预设（n0 公共中继 + DNS/pkarr 发现）：按公钥发现远程 home node、穿透 NAT。
     // （原 bind_local=Infra::Local/Minimal，无中继无发现，仅同网直连——连不上远程服务器。）
     let client = nm_client::Client::bind(seed).await?;
-    let p2p = client.online(addr.clone()).await?;
+    client.watch_addr_log("nm-agentd"); // 换网地址变化结构化日志
+    let p2p = client.online_by_id(home_id).await?;
 
     // 注册为 agent.assistant（presence；backend 非空以过 validate）。
     let mut attrs = HashMap::new();
@@ -155,23 +158,16 @@ async fn main() -> anyhow::Result<()> {
         // 循环结构：先 serve（消耗 session），serve 退出后重连拿到新 session，再循环顶部继续。
         let mut next_p2p = Some(p2p);
         let mut cur_provider = provider_id;
-        let mut backoff = Duration::from_secs(2);
-        let addr = addr; // addr 不再移走，只 clone
         loop {
             // 取出本轮的 session（首次来自上方建立，后续来自重连）。
             let cur_p2p = next_p2p.take().expect("next_p2p always set before loop top");
             match nm_agent_bridge::serve::serve(cur_p2p, cur_provider, &args.model, sys_opt).await {
-                Ok(()) => eprintln!("nm-agentd: serve loop 退出（连接断开），{} 秒后重连…", backoff.as_secs()),
-                Err(e) => eprintln!("nm-agentd: serve 出错: {e}，{} 秒后重连…", backoff.as_secs()),
+                Ok(()) => eprintln!("nm-agentd: serve loop 退出（连接断开/换网），自动重连…"),
+                Err(e) => eprintln!("nm-agentd: serve 出错: {e}，自动重连…"),
             }
-            // 重连：睡一下，重新 online + 注册 + 找 provider，成功后放入 next_p2p。
+            // 重连：共享原语按 home node 公钥 id 重连 + 指数退避（换网后发现服务重解析地址）。
             loop {
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(30));
-                let new_p2p = match client.online(addr.clone()).await {
-                    Ok(s) => s,
-                    Err(e) => { eprintln!("nm-agentd: 重连失败: {e}，继续等待…"); continue; }
-                };
+                let new_p2p = nm_client::online_by_id_retry(&client, home_id, "nm-agentd").await;
                 let mut attrs = HashMap::new();
                 attrs.insert("model".to_string(), args.model.clone());
                 if let Err(e) = new_p2p.register_as::<kinds::AgentAssistant>(
@@ -179,7 +175,9 @@ async fn main() -> anyhow::Result<()> {
                     &args.name,
                     attrs,
                 ).await {
-                    eprintln!("nm-agentd: 重注册失败: {e}，继续等待…"); continue;
+                    eprintln!("nm-agentd: 重注册失败: {e}，继续等待…");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
                 }
                 let providers = new_p2p.find_model_providers(Some(&args.model)).await.unwrap_or_default();
                 if let Some(prov) = providers.first() {
@@ -188,7 +186,6 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 next_p2p = Some(new_p2p);
-                backoff = Duration::from_secs(2);
                 eprintln!("nm-agentd: 重连成功，继续 serve…");
                 break;
             }

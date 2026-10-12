@@ -39,6 +39,17 @@ pub(crate) fn run() {
             }
             #[cfg(desktop)]
             tray::setup(_app.handle())?;
+            // 换网重连驱动（P1 入站主动重连）：建换网信号通道，存入 AppState 供哨兵发信号，
+            // 启动长驻驱动任务收信号后主动重连。见 docs/NETWORK_ROAMING_RECOVERY_DESIGN.md §5.5。
+            {
+                let state = _app.state::<AppState>();
+                let (roam_tx, roam_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+                let _ = state.roam_tx.set(roam_tx);
+                tauri::async_runtime::spawn(connection::roam_reconnect_driver(
+                    _app.handle().clone(),
+                    roam_rx,
+                ));
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

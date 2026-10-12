@@ -43,6 +43,10 @@ pub(crate) struct AppState {
     pub(crate) reconnect_lock: Mutex<()>,
     /// 供重连 helper 在任意位置取 AppHandle（setup 时写入）。
     pub(crate) app_handle: std::sync::OnceLock<AppHandle>,
+    /// 换网信号通道（P1 入站主动重连）：换网哨兵检测到本端点地址变化即 `send(())`；
+    /// setup 里启动的重连驱动收到后主动重连，恢复入站推送——不必等用户下一次发送。
+    /// 用通道而非在哨兵里直接重连：重连 future 含 tauri `State`（非 Send），不能进裸 spawn。
+    pub(crate) roam_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<()>>,
 }
 
 pub(crate) fn hex(b: &[u8]) -> String {

@@ -45,7 +45,23 @@ pub(crate) async fn route_send(conn: &IrohConnection, gram: &Gram) -> Result<Gra
     let (mut send, mut recv) = conn.open_bi().await.map_err(err)?;
     write_gram(&mut send, gram).await.map_err(err)?;
     send.finish().map_err(err)?;
-    read_gram(&mut recv).await.map_err(err)
+    let reply = read_gram(&mut recv).await.map_err(err)?;
+    // 节点对"被丢弃的请求"回明确错误 Reply（type_url=nmspace.v1/error），而非静默关流
+    // （否则 client 读空流报底层的 "stream finished early"，既误导又无法诊断）。此处把它
+    // 转成可读的业务错误，让上层 toast "被节点拒绝: …" 而非令人费解的传输错。
+    if reply
+        .payload
+        .as_ref()
+        .is_some_and(|p| p.type_url == "nmspace.v1/error")
+    {
+        let msg = reply
+            .payload
+            .as_ref()
+            .map(|p| String::from_utf8_lossy(&p.value).into_owned())
+            .unwrap_or_else(|| "被节点拒绝".into());
+        return Err(ClientError::Other(msg));
+    }
+    Ok(reply)
 }
 
 pub(crate) async fn register_over<K: EntityKind>(

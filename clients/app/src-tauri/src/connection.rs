@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use nm_client::{Client, Session};
 use serde_json::json;
-use tauri::{AppHandle, Emitter, State, async_runtime};
+use tauri::{AppHandle, Emitter, Manager, State, async_runtime};
 
 use crate::{
     AppState, Conn, ConnectArgs, devices, hex, pair, pairing, parse_id, session_of, vk_of,
@@ -105,7 +105,42 @@ pub(crate) async fn finish_session(
         my_id,
         conn_gen,
     });
+
+    // 换网哨兵（P1 入站主动重连）：本端点地址(IP/relay)一变即发换网信号，由 setup 的重连驱动主动重连，
+    // 恢复入站推送通道——不必等用户下一次发送才发现连接已死。重连走单飞锁 + gen 判重（见 reconnect），
+    // 天然防与发送重连打架。哨兵只发信号（Send 安全）：重连 future 含 tauri State，不能进裸 spawn。
+    // 见 docs/NETWORK_ROAMING_RECOVERY_DESIGN.md §5.5。
+    if let Some(conn) = state.conn.lock().await.as_ref() {
+        if let Some(tx) = state.roam_tx.get().cloned() {
+            conn._client.spawn_addr_change_task(move || {
+                let _ = tx.send(());
+            });
+        }
+    }
+
     Ok(hex(&my_id))
+}
+
+/// 换网重连驱动：在 setup 里启动的长驻任务，从换网信号通道收信号，去重节流后主动重连。
+/// 持 `AppHandle`（Send），每次现取 `State` 调 `reconnect`，避开"重连 future 非 Send 不能进裸 spawn"。
+pub(crate) async fn roam_reconnect_driver(
+    app: AppHandle,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+) {
+    while rx.recv().await.is_some() {
+        // 节流：合并 300ms 内的连环地址变化（换网瞬间常多次抖动），只重连一次。
+        while tokio::time::timeout(std::time::Duration::from_millis(300), rx.recv())
+            .await
+            .is_ok()
+        {}
+        let Some(state) = app.try_state::<AppState>() else { continue };
+        let _ = app.emit("core://event", json!({ "type": "roaming" }));
+        // 用当前连接世代触发重连；若期间已被发送路径重连过（gen 前进）则复用、不重复拨号。
+        let cur_gen = { state.conn.lock().await.as_ref().map(|c| c.conn_gen) };
+        if let Some(g) = cur_gen {
+            let _ = reconnect(&app, &state, g).await;
+        }
+    }
 }
 
 /// 连接节点：**同网优先、穿透兜底**。

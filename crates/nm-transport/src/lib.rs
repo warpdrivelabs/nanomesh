@@ -259,6 +259,62 @@ impl NodeEndpoint {
     pub async fn close(&self) {
         self.endpoint.close().await;
     }
+
+    /// 通知 iroh「网络可能已变化」（换网自愈）。桌面(mac/Linux) iroh 多能自检，调用无害；
+    /// 移动端(Android/iOS)无法自检，须由系统网络回调经上层桥接调用本方法，触发重 STUN + 重发布地址。
+    /// 见 `docs/NETWORK_ROAMING_RECOVERY_DESIGN.md` §5.1/§5.6。
+    pub async fn notify_network_change(&self) {
+        self.endpoint.network_change().await;
+    }
+
+    /// 地址(本节点 IP / home relay)变化的 Watcher。换网后地址变化→可驱动上层「重发布 / 重连」。
+    pub fn watch_addr(&self) -> impl iroh::Watcher<Value = EndpointAddr> + use<> {
+        self.endpoint.watch_addr()
+    }
+
+    /// 后台监听本端点地址变化并结构化日志（换网可观测）。每次地址变化记一条 `endpoint addr changed`，
+    /// 便于定位换网后恢复卡在哪一层。端点关闭即任务退出。`tag` 用于区分角色(nmd/compute/agentd/...)。
+    pub fn spawn_addr_watch(&self, tag: &'static str) {
+        use iroh::Watcher as _;
+        let mut w = self.endpoint.watch_addr();
+        let id = self.id_bytes();
+        tokio::spawn(async move {
+            let mut prev = w.get();
+            tracing::info!(tag, id = %hex32(&id), relays = prev.relay_urls().count(),
+                ips = prev.ip_addrs().count(), "addr watch started");
+            while let Ok(cur) = w.updated().await {
+                tracing::info!(
+                    tag, id = %hex32(&id),
+                    relays = cur.relay_urls().count(), ips = cur.ip_addrs().count(),
+                    "endpoint addr changed（疑似换网）——发现服务将重发布，上层应按 id 重连"
+                );
+                prev = cur;
+            }
+            let _ = prev;
+            tracing::info!(tag, "addr watch ended（端点关闭）");
+        });
+    }
+
+    /// 监听本端点地址变化，每次变化（换网）调用 `on_change`。供上层客户端据此**主动重连**。
+    /// 首个值不算变化（仅记基线）；之后每次 `updated` 触发一次。端点关闭即任务结束。
+    pub fn spawn_addr_change<F>(&self, mut on_change: F)
+    where
+        F: FnMut() + Send + 'static,
+    {
+        use iroh::Watcher as _;
+        let mut w = self.endpoint.watch_addr();
+        tokio::spawn(async move {
+            let _ = w.get(); // 基线，不触发
+            while w.updated().await.is_ok() {
+                on_change();
+            }
+        });
+    }
+}
+
+/// 32 字节公钥的十六进制短串（供日志）。
+fn hex32(b: &[u8; 32]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 /// 全局应用层流量计数（gram 收发条数与字节数，含 4 字节长度前缀）。供后端管理台流量监控。

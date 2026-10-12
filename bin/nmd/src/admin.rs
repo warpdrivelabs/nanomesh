@@ -215,12 +215,20 @@ fn traffic_json(t: &nm_transport::TrafficStat) -> Value {
 
 async fn system(State(st): State<AppState>) -> Json<Value> {
     let pm = *st.proc.lock().unwrap();
+    let addr = st.node.addr();
+    let (roam_changes, roam_last_ms) = st.node.roam_snapshot();
     Json(json!({
         "pid": std::process::id(),
         "rss_bytes": pm.rss_bytes,
         "cpu_pct": pm.cpu_pct,
         "uptime_s": st.start.elapsed().as_secs(),
         "online": st.node.online_count(),
+        // 换网/寻址可观测（P2 看板）：当前端点地址、relay、IP，及换网计数/最近换网时间。
+        "node_addr": nm_transport::addr_to_string(&addr),
+        "relays": addr.relay_urls().map(|u| u.to_string()).collect::<Vec<_>>(),
+        "ip_addrs": addr.ip_addrs().map(|a| a.to_string()).collect::<Vec<_>>(),
+        "roam_changes": roam_changes,
+        "roam_last_ms": roam_last_ms,
     }))
 }
 
