@@ -364,9 +364,17 @@ export function renderPassword(host) {
 }
 
 /* ---------------- 域名管理面板 ---------------- */
-export function renderNames(host, dom, names, pending, refresh) {
+export function renderNames(host, dom, names, pending, refresh, devices) {
   const domains = (dom && dom.domains) || [];
   const list = (names && names.names) || [];
+  // 按账号公钥分组设备（devices_snapshot 返回全部设备；命名登记的 pubkey 即账号公钥）。
+  const devByAccount = new Map();
+  ((devices && devices.devices) || []).forEach((d) => {
+    const k = (d.account || "").toLowerCase();
+    if (!k) return;
+    if (!devByAccount.has(k)) devByAccount.set(k, []);
+    devByAccount.get(k).push(d);
+  });
   const waiting = ((pending && pending.items) || []).filter((a) => a.status === "pending");
   const pendingErr = pending && pending.error;
   const approved = ((pending && pending.items) || []).filter((a) => a.status === "approved");
@@ -382,12 +390,27 @@ export function renderNames(host, dom, names, pending, refresh) {
     : '<tr><td colspan="4" class="muted center">没有正在等待审核的域名</td></tr>';
   const domOpts = domains.map((d) => `<option value="${esc(d)}">${esc(d)}</option>`).join("");
   const rows = list.length
-    ? list.map((r) => `<tr>
-        <td><b>${esc(r.local_part)}</b></td>
-        <td>${esc(r.domain)}</td>
-        <td style="font-family:monospace;font-size:11.5px;word-break:break-all">${esc(r.pubkey)}</td>
-        <td><button class="btn btn--ghost nm-del" data-d="${esc(r.domain)}" data-l="${esc(r.local_part)}">删除</button></td>
-      </tr>`).join("")
+    ? list.map((r) => {
+        const devs = devByAccount.get(String(r.pubkey || "").toLowerCase()) || [];
+        const devRows = devs.length
+          ? devs.map((d) => `<div class="nm-devrow" style="display:flex;gap:8px;align-items:center;padding:3px 0;flex-wrap:wrap">
+                <span class="badge ${d.online ? "badge--ok" : "badge--off"}" style="font-size:10.5px">${d.online ? "在线" : "离线"}</span>
+                <span style="min-width:90px">${esc(d.label || "（未命名设备）")}</span>
+                <span class="muted" style="font-size:10.5px">${esc(d.role || "member")}${d.revoked ? " · 已吊销" : ""}</span>
+                <span style="font-family:monospace;font-size:11px;word-break:break-all;flex:1;min-width:280px">${esc(d.device)}</span>
+              </div>`).join("")
+          : '<div class="muted" style="font-size:12px;padding:3px 0">该账号在本节点无登记设备</div>';
+        return `<tr>
+          <td><b>${esc(r.local_part)}</b></td>
+          <td>${esc(r.domain)}</td>
+          <td style="font-family:monospace;font-size:11.5px;word-break:break-all">${esc(r.pubkey)}</td>
+          <td><button class="btn btn--ghost nm-del" data-d="${esc(r.domain)}" data-l="${esc(r.local_part)}">删除</button></td>
+        </tr>
+        <tr class="nm-devices"><td></td><td colspan="3" style="padding-top:0">
+          <div class="muted" style="font-size:11.5px;margin:2px 0 4px">设备（${devs.length}）：设备名 · 角色 · 设备公钥</div>
+          ${devRows}
+        </td></tr>`;
+      }).join("")
     : '<tr><td colspan="4" class="muted center">该节点尚未登记任何命名</td></tr>';
   host.innerHTML = `
     <div class="card">
@@ -419,7 +442,7 @@ export function renderNames(host, dom, names, pending, refresh) {
       <div class="err2" hidden style="margin-bottom:8px"></div>
       <table class="tbl"><thead><tr><th>local-part</th><th>域名</th><th>公钥</th><th></th></tr></thead>
       <tbody>${rows}</tbody></table>
-      <div class="muted" style="margin-top:8px">一个公钥可登记多个名字；一个名字只指向一个公钥。登记/删除即经联邦 gossip 广播，各节点收敛。</div>
+      <div class="muted" style="margin-top:8px">一个公钥可登记多个名字；一个名字只指向一个公钥。每条登记下展开该账号在本节点的设备列表与各设备公钥。登记/删除即经联邦 gossip 广播，各节点收敛。</div>
     </div>`;
   const err = host.querySelector(".err"), err2 = host.querySelector(".err2");
   const wait = host.querySelector(".wait");

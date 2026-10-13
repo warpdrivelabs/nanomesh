@@ -143,13 +143,14 @@ export class AdminShell extends HTMLElement {
     }
     if (this.tab === "names") {
       try {
-        const [dom, names, pending] = await Promise.all([
+        const [dom, names, pending, devices] = await Promise.all([
           api("/api/names/domains"),
           api("/api/names/list"),
           api("/api/names/pending").catch((ex) => ({ items: [], error: ex.message })),
+          api("/api/devices").catch(() => ({ devices: [] })),
         ]);
         meta.textContent = t("shell.refreshed") + new Date().toLocaleTimeString();
-        renderNames(host, dom, names, pending, () => this.refresh());
+        renderNames(host, dom, names, pending, () => this.refresh(), devices);
       } catch (ex) {
         host.innerHTML = `<div class="err">${esc(ex.message)}</div>`;
       }

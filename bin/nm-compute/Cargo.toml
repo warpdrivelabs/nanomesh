@@ -26,3 +26,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 futures-util = "0.3"
 reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "stream"] }
+
+[dev-dependencies]
+# P2P 模型网络端到端测试（p2p_model.rs）：以本层真实 Backend 起 provider，
+# 用下层 nm-node 跑一个本地节点路由。依赖方向正确（上层应用测试依赖下层核心库）。
+nm-node = { workspace = true }

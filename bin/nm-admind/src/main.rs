@@ -131,6 +131,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/overview", get(|s: State<AppState>, h: HeaderMap| proxy_get(s, h, "/overview")))
         .route("/api/connections", get(|s: State<AppState>, h: HeaderMap| proxy_get(s, h, "/connections")))
         .route("/api/users", get(|s: State<AppState>, h: HeaderMap| proxy_get(s, h, "/users")))
+        .route("/api/devices", get(|s: State<AppState>, h: HeaderMap| proxy_get(s, h, "/devices")))
         .route("/api/storage", get(|s: State<AppState>, h: HeaderMap| proxy_get(s, h, "/storage")))
         .route("/api/traffic", get(|s: State<AppState>, h: HeaderMap| proxy_get(s, h, "/traffic")))
         .route("/api/system", get(|s: State<AppState>, h: HeaderMap| proxy_get(s, h, "/system")))

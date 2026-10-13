@@ -140,6 +140,28 @@ impl Node {
         self.groups.len()
     }
 
+    /// 全部已登记设备快照（后端管理台「域内命名登记」下展开某账号的设备列表用）。
+    /// 每条含所属账号、设备公钥、标签、角色、实时在线态与吊销状态；在线态按当前会话/映射重算
+    /// （与 device_list 一致：principals 映射 + 本连接存活）。设备仅存在于账号 home 所在节点。
+    pub fn devices_snapshot(&self) -> Vec<nm_proto::DeviceInfo> {
+        self.devices
+            .iter()
+            .map(|d| {
+                let mut i = d.clone();
+                let rid = d.key();
+                let acct = i.cert.as_ref().map(|c| c.account.clone()).unwrap_or_default();
+                i.online = self.sessions.contains_key(rid)
+                    && self.principals.get(rid).is_some_and(|p| p.as_slice() == acct.as_slice());
+                i.revoked = self
+                    .revoked
+                    .get(rid)
+                    .filter(|r| r.account == acct)
+                    .map(|r| r.clone());
+                i
+            })
+            .collect()
+    }
+
     /// 当前联邦对等节点公钥列表（管理台「对等节点」用）。
     pub fn peers_list(&self) -> Vec<[u8; 32]> {
         self.peers

@@ -93,6 +93,7 @@ pub async fn serve(
         .route("/overview", get(overview))
         .route("/connections", get(connections))
         .route("/users", get(users))
+        .route("/devices", get(devices))
         .route("/storage", get(storage))
         .route("/traffic", get(traffic))
         .route("/system", get(system))
@@ -189,6 +190,29 @@ async fn users(State(st): State<AppState>) -> Json<Value> {
         .collect();
     let banned: Vec<String> = banned_vec.iter().map(|b| hex(b)).collect();
     Json(json!({ "users": users, "banned": banned }))
+}
+
+/// 全部已登记设备（按账号分组由前端完成）：供「域内命名登记」展开某账号的设备列表 + 每个设备公钥。
+async fn devices(State(st): State<AppState>) -> Json<Value> {
+    let rows: Vec<Value> = st
+        .node
+        .devices_snapshot()
+        .into_iter()
+        .map(|d| {
+            let cert = d.cert.unwrap_or_default();
+            let label = if d.label.is_empty() { cert.label.clone() } else { d.label.clone() };
+            json!({
+                "account": hex(&cert.account),   // 所属账号公钥（= 命名登记里的 pubkey）
+                "device": hex(&cert.device),     // 设备连接公钥
+                "label": label,
+                "role": cert.role,
+                "online": d.online,
+                "last_seen": d.last_seen,
+                "revoked": d.revoked.is_some(),
+            })
+        })
+        .collect();
+    Json(json!({ "devices": rows }))
 }
 
 async fn storage(State(st): State<AppState>) -> Json<Value> {
