@@ -5,7 +5,7 @@ use prost::Message;
 
 use crate::retire::inbox_retireable;
 use crate::s2s::fed_relay;
-use crate::{Ctx, Principals, Sessions, LIVE_TTL_MS, PENDING_FWD_CAP};
+use crate::{Ctx, Devices, Principals, Sessions, LIVE_TTL_MS, PENDING_FWD_CAP};
 
 /// 某群主题的 bootstrap 对端：群归属节点(锚点) + 本节点已知对等 + F2 pkarr 解析到的 seed（无锚/兜底）。
 pub(crate) fn group_bootstrap(group: &Group, ctx: &Ctx) -> Vec<[u8; 32]> {
@@ -117,22 +117,52 @@ pub(crate) fn is_home_here(ctx: &Ctx, account: &[u8]) -> bool {
     ctx.devices.iter().any(|d| d.cert.as_ref().is_some_and(|c| c.account == account))
 }
 
-/// 账号当前在本节点的在线连接：账号公钥直连（老客户端）+ hello 过的设备连接。
-pub(crate) fn online_rids(sessions: &Sessions, principals: &Principals, account: &[u8]) -> Vec<Vec<u8>> {
+/// 账号当前在本节点的在线连接：账号公钥直连（老客户端）+ hello 过的设备连接
+/// （principals 映射）+ **devices 表登记的设备中仍有活连接者**。
+///
+/// 最后一项是对 churn 的容错：连接在 `session up`→`device.hello`→秒断→`session closed`
+/// （清 principals）反复翻搅时，principals 映射会被 `session closed` 清掉，仅凭它会把
+/// 「连接其实还在、只是映射刚被清」的设备误判为不在线 → 实时消息不直投、落离线库 →
+/// 用户在线却收不到、需重进才 drain。devices 表的 cert.account 是**持久**的设备归属，
+/// 只要该设备 rid 此刻在 sessions 里有活连接，就应算作该账号的在线连接、可直投。
+pub(crate) fn online_rids(
+    sessions: &Sessions,
+    principals: &Principals,
+    devices: &Devices,
+    account: &[u8],
+) -> Vec<Vec<u8>> {
     let mut v: Vec<Vec<u8>> = principals
         .iter()
         .filter(|e| e.value().as_slice() == account && sessions.contains_key(e.key()))
         .map(|e| e.key().clone())
         .collect();
-    if sessions.contains_key(account) {
+    // devices 表里属于该账号、且仍有活连接的设备 rid（principals 映射可能已被 churn 清掉）。
+    for d in devices.iter() {
+        if d.cert.as_ref().is_some_and(|c| c.account == account)
+            && sessions.contains_key(d.key())
+            && !v.contains(d.key())
+        {
+            v.push(d.key().clone());
+        }
+    }
+    if sessions.contains_key(account) && !v.contains(&account.to_vec()) {
         v.push(account.to_vec());
     }
     v
 }
 
-pub(crate) fn account_online(sessions: &Sessions, principals: &Principals, account: &[u8]) -> bool {
+pub(crate) fn account_online(
+    sessions: &Sessions,
+    principals: &Principals,
+    devices: &Devices,
+    account: &[u8],
+) -> bool {
     sessions.contains_key(account)
         || principals.iter().any(|e| e.value().as_slice() == account && sessions.contains_key(e.key()))
+        // churn 容错：principals 映射可能已被 session-closed 清掉，但连接仍在（见 online_rids）。
+        || devices
+            .iter()
+            .any(|d| d.cert.as_ref().is_some_and(|c| c.account == account) && sessions.contains_key(d.key()))
 }
 
 /// 账号离线消息的存放对象：有效（未吊销）设备各一份；从未登记设备的老账号存在账号公钥下。
@@ -160,7 +190,7 @@ pub(crate) async fn deliver_account(
     skip: Option<&[u8]>,
 ) -> bool {
     let mut reached: Vec<Vec<u8>> = Vec::new();
-    for r in online_rids(&ctx.sessions, &ctx.principals, account) {
+    for r in online_rids(&ctx.sessions, &ctx.principals, &ctx.devices, account) {
         if skip == Some(r.as_slice()) {
             continue;
         }
@@ -272,7 +302,7 @@ pub(crate) async fn try_push(to: &[u8], gram: &Gram, sessions: &Sessions) -> boo
 /// 投递一份 gram 给目标实体：在线且推送成功→直达；否则落离线队列(若有 store)。
 pub(crate) async fn deliver_or_store(to: &[u8], gram: &Gram, ctx: &Ctx) {
     // 1) 本地在线设备直投（同时给离线的有效设备各存一份）。
-    if account_online(&ctx.sessions, &ctx.principals, to) {
+    if account_online(&ctx.sessions, &ctx.principals, &ctx.devices, to) {
         deliver_account(to, gram, ctx, true, None).await;
         return;
     }
@@ -357,5 +387,44 @@ mod home_here_tests {
             },
         );
         assert!(is_home_here(&ctx, &legacy_acct), "无 entity 记录时回退到设备判定");
+    }
+
+    /// 回归（C）：device.list 的 caller 退化为「设备 rid」（hello 未完成/首连时）时，
+    /// 必须仍能解析出真账号并列出其设备——否则新注册用户设备列表显示为空。
+    #[tokio::test]
+    async fn device_list_resolves_account_when_caller_is_device_rid() {
+        use crate::devices::device_list;
+        use nm_proto::DeviceList;
+        use prost::Message;
+
+        let node = Node::bind_local([8u8; 32]).await.unwrap();
+        let ctx = node.ctx();
+        let account = vec![70u8; 32];
+        let dev_rid = vec![71u8; 32]; // 该账号的设备（= 本连接 rid）
+
+        // devices 表已登记该设备（hello 曾成功持久化），但本连接的 caller 仍退化为设备 rid。
+        ctx.devices.insert(
+            dev_rid.clone(),
+            DeviceInfo {
+                cert: Some(DeviceCert { account: account.clone(), device: dev_rid.clone(), ..Default::default() }),
+                ..Default::default()
+            },
+        );
+
+        // caller == 设备 rid（hello 未把 caller 升格为账号的时序）。修复前用设备 rid 查 cert.account 为空。
+        let (ok, result, _) = device_list(&ctx, &dev_rid, &dev_rid);
+        assert!(ok);
+        let list = DeviceList::decode(result.unwrap().value.as_slice()).unwrap();
+        assert_eq!(list.devices.len(), 1, "caller 退化为设备 rid 时也应解析出账号并列出其设备");
+        assert_eq!(
+            list.devices[0].cert.as_ref().unwrap().account, account,
+            "列出的应是该设备所属账号的设备"
+        );
+
+        // 对照：caller 已是账号（正常 hello 后）——照常列出。
+        let (ok2, result2, _) = device_list(&ctx, &account, &dev_rid);
+        assert!(ok2);
+        let list2 = DeviceList::decode(result2.unwrap().value.as_slice()).unwrap();
+        assert_eq!(list2.devices.len(), 1, "caller 为账号时正常列出");
     }
 }

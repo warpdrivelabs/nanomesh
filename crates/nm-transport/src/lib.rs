@@ -295,17 +295,52 @@ impl NodeEndpoint {
         });
     }
 
-    /// 监听本端点地址变化，每次变化（换网）调用 `on_change`。供上层客户端据此**主动重连**。
-    /// 首个值不算变化（仅记基线）；之后每次 `updated` 触发一次。端点关闭即任务结束。
+    /// 监听本端点地址变化，仅在**实质换网**时调用 `on_change`。供上层客户端据此**主动重连**。
+    ///
+    /// iroh 的 `watch_addr()` 对任何候选刷新都更新（relay 候选轮换、STUN 反射地址续约、
+    /// NAT 映射维持……），在 NAT / 共享出口 IP 环境下这些候选**本来就一直在抖**。若每次
+    /// 更新都 `on_change` → 上层重连 → 新连接地址又抖 → 再触发，形成**自激重连风暴**
+    /// （线上实测：单设备 1-3 秒重连一次，device.hello 反复、principals 映射时有时无 →
+    /// 对方忽收忽不收、presence 忽在忽不在）。故此处两道闸：
+    /// 1) **实质变化判定**：只有「直连 IP 候选集合」发生变化才算换网；仅 relay 候选/端口微抖忽略。
+    ///    直连 IP 集合全空→有、或换了不同 IP，才是真的换了网络路径。
+    /// 2) **冷却窗口**：两次触发至少间隔 `COOLDOWN`，吸收连环抖动，彻底断开自激回路。
+    ///
+    /// 首个值仅记基线、不触发。端点关闭即任务结束。
     pub fn spawn_addr_change<F>(&self, mut on_change: F)
     where
         F: FnMut() + Send + 'static,
     {
         use iroh::Watcher as _;
+        use std::collections::BTreeSet;
+        use std::net::IpAddr;
+
+        /// 两次换网触发的最小间隔：吸收 NAT/relay 候选的稳态抖动，断开自激回路。
+        const COOLDOWN: Duration = Duration::from_secs(25);
+
+        // 直连 IP 候选的「身份集合」——只取 IP（不含端口），端口在 NAT 维持中常变、不代表换网。
+        fn ip_set(a: &EndpointAddr) -> BTreeSet<IpAddr> {
+            a.ip_addrs().map(|s| s.ip()).collect()
+        }
+
         let mut w = self.endpoint.watch_addr();
         tokio::spawn(async move {
-            let _ = w.get(); // 基线，不触发
-            while w.updated().await.is_ok() {
+            let mut prev_ips = ip_set(&w.get()); // 基线，不触发
+            let mut last_fire: Option<tokio::time::Instant> = None;
+            while let Ok(cur) = w.updated().await {
+                let cur_ips = ip_set(&cur);
+                // 实质变化：直连 IP 集合不同（换网段 / 从无到有 / 丢失全部直连）。
+                // 仅 relay 候选或端口变化 → cur_ips == prev_ips → 跳过，不触发重连。
+                if cur_ips == prev_ips {
+                    continue;
+                }
+                prev_ips = cur_ips;
+                // 冷却：窗口内的后续实质变化也压制（换网瞬间常多次重排地址）。
+                let now = tokio::time::Instant::now();
+                if last_fire.is_some_and(|t| now.duration_since(t) < COOLDOWN) {
+                    continue;
+                }
+                last_fire = Some(now);
                 on_change();
             }
         });

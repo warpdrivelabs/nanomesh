@@ -364,7 +364,7 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Op
                 .map(|r| (r.client_pubkey.clone(), format!("{}@{}", r.local_part, r.domain)))
                 .collect();
             for e in list.iter_mut() {
-                let p = presence_status(&ctx.sessions, &ctx.principals, &ctx.presence, &ctx.status_intent, &e.entity_id);
+                let p = presence_status(&ctx.sessions, &ctx.principals, &ctx.devices, &ctx.presence, &ctx.status_intent, &e.entity_id);
                 e.attributes.insert("presence".to_string(), p);
                 if let Some(n) = name_by_pk.get(&e.entity_id) {
                     e.attributes.insert("name".to_string(), n.clone());
@@ -392,7 +392,7 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Op
             } else {
                 ctx.status_intent.insert(caller.to_vec(), status.clone());
             }
-            if account_online(&ctx.sessions, &ctx.principals, caller) {
+            if account_online(&ctx.sessions, &ctx.principals, &ctx.devices, caller) {
                 ctx.presence.insert(
                     caller.to_vec(),
                     PresenceRec {
@@ -419,7 +419,7 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Op
             let mut out = serde_json::Map::new();
             for id_hex in ids.into_iter().take(1024) {
                 if let Some(id) = hex_decode_n::<32>(&id_hex) {
-                    let st = presence_status(&ctx.sessions, &ctx.principals, &ctx.presence, &ctx.status_intent, &id);
+                    let st = presence_status(&ctx.sessions, &ctx.principals, &ctx.devices, &ctx.presence, &ctx.status_intent, &id);
                     out.insert(id_hex, serde_json::Value::String(st));
                 }
             }
@@ -515,7 +515,7 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Op
         "name.reset" => reset_name_account(ctx, caller, &cmd),
         // ── 多设备 ──
         "device.hello" => device_hello(ctx, rid, &cmd),
-        "device.list" => device_list(ctx, caller),
+        "device.list" => device_list(ctx, caller, rid),
         "device.rename" => device_rename(ctx, caller, &cmd),
         "device.revoke" => match cmd.params.as_ref().and_then(|p| DeviceRevoke::decode(p.value.as_slice()).ok()) {
             Some(r) if !r.by_node.is_empty() => acct_fail("by_node_not_allowed"),

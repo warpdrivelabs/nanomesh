@@ -121,25 +121,40 @@ pub(crate) async fn finish_session(
     Ok(hex(&my_id))
 }
 
-/// 换网重连驱动：在 setup 里启动的长驻任务，从换网信号通道收信号，去重节流后主动重连。
+/// 换网重连驱动：在 setup 里启动的长驻任务，从换网信号通道收信号，去重节流后**按需**重连。
 /// 持 `AppHandle`（Send），每次现取 `State` 调 `reconnect`，避开"重连 future 非 Send 不能进裸 spawn"。
+///
+/// 关键：换网信号**不等于连接已死**。底层 `spawn_addr_change` 已做实质换网判定 + 冷却（见
+/// nm-transport），此处再加一道**重连前验活**：仅当当前连接确已关闭（`close_reason` 为 Some）
+/// 才主动重连；若连接表面仍活着，**不重连**，把判活交给真正发送时的 `send_with_retry`
+/// （那里有发送超时 + looks_dead 的可靠判活）。两道合力根除"地址一抖就断连重连"的自激风暴。
 pub(crate) async fn roam_reconnect_driver(
     app: AppHandle,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<()>,
 ) {
     while rx.recv().await.is_some() {
-        // 节流：合并 300ms 内的连环地址变化（换网瞬间常多次抖动），只重连一次。
+        // 节流：合并 300ms 内的连环地址变化（换网瞬间常多次抖动），只处理一次。
         while tokio::time::timeout(std::time::Duration::from_millis(300), rx.recv())
             .await
             .is_ok()
         {}
         let Some(state) = app.try_state::<AppState>() else { continue };
-        let _ = app.emit("core://event", json!({ "type": "roaming" }));
-        // 用当前连接世代触发重连；若期间已被发送路径重连过（gen 前进）则复用、不重复拨号。
-        let cur_gen = { state.conn.lock().await.as_ref().map(|c| c.conn_gen) };
-        if let Some(g) = cur_gen {
-            let _ = reconnect(&app, &state, g).await;
+        // 验活：连接还在就不重连——换网哨兵只负责「连接真死后的补救」，不负责「地址变就重拨」。
+        // 否则 NAT/relay 候选的稳态抖动会不断把活连接拆掉重建，拖垮收发（principals 映射抖动→收不到）。
+        let (cur_gen, dead) = {
+            let g = state.conn.lock().await;
+            match g.as_ref() {
+                Some(c) => (Some(c.conn_gen), c.session.close_reason().is_some()),
+                None => (None, false),
+            }
+        };
+        let Some(g) = cur_gen else { continue };
+        if !dead {
+            continue; // 连接仍活着：忽略这次换网信号，交由发送路径按需重连。
         }
+        let _ = app.emit("core://event", json!({ "type": "roaming" }));
+        // 连接确已关闭 → 用当前世代触发重连；若期间已被发送路径重连过（gen 前进）则复用、不重复拨号。
+        let _ = reconnect(&app, &state, g).await;
     }
 }
 

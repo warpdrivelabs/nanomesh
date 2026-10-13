@@ -34,22 +34,32 @@ pub(crate) fn is_revoked(ctx: &Ctx, device: &[u8], account: Option<&[u8]>) -> bo
 
 /// 设备连接出示账号签发的证书，登记后该连接以账号身份收发。
 pub(crate) fn device_hello(ctx: &Ctx, rid: &[u8], cmd: &Command) -> (bool, Option<Any>, String) {
+    // 失败分支一律记 warn（含 rid 前缀）：device.hello 失败会让该连接始终以设备密钥身份存在、
+    // principals 无账号映射 → 账号被判离线、收不到消息、设备列表为空。此前失败静默无日志，
+    // 线上无从排查（grep invalid_cert/bad_cert 皆空）。故每个失败点都留痕。
+    let rid4 = hex_encode(&rid[..rid.len().min(4)]);
     let Some(cert) = cmd.params.as_ref().and_then(|p| DeviceCert::decode(p.value.as_slice()).ok()) else {
+        tracing::warn!(device = %rid4, "device.hello rejected: invalid_cert (decode failed)");
         return acct_fail("invalid_cert");
     };
     if nm_crypto::verify_device_cert(&cert).is_err() {
+        tracing::warn!(device = %rid4, "device.hello rejected: bad_cert (signature verify failed)");
         return acct_fail("bad_cert");
     }
     if cert.device != rid {
+        tracing::warn!(device = %rid4, cert_device = %hex_encode(&cert.device[..cert.device.len().min(4)]),
+            "device.hello rejected: device_mismatch (cert.device != connection rid)");
         return acct_fail("device_mismatch");
     }
     if is_revoked(ctx, rid, Some(&cert.account)) {
+        tracing::warn!(device = %rid4, "device.hello rejected: device_revoked");
         if let Some(conn) = ctx.sessions.get(rid).map(|c| c.clone()) {
             conn.close(0u32.into(), b"device_revoked");
         }
         return acct_fail("device_revoked");
     }
     if <[u8; 32]>::try_from(cert.account.as_slice()).is_ok_and(|a| ctx.blacklist.contains(&a)) {
+        tracing::warn!(device = %rid4, "device.hello rejected: banned (account blacklisted)");
         return acct_fail("banned");
     }
     let mut info = ctx.devices.get(rid).map(|d| d.clone()).unwrap_or_default();
@@ -87,16 +97,29 @@ pub(crate) fn device_hello(ctx: &Ctx, rid: &[u8], cmd: &Command) -> (bool, Optio
     (true, Some(Any { type_url: "nmspace.v1.DeviceInfo".into(), value: info.encode_to_vec() }), String::new())
 }
 
-pub(crate) fn device_list(ctx: &Ctx, caller: &[u8]) -> (bool, Option<Any>, String) {
+pub(crate) fn device_list(ctx: &Ctx, caller: &[u8], rid: &[u8]) -> (bool, Option<Any>, String) {
+    // 规整出「真账号」：device.hello 成功后 caller 已是账号；但首连/hello 未完成时 caller 退化为
+    // 设备 rid（= 连接公钥），此时用 rid 的证书账号兜底解析——否则下面用设备 rid 去匹配
+    // cert.account 永远为空 → 新注册用户设备列表显示为空（即便本机设备已登记）。
+    let account: Vec<u8> = if ctx.devices.iter().any(|d| d.cert.as_ref().is_some_and(|c| c.account == caller)) {
+        caller.to_vec() // caller 已是账号（名下有设备）
+    } else {
+        // caller 可能是设备 rid：优先按本连接 rid 的证书账号，其次 principals 映射，再退回 caller。
+        ctx.devices
+            .get(rid)
+            .and_then(|d| d.cert.as_ref().map(|c| c.account.clone()))
+            .or_else(|| ctx.principals.get(rid).map(|p| p.clone()))
+            .unwrap_or_else(|| caller.to_vec())
+    };
     let mut devices: Vec<DeviceInfo> = ctx
         .devices
         .iter()
-        .filter(|d| d.cert.as_ref().is_some_and(|c| c.account == caller))
+        .filter(|d| d.cert.as_ref().is_some_and(|c| c.account == account))
         .map(|d| {
             let mut i = d.clone();
             i.online = ctx.sessions.contains_key(d.key())
-                && ctx.principals.get(d.key()).is_some_and(|p| p.as_slice() == caller);
-            i.revoked = ctx.revoked.get(d.key()).filter(|r| r.account == caller).map(|r| r.clone());
+                && ctx.principals.get(d.key()).is_some_and(|p| p.as_slice() == account);
+            i.revoked = ctx.revoked.get(d.key()).filter(|r| r.account == account).map(|r| r.clone());
             i
         })
         .collect();
@@ -247,7 +270,7 @@ pub(crate) fn apply_revoke(ctx: &Ctx, r: DeviceRevoke, broadcast: bool) -> Resul
 
 /// 向账号所有在线设备推一条设备事件（客户端按 type_url 拦截，不进聊天）。
 fn notify_account(ctx: &Ctx, account: &[u8], event: serde_json::Value) {
-    let rids = online_rids(&ctx.sessions, &ctx.principals, account);
+    let rids = online_rids(&ctx.sessions, &ctx.principals, &ctx.devices, account);
     if rids.is_empty() {
         return;
     }

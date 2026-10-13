@@ -70,7 +70,7 @@ impl Node {
             }
         }
         // 立即切断在线会话（若有，含该账号下所有设备连接），并主动关闭连接。
-        for rid in online_rids(&self.sessions, &self.principals, &pubkey) {
+        for rid in online_rids(&self.sessions, &self.principals, &self.devices, &pubkey) {
             if let Some((_, conn)) = self.sessions.remove(&rid) {
                 self.sessions_meta.remove(&rid);
                 self.principals.remove(&rid);

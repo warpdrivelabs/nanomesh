@@ -2,7 +2,7 @@ use dashmap::DashMap;
 
 use crate::delivery::account_online;
 use crate::records::{hex_decode_n, hex_encode};
-use crate::{now_secs, Node, Principals, Sessions};
+use crate::{now_secs, Devices, Node, Principals, Sessions};
 
 pub(crate) const PRESENCE_INTERVAL_SECS: u64 = 10;
 pub(crate) const PRESENCE_TTL_SECS: u64 = 35;
@@ -33,11 +33,12 @@ pub(crate) struct PresenceAnnounce {
 pub(crate) fn presence_status(
     sessions: &Sessions,
     principals: &Principals,
+    devices: &Devices,
     presence: &PresenceMap,
     intent: &StatusIntent,
     entity: &[u8],
 ) -> String {
-    if account_online(sessions, principals, entity) {
+    if account_online(sessions, principals, devices, entity) {
         return intent.get(entity).map(|s| s.clone()).unwrap_or_else(|| "online".to_string());
     }
     if let Some(r) = presence.get(entity) {
@@ -75,7 +76,7 @@ impl Node {
         } else {
             self.status_intent.insert(entity.to_vec(), s.to_string());
         }
-        if account_online(&self.sessions, &self.principals, entity) {
+        if account_online(&self.sessions, &self.principals, &self.devices, entity) {
             self.presence.insert(
                 entity.to_vec(),
                 PresenceRec {
@@ -89,7 +90,7 @@ impl Node {
 
     /// 计算某实体对外状态（管理台/自查用）。
     pub fn presence_of(&self, entity: &[u8]) -> String {
-        presence_status(&self.sessions, &self.principals, &self.presence, &self.status_intent, entity)
+        presence_status(&self.sessions, &self.principals, &self.devices, &self.presence, &self.status_intent, entity)
     }
 
     /// 处理收到的 presence 广播：验签(按 home_node) → 反陈旧 → LWW 入缓存；不覆盖本地在线。
@@ -117,7 +118,7 @@ impl Node {
         if ann.ts + 300 < now || ann.ts > now + 300 {
             return; // 反陈旧/未来
         }
-        if account_online(&self.sessions, &self.principals, &entity) {
+        if account_online(&self.sessions, &self.principals, &self.devices, &entity) {
             return; // 本地在线会话权威，不被远端覆盖
         }
         if let Some(cur) = self.presence.get(&entity[..]) {
