@@ -264,7 +264,7 @@ async fn handle_gram(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Optio
         }
         // receiver 已是原 sender → deliver_direct 本地直投 / 离线入库 / 远端 gossip 转回。
         let (g, c) = (gram.clone(), ctx.clone());
-        ctx.tracker.spawn(async move { deliver_direct(&g, &c).await; });
+        ctx.tracker.spawn(async move { deliver_direct(&g, &c, false).await; }); // Receipt 转回不入 outbox
         return Some(reply_gram(gram, GramKind::Reply, None));
     }
     let to = &gram.receiver;
@@ -288,7 +288,7 @@ async fn handle_gram(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Optio
         if matches!(gram.kind(), GramKind::Message) {
             let (g, c, who, r) = (gram.clone(), ctx.clone(), caller.to_vec(), rid.to_vec());
             ctx.tracker.spawn(async move {
-                deliver_direct(&g, &c).await;
+                deliver_direct(&g, &c, true).await; // 真实 Message：跟踪可靠投递
                 // 已发同步：同账号的其它设备也收到一份（客户端按 sender==自己 归入会话）。
                 if g.receiver != who {
                     deliver_account(&who, &g, &c, true, Some(&r)).await;

@@ -187,12 +187,51 @@ impl Node {
                     apply_domain_decision(&gram, &self.domains, &self.store, &self.domain_notices);
                     return;
                 }
-                // F3 去重：火管 Direct + 收件箱主题双写时同一条会到两次，按 (sender, gram_id) 只投一次。
-                if !self.seen.lock().unwrap().first_seen(&gram.sender, gram.gram_id) {
-                    return;
-                }
+                // 一级内存快筛：火管 + inbox 主题双写同一条会到两次。
+                let mem_first = self.seen.lock().unwrap().first_seen(&gram.sender, gram.gram_id);
                 let home_here = is_home_here(&ctx, to);
-                deliver_account(to, &gram, &ctx, home_here, None).await;
+                // 二级持久去重（含 crc，防 client 重启 gram_id 回绕误判）查询——先查不标记。
+                let persist_first = match &ctx.store {
+                    Some(s) => s
+                        .dedup_seen(&gram.sender, gram.gram_id, &gram.crc)
+                        .map(|seen| !seen)
+                        .unwrap_or(true),
+                    None => mem_first,
+                };
+                // 仅首见才真正投递；**投递后**才持久 mark（防"标记了却没投出"的空洞 → 发送方重传能补）。
+                if mem_first && persist_first {
+                    deliver_account(to, &gram, &ctx, home_here, None).await;
+                    if let Some(s) = &ctx.store {
+                        let _ = s.dedup_mark(&gram.sender, gram.gram_id, &gram.crc, now_ms());
+                    }
+                }
+                // 回 E2E ack（跨节点可靠投递）：仅当本节点确是收件人 home 才回（非 home 收火管广播不回，
+                // 否则发送方收到非权威 ack 误停重传）。首见/重复都回——重复多因 ack 丢失、发送方在重传。
+                if home_here {
+                    let ack = GroupGossip {
+                        origin: self.ep.id_bytes().to_vec(),
+                        body: Some(nm_proto::pb::group_gossip::Body::DirectAck(nm_proto::pb::DirectAck {
+                            sender: gram.sender.clone(),
+                            gram_id: gram.gram_id,
+                            receiver: to.clone(),
+                            crc: gram.crc.clone(),
+                        })),
+                    };
+                    let _ = self.fed.join_inbox(&gram.sender, inbox_bootstrap(&gram.sender, &ctx)).await;
+                    let _ = self.fed.publish_inbox(&gram.sender, ack.encode_to_vec()).await;
+                    let _ = self.group_pub.send(ack.encode_to_vec()); // 火管兜底
+                }
+            }
+            Some(nm_proto::pb::group_gossip::Body::DirectAck(ack)) => {
+                // 本节点是原 sender 的 home（订阅了 nmspace-inbox:<my account>）→ 删待确认条目、停重传。
+                // DirectAck 不再回 ack、不入 outbox —— 无回环。
+                if let Some(s) = &ctx.store {
+                    match s.outbox_del(&ack.sender, &ack.receiver, ack.gram_id) {
+                        Ok(true) => tracing::debug!("outbox cleared by DirectAck"),
+                        Ok(false) => {}
+                        Err(e) => tracing::warn!("outbox_del failed: {e}"),
+                    }
+                }
             }
             Some(nm_proto::pb::group_gossip::Body::Revoke(r)) => {
                 if let Err(e) = apply_revoke(&ctx, r, false) {
@@ -203,9 +242,16 @@ impl Node {
                 // 命名记录复制：验签后并入命名缓存（各节点据此解析 local@domain）。
                 self.merge_name_lww(rec);
             }
-            Some(nm_proto::pb::group_gossip::Body::InboxLive(_)) => {
+            Some(nm_proto::pb::group_gossip::Body::InboxLive(il)) => {
                 // F3 退火管：收件人 home 存活心跳。存活已由每群主题泵记入
                 // per_group_live[account][origin]；此处无需额外动作（发送方据此省略火管 Direct）。
+                // 跨节点可靠投递能力协商：记录 origin(=该收件箱 home) 是否支持 DirectAck，
+                // 供 outbox 重传判定（不支持 → 有界降级，防无限打爆老节点）。
+                if il.supports_direct_ack {
+                    self.ack_nodes.insert(origin.clone());
+                } else {
+                    self.ack_nodes.remove(&origin);
+                }
             }
             None => {}
         }
@@ -305,7 +351,7 @@ impl Node {
                         let hb = GroupGossip {
                             origin: me.to_vec(),
                             body: Some(nm_proto::pb::group_gossip::Body::InboxLive(
-                                nm_proto::pb::InboxLive { account: acct.clone() },
+                                nm_proto::pb::InboxLive { account: acct.clone(), supports_direct_ack: true },
                             )),
                         };
                         let _ = self.fed.publish_inbox(&acct, hb.encode_to_vec()).await;
@@ -455,6 +501,46 @@ impl Node {
                     let mut q = ctx.pending_fwd.lock().unwrap();
                     for it in keep.into_iter().rev() { q.push_front(it); }
                     while q.len() > PENDING_FWD_CAP { q.pop_front(); }
+                }
+
+                // ── 跨节点可靠投递：持久发件箱重传（E2E ack 驱动）──
+                if let Some(store) = &ctx.store {
+                    let now_m = now_ms();
+                    let rows = store.outbox_all().unwrap_or_default();
+                    for row in rows {
+                        // 达 24h 期限 → 放弃 + 告警（对端 home 长期不可达）。
+                        if now_m.saturating_sub(row.first_ms) > crate::OUTBOX_MAX_HORIZON_MS {
+                            tracing::warn!(gram_id = row.gram_id,
+                                "cross-node DM giving up after horizon (recipient home unreachable)");
+                            let _ = store.outbox_del(&row.sender, &row.receiver, row.gram_id);
+                            continue;
+                        }
+                        if now_m < row.next_due_ms { continue; } // 未到重试点
+                        // 向后兼容：对端 home 未广告 supports_direct_ack → 有界重传后放弃，不无限打爆老节点。
+                        let ack_capable = ctx
+                            .dir
+                            .entities
+                            .get(row.receiver.as_slice())
+                            .map(|e| ctx.ack_nodes.contains(&e.home_node))
+                            .unwrap_or(false);
+                        if !ack_capable && row.retries >= crate::LEGACY_MAX_RETRIES {
+                            tracing::debug!("legacy peer (no DirectAck); bounded retransmit exhausted");
+                            let _ = store.outbox_del(&row.sender, &row.receiver, row.gram_id);
+                            continue;
+                        }
+                        // 重发：join + publish_inbox + 火管兜底（收端 dedup 幂等）。
+                        let _ = ctx.fed.join_inbox(&row.receiver, inbox_bootstrap(&row.receiver, &ctx)).await;
+                        let _ = ctx.fed.publish_inbox(&row.receiver, row.gram_bytes.clone()).await;
+                        let _ = ctx.group_pub.send(row.gram_bytes.clone());
+                        // 退避推进。
+                        let r1 = row.retries.saturating_add(1);
+                        let backoff = crate::OUTBOX_BACKOFF_MS
+                            [(r1 as usize).min(crate::OUTBOX_BACKOFF_MS.len() - 1)];
+                        let _ = store.outbox_put(&row.sender, &row.receiver, row.gram_id,
+                            row.first_ms, r1, now_m + backoff, &row.gram_bytes);
+                    }
+                    // 顺带清去重表（按龄，对齐重传上限）。
+                    let _ = store.dedup_prune(now_m.saturating_sub(crate::OUTBOX_MAX_HORIZON_MS));
                 }
             }
         })

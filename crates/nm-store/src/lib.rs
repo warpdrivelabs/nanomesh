@@ -33,6 +33,12 @@ const ROSTER: TableDefinition<&[u8], &[u8]> = TableDefinition::new("roster");
 const DEVICES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("devices");
 /// 已吊销设备：key = 设备公钥(32)，value = DeviceRevoke 编码。只增不删。
 const REVOKED: TableDefinition<&[u8], &[u8]> = TableDefinition::new("revoked");
+/// 跨节点可靠投递·待确认发件箱：key = sender(32)++receiver(32)++gram_id(8BE)，
+/// val = first_ms(8)++retries(4)++next_due_ms(8)++gram_bytes。收到 DirectAck 前持久保留，重启续传。
+const OUTBOX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("outbox");
+/// 跨节点 Direct 持久去重：key = sender(32)++gram_id(8BE)++crc(8)，val = first_seen_ms(8BE)。
+/// 并入 crc 防 client 重启 gram_id 回绕导致的误去重。SeenGrams 内存版的持久权威兜底。
+const DEDUP_DIRECT: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dedup_direct");
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -43,6 +49,17 @@ pub enum StoreError {
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
+
+/// 待确认发件箱一行（跨节点可靠投递重传任务用）。
+pub struct OutboxRow {
+    pub sender: Vec<u8>,
+    pub receiver: Vec<u8>,
+    pub gram_id: u64,
+    pub first_ms: u64,
+    pub retries: u32,
+    pub next_due_ms: u64,
+    pub gram_bytes: Vec<u8>,
+}
 
 fn db_err(e: impl std::fmt::Display) -> StoreError {
     StoreError::Db(e.to_string())
@@ -72,6 +89,8 @@ impl RedbStore {
             wtx.open_table(DOMAINS).map_err(db_err)?;
             wtx.open_table(DEVICES).map_err(db_err)?;
             wtx.open_table(REVOKED).map_err(db_err)?;
+            wtx.open_table(OUTBOX).map_err(db_err)?;
+            wtx.open_table(DEDUP_DIRECT).map_err(db_err)?;
         }
         wtx.commit().map_err(db_err)?;
         Ok(Self { db })
@@ -169,6 +188,104 @@ impl RedbStore {
         }
         wtx.commit().map_err(db_err)?;
         Ok(existed)
+    }
+
+    // ── 跨节点可靠投递：待确认发件箱 OUTBOX ──
+
+    fn outbox_key(sender: &[u8], receiver: &[u8], gram_id: u64) -> Vec<u8> {
+        let mut k = Vec::with_capacity(sender.len() + receiver.len() + 8);
+        k.extend_from_slice(sender);
+        k.extend_from_slice(receiver);
+        k.extend_from_slice(&gram_id.to_be_bytes());
+        k
+    }
+
+    /// 存/覆盖一条待确认条目（Immediate 落盘，崩溃不丢）。
+    pub fn outbox_put(&self, sender: &[u8], receiver: &[u8], gram_id: u64,
+                      first_ms: u64, retries: u32, next_due_ms: u64, gram_bytes: &[u8]) -> Result<()> {
+        let key = Self::outbox_key(sender, receiver, gram_id);
+        let mut val = Vec::with_capacity(20 + gram_bytes.len());
+        val.extend_from_slice(&first_ms.to_be_bytes());
+        val.extend_from_slice(&retries.to_be_bytes());
+        val.extend_from_slice(&next_due_ms.to_be_bytes());
+        val.extend_from_slice(gram_bytes);
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        { let mut tb = wtx.open_table(OUTBOX).map_err(db_err)?;
+          tb.insert(key.as_slice(), val.as_slice()).map_err(db_err)?; }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 删一条待确认条目（收到 DirectAck / 达期限放弃）。幂等。
+    pub fn outbox_del(&self, sender: &[u8], receiver: &[u8], gram_id: u64) -> Result<bool> {
+        let key = Self::outbox_key(sender, receiver, gram_id);
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        let existed;
+        { let mut tb = wtx.open_table(OUTBOX).map_err(db_err)?;
+          existed = tb.remove(key.as_slice()).map_err(db_err)?.is_some(); }
+        wtx.commit().map_err(db_err)?;
+        Ok(existed)
+    }
+
+    /// 全量加载待确认条目（重传任务每 tick 扫；稳态近空）。key 后 72 字节=sender32+recv32+gram8。
+    pub fn outbox_all(&self) -> Result<Vec<OutboxRow>> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let tb = rtx.open_table(OUTBOX).map_err(db_err)?;
+        let mut out = Vec::new();
+        for item in tb.iter().map_err(db_err)? {
+            let (k, v) = item.map_err(db_err)?;
+            let k = k.value();
+            let v = v.value();
+            if k.len() != 72 || v.len() < 20 { continue; }
+            let sender = k[0..32].to_vec();
+            let receiver = k[32..64].to_vec();
+            let gram_id = u64::from_be_bytes(k[64..72].try_into().unwrap());
+            let first_ms = u64::from_be_bytes(v[0..8].try_into().unwrap());
+            let retries = u32::from_be_bytes(v[8..12].try_into().unwrap());
+            let next_due_ms = u64::from_be_bytes(v[12..20].try_into().unwrap());
+            let gram_bytes = v[20..].to_vec();
+            out.push(OutboxRow { sender, receiver, gram_id, first_ms, retries, next_due_ms, gram_bytes });
+        }
+        Ok(out)
+    }
+
+    // ── 跨节点 Direct 持久去重 DEDUP_DIRECT ──
+
+    fn dedup_key(sender: &[u8], gram_id: u64, crc: &[u8]) -> Vec<u8> {
+        let mut k = sender.to_vec();
+        k.extend_from_slice(&gram_id.to_be_bytes());
+        k.extend_from_slice(&crc[..crc.len().min(8)]);
+        k
+    }
+
+    /// 查询是否已见过该 (sender,gram_id,crc)——只读，不标记。true=已见。
+    pub fn dedup_seen(&self, sender: &[u8], gram_id: u64, crc: &[u8]) -> Result<bool> {
+        let key = Self::dedup_key(sender, gram_id, crc);
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let tb = rtx.open_table(DEDUP_DIRECT).map_err(db_err)?;
+        Ok(tb.get(key.as_slice()).map_err(db_err)?.is_some())
+    }
+
+    /// 标记 (sender,gram_id,crc) 已见（投递成功后调用——先投出才标记，防"标记了却没投出"的空洞）。
+    pub fn dedup_mark(&self, sender: &[u8], gram_id: u64, crc: &[u8], now_ms: u64) -> Result<()> {
+        let key = Self::dedup_key(sender, gram_id, crc);
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        { let mut tb = wtx.open_table(DEDUP_DIRECT).map_err(db_err)?;
+          tb.insert(key.as_slice(), now_ms.to_be_bytes().as_slice()).map_err(db_err)?; }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 清理早于 before_ms 的去重记录（按龄，对齐重传上限）。返回删除条数。
+    pub fn dedup_prune(&self, before_ms: u64) -> Result<usize> {
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        let mut n = 0usize;
+        { let mut tb = wtx.open_table(DEDUP_DIRECT).map_err(db_err)?;
+          for item in tb.extract_if(|_, v| {
+              v.len() >= 8 && u64::from_be_bytes(v[0..8].try_into().unwrap()) < before_ms
+          }).map_err(db_err)? { item.map_err(db_err)?; n += 1; } }
+        wtx.commit().map_err(db_err)?;
+        Ok(n)
     }
 
     /// 某实体离线消息条数。range 直接计数，不解码 value（避免 O(n) prost 解码）。

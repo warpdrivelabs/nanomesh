@@ -280,7 +280,7 @@ pub(crate) fn clear_inbox_on_receipt(ctx: &Ctx, acking_rid: &[u8], acking_accoun
 /// 1) 本地在线 → 直投；2) 已知且 home==本节点(离线) → 本地离线库；
 /// 3) 已知远端 → 仅联邦 gossip 广播（对端节点投递/入库）；
 /// 4) 完全未知 → 本地离线库兜底(可能连来本节点) + 联邦 gossip 广播(可能在远端)。
-pub(crate) async fn deliver_direct(gram: &Gram, ctx: &Ctx) {
+pub(crate) async fn deliver_direct(gram: &Gram, ctx: &Ctx, track: bool) {
     let to = &gram.receiver;
     let home_here = is_home_here(ctx, to);
     let known_remote = !home_here && ctx.dir.entities.contains_key(to.as_slice());
@@ -295,6 +295,18 @@ pub(crate) async fn deliver_direct(gram: &Gram, ctx: &Ctx) {
         body: Some(nm_proto::pb::group_gossip::Body::Direct(gram.clone())),
     };
     let bytes = gg.encode_to_vec();
+    // 跨节点可靠投递：真实对话消息(track)持久入发件箱，等待对端 home 的 DirectAck；
+    // 先落盘（Immediate）再 publish —— 防 publish 后崩溃导致既没确认也没持久。
+    // 由 spawn_outbox_retry 指数退避重传直到收到 ack 或达 24h 期限。
+    if track && known_remote {
+        if let Some(s) = &ctx.store {
+            let now = now_ms();
+            let first_due = now + crate::OUTBOX_BACKOFF_MS[0];
+            if let Err(e) = s.outbox_put(&gram.sender, to, gram.gram_id, now, 0, first_due, &bytes) {
+                tracing::error!("outbox persist FAILED (cross-node delivery not guaranteed): {e}");
+            }
+        }
+    }
     let per_topic = ctx.per_topic.load(std::sync::atomic::Ordering::Relaxed);
     let retire = per_topic
         && inbox_retireable(to, &ctx.node_id, &ctx.dir.entities, &ctx.per_group_live, now_ms(), LIVE_TTL_MS);

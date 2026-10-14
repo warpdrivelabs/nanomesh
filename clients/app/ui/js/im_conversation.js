@@ -108,10 +108,11 @@ function renderLog(msgs, showSender) {
   return html;
 }
 function renderTicks(s) {
-  if (s === -1) return `<span class="im-tick im-tick--fail" title="发送失败">!</span>`;
-  if (s >= 2)   return `<span class="im-tick im-tick--read" title="对方已收到">\u2713\u2713</span>`;
-  if (s === 1)  return `<span class="im-tick im-tick--sent" title="已送达服务器">\u2713</span>`;
-  return `<span class="im-tick im-tick--pend" title="发送中">\u00b7</span>`;
+  if (s === -1) return `<span class="im-tick im-tick--fail" title="发送失败">\u2717</span>`;        // ✗ 差号
+  if (s >= 2)   return `<span class="im-tick im-tick--read" title="对方已收到">\u2713\u2713</span>`; // ✓✓
+  if (s === 1)  return `<span class="im-tick im-tick--sent" title="已送达服务器">\u2713</span>`;       // ✓
+  if (s === 0)  return `<span class="im-tick im-tick--pend" title="发送中"><span class="im-spin"></span></span>`; // 转圈
+  return ""; // status 未定义(历史消息无送达跟踪) → 不显示
 }
 function msgHtml(m, showSender, cont) {
   const mine = m.from === MY_ID;
@@ -120,21 +121,19 @@ function msgHtml(m, showSender, cont) {
     : (window.entityName ? entityName(m.from) : (m.from || "").slice(0, 6) + "…");
   const who = mine ? (window.t ? t("conv.me") : "我") : named;
   const time = msgClock(m.ts);
+  const ticks = (mine && !m.group && !m.channel) ? renderTicks(m.status) : "";
+  // 对号跟在时间后面：有 sender 行则放 sender 的时间后；否则放 stamp(气泡下方时间)后。
   const sender = (showSender && !cont)
-    ? `<span class="im-sender">${escapeHtml(who)}${time ? `<span class="im-time">${time}</span>` : ""}</span>`
+    ? `<span class="im-sender">${escapeHtml(who)}${time ? `<span class="im-time">${time}</span>` : ""}${ticks}</span>`
     : "";
-  const stamp = (!sender && time) ? `<span class="im-time">${time}</span>` : "";
+  const stamp = (!sender && (time || ticks)) ? `<span class="im-time">${time}${ticks}</span>` : "";
   const face = window.Profile ? Profile.faceHtml(m.from, named, 32) : "";
   const rich = window.Composer ? Composer.bubble(m) : { cls: "", html: escapeHtml(m.body || "") };
-  const ticks = (mine && !m.group && !m.channel) ? renderTicks(m.status) : "";
   return `<div class="im-msg ${mine ? "me" : ""} with-av${cont ? " cont" : ""}" data-mid="${escapeHtml(m.id || "")}">
     ${face}
     <span class="im-stack">
       ${sender}
-      <span class="im-bubble-row">
-        <span class="im-bubble ${rich.cls}">${rich.html}</span>
-        ${ticks}
-      </span>
+      <span class="im-bubble ${rich.cls}">${rich.html}</span>
       ${stamp}
     </span>
   </div>`;
@@ -264,11 +263,19 @@ async function sendRich(media) {
     if (isChannel) {
       await NM.inv("channel_publish", { channelId: ACTIVE, body: Composer.channelBody(media) });
     } else {
-      await NM.inv("send_rich", { target: ACTIVE, body: Composer.encode(media), group: isGroup });
+      // 与文本一致：乐观插入(私聊 status=0 发送中)；send_rich 返回原 gram_id → 升单勾✓。
+      const localId = "l" + Date.now();
+      const encoded = Composer.encode(media);
       pushMsg(ACTIVE, {
-        id: "l" + Date.now(), from: MY_ID, to: ACTIVE, ts: Date.now(), group: isGroup,
-        typeUrl: "nmspace.v1/chat", body: Composer.encode(media),
+        id: localId, from: MY_ID, to: ACTIVE, ts: Date.now(), group: isGroup,
+        typeUrl: "nmspace.v1/chat", body: encoded, status: isGroup ? undefined : 0,
       });
+      const g = await NM.inv("send_rich", { target: ACTIVE, body: encoded, group: isGroup });
+      if (g && !isGroup) {
+        const row = (VIEW.id === ACTIVE) && VIEW.rows.find((r) => r.id === localId);
+        if (row) { row.gramId = g; row.status = 1; paintVirtual(false); }
+        if (window.ChatLog && ChatLog.mark) ChatLog.mark(ACTIVE, { id: localId, gramId: g }, 1);
+      }
     }
   } catch (e) {
     if (window.toast) toast("发送失败：" + (e && e.message ? e.message : e));

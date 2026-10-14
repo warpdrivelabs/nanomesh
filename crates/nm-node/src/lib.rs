@@ -85,6 +85,12 @@ type PendingForwardQueue = std::collections::VecDeque<PendingForwardItem>;
 const PENDING_FWD_TTL_SECS: u64 = 60; // Defect C：冷启动待发转发项最长保留，超时丢弃
 const PENDING_FWD_CAP: usize = 4096;  // Defect C：待发队列上限，防无界堆积
 
+// 跨节点可靠投递（E2E ack + 持久重传）：重传扫描复用 spawn_pending_flush 的 2s 周期。
+// 指数退避（index=retries，封顶复用末项）：2s,5s,15s,30s,60s,120s,300s,600s
+const OUTBOX_BACKOFF_MS: [u64; 8] = [2_000, 5_000, 15_000, 30_000, 60_000, 120_000, 300_000, 600_000];
+const OUTBOX_MAX_HORIZON_MS: u64 = 24 * 3600 * 1000; // 24h 上限，对标 IM「离线最终送达」；超期放弃+告警
+const LEGACY_MAX_RETRIES: u32 = 5;   // 对端 home 不支持 DirectAck 时的有界重传次数（防无限打爆老节点）
+
 // 连接限流（P0 DoS 防护）：
 const DEFAULT_MAX_CONNECTIONS: usize = 10_000; // 全局并发连接上限（超则拒绝新连接，防 FD/内存耗尽）
 const CONN_RATE_MIN_SECS: u64 = 1;             // 同一公钥两次新建连接的最小间隔（拦 churn/重连风暴）
@@ -133,6 +139,8 @@ struct Ctx {
     // 连接限流（P0）：全局并发连接上限 + 单公钥新建连接速率门。accept 热路径读。
     max_connections: usize,
     conn_gate: Arc<ConnGate>,
+    // 跨节点可靠投递：已广告支持 DirectAck 的节点 id（能力协商；重传据此决定是否有界降级）。
+    ack_nodes: Arc<DashSet<Vec<u8>>>,
 }
 
 pub struct Node {
@@ -183,6 +191,8 @@ pub struct Node {
     // 连接限流（P0 DoS 防护）：全局并发连接上限 + 单公钥新建连接速率门。
     max_connections: usize,
     conn_gate: Arc<ConnGate>,
+    // 跨节点可靠投递：已广告支持 DirectAck 的节点 id（能力协商）。
+    ack_nodes: Arc<DashSet<Vec<u8>>>,
 }
 
 /// 换网观测计数（供 admin 看板）：记录本节点端点地址变化次数与最近一次时间。

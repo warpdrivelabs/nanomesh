@@ -208,12 +208,23 @@ message GroupGossip {
     NameRecord name = 5;              // 命名记录复制（home 节点签发/周期重播，各节点据此填充命名缓存）
     DeviceRevoke revoke = 6;          // 设备吊销（自带签名，各节点验签后持久化并拒绝该设备）
     InboxLive inbox_live = 7;         // F3 退火管：收件人 home 在 nmspace-inbox:<account> 上的存活心跳；发送方据此（origin=该 home）判定可省略火管 Direct 副本
+    DirectAck direct_ack = 8;         // 跨节点单聊可靠投递：对端 home 收到并落库 Direct 后，回发到 nmspace-inbox:<原sender>，发送方据此停持久重传
   }
 }
 // F3：收件人收件箱存活心跳。由收件人 home 节点在 nmspace-inbox:<account> 周期广播；
 // origin(=该 home 节点 id) 由 GroupGossip 携带。发送方收到后记其存活，用于省略火管 Direct 副本。
 message InboxLive {
   bytes account = 1;                  // 该收件箱对应的账号（= 主题标签，便于诊断）
+  bool supports_direct_ack = 2;       // 能力协商：该 home 支持跨节点 Direct 的 E2E 确认（老节点=false=缺省）
+}
+
+// 跨节点单聊投递确认（E2E ack）：对端 home 收到并落库 Direct 后，发到 nmspace-inbox:<原sender>。
+// 原 sender 的 home 本就订阅该主题 → 收到后删持久待确认条目、停重传。(sender,gram_id,crc) 唯一定位。
+message DirectAck {
+  bytes  sender   = 1;                // 原消息 sender（= 回执主题标签）
+  uint64 gram_id  = 2;                // 原消息 gram_id
+  bytes  receiver = 3;                // 原消息 receiver（outbox key 第二段，精确匹配）
+  bytes  crc      = 4;                // 原消息 crc（防 client 重启 gram_id 回绕导致的误匹配）
 }
 
 // 频道 / 主题（P4）：iroh-gossip 主题上的开放 pub/sub（1→N 广播，订阅制，大规模）。

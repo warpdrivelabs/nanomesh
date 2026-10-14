@@ -336,11 +336,12 @@ pub(crate) async fn send_rich(
     target: String,
     body: String,
     group: bool,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let id = parse_id(&target)?;
     send_with_retry(&app, &state, move |s| {
         let body = body.clone();
-        async move { s.send_rich(id, &body, group).await.map(|_| ()) }
+        // 返回 node ack 的 ref_gram_id = 本条消息 gram_id，供富媒体气泡标记单勾✓（与文本 send_to 一致）。
+        async move { s.send_rich(id, &body, group).await.map(|ack| ack.ref_gram_id.unwrap_or(0)) }
     })
     .await
 }

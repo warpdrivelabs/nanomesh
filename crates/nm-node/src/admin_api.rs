@@ -154,7 +154,19 @@ impl Node {
             ("peers", self.peers.len()),
             ("channels", self.channels.len()),
             ("presence", self.presence.len()),
+            ("outbox_pending", self.outbox_pending()),
         ]
+    }
+
+    /// 跨节点可靠投递：当前待对端 home 确认（DirectAck）的发件箱条目数。
+    /// 稳态近 0（ack 几秒内清）；持续偏高 = 某对端 home 长期不可达，运维可据此告警。
+    /// 测试也用它断言"发送后非空 → 收到 ack 后清零"的闭环。
+    pub fn outbox_pending(&self) -> usize {
+        self.store
+            .as_ref()
+            .and_then(|s| s.outbox_all().ok())
+            .map(|v| v.len())
+            .unwrap_or(0)
     }
 
     /// 全部已登记设备快照（后端管理台「域内命名登记」下展开某账号的设备列表用）。

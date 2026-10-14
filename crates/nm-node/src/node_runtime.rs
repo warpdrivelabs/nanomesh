@@ -229,6 +229,7 @@ impl Node {
             drain_timeout: std::time::Duration::from_secs(5),
             max_connections: crate::DEFAULT_MAX_CONNECTIONS,
             conn_gate: Arc::new(DashMap::new()),
+            ack_nodes: Arc::new(DashSet::new()),
         })
     }
 
@@ -262,6 +263,7 @@ impl Node {
             tracker: self.tracker.clone(),
             max_connections: self.max_connections,
             conn_gate: self.conn_gate.clone(),
+            ack_nodes: self.ack_nodes.clone(),
         }
     }
 
