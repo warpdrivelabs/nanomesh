@@ -190,12 +190,18 @@ pub(crate) async fn deliver_account(
     skip: Option<&[u8]>,
 ) -> bool {
     let mut reached: Vec<Vec<u8>> = Vec::new();
+    // 本次「在线但投递失败」的设备（在 online_rids 里尝试过、但 try_push 两次仍失败）——
+    // 方案 B：这些设备连接半死(close_reason 未置位)，消息已落离线库但对方未重连不会 drain，
+    // 故调度一次短延迟主动补投，不干等心跳/重连。
+    let mut failed_online: Vec<Vec<u8>> = Vec::new();
     for r in online_rids(&ctx.sessions, &ctx.principals, &ctx.devices, account) {
         if skip == Some(r.as_slice()) {
             continue;
         }
         if try_push(&r, gram, &ctx.sessions).await {
             reached.push(r);
+        } else {
+            failed_online.push(r);
         }
     }
     if store_offline {
@@ -218,6 +224,23 @@ pub(crate) async fn deliver_account(
                         }
                     }
                 }
+            }
+            // 方案 B：对「在线但投递失败」的设备调度延迟补投（连接可能已被 client 重连替换为新 session）。
+            // 成功则从离线库删该设备副本，避免对方日后重连再收重复（client 另有按 msg-id 去重兜底）。
+            if !failed_online.is_empty() {
+                let ctx2 = ctx.clone();
+                let g = gram.clone();
+                let devs = failed_online.clone();
+                ctx.tracker.spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    for d in devs {
+                        if try_push(&d, &g, &ctx2.sessions).await {
+                            if let Some(s) = &ctx2.store {
+                                let _ = s.del_inbox_one(&d, g.gram_id);
+                            }
+                        }
+                    }
+                });
             }
         }
     }
@@ -297,6 +320,9 @@ pub(crate) async fn deliver_direct(gram: &Gram, ctx: &Ctx) {
 
 /// 尝试把 gram 经 uni 流推送给某在线会话；返回是否投递成功。
 /// 推送失败（连接已断但会话表尚未清理）则移除陈旧会话，交由上层落离线队列。
+/// 尝试把 gram 经 uni 流推给目标在线会话；返回是否成功。
+/// 瞬时失败（uni 流开启/写入偶发失败，连接其实还活着）先原地重试一次，吸收大部分抖动，
+/// 减少"在线却投递失败→存离线库→要等重连才补投"的消息延迟。两次都失败才判会话陈旧并清理。
 pub(crate) async fn try_push(to: &[u8], gram: &Gram, sessions: &Sessions) -> bool {
     let Some(target) = sessions.get(to).map(|r| r.clone()) else {
         return false;
@@ -305,17 +331,25 @@ pub(crate) async fn try_push(to: &[u8], gram: &Gram, sessions: &Sessions) -> boo
         sessions.remove(to);
         return false;
     }
-    let ok = async {
-        let mut s = target.open_uni().await.ok()?;
-        write_gram(&mut s, gram).await.ok()?;
-        let _ = s.finish();
-        Some(())
+    async fn push_once(conn: &IrohConnection, gram: &Gram) -> bool {
+        async {
+            let mut s = conn.open_uni().await.ok()?;
+            write_gram(&mut s, gram).await.ok()?;
+            let _ = s.finish();
+            Some(())
+        }
+        .await
+        .is_some()
     }
-    .await
-    .is_some();
+    // 第一次失败且连接仍未关闭 → 短暂退避后重试一次（吸收瞬时抖动）。
+    let mut ok = push_once(&target, gram).await;
+    if !ok && target.close_reason().is_none() {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        ok = push_once(&target, gram).await;
+    }
     if !ok {
-        sessions.remove(to); // 陈旧会话，清理
-        tracing::info!("stale session removed on push failure");
+        sessions.remove(to); // 两次都失败 → 陈旧会话，清理，交由上层落离线队列
+        tracing::info!("stale session removed after push retry failed");
     }
     ok
 }
