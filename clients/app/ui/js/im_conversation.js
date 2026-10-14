@@ -126,12 +126,16 @@ function msgHtml(m, showSender, cont) {
   const stamp = (!sender && time) ? `<span class="im-time">${time}</span>` : "";
   const face = window.Profile ? Profile.faceHtml(m.from, named, 32) : "";
   const rich = window.Composer ? Composer.bubble(m) : { cls: "", html: escapeHtml(m.body || "") };
+  const ticks = (mine && !m.group && !m.channel) ? renderTicks(m.status) : "";
   return `<div class="im-msg ${mine ? "me" : ""} with-av${cont ? " cont" : ""}" data-mid="${escapeHtml(m.id || "")}">
     ${face}
     <span class="im-stack">
       ${sender}
-      <span class="im-bubble ${rich.cls}">${rich.html}</span>
-      ${stamp}${(mine && !m.group && !m.channel) ? renderTicks(m.status) : ""}
+      <span class="im-bubble-row">
+        <span class="im-bubble ${rich.cls}">${rich.html}</span>
+        ${ticks}
+      </span>
+      ${stamp}
     </span>
   </div>`;
 }

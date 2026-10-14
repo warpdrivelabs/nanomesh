@@ -722,8 +722,11 @@ html[data-theme="light"] .home-feats li { background: color-mix(in srgb, var(--p
 .dlg-pane > label.set-row { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); margin-top: 4px; }
 
 /* 送达回执双对号 */
-.im-tick { margin-left: 4px; font-size: 11px; vertical-align: baseline; opacity: 0.85; }
+/* 气泡+对号同一行：勾在气泡一侧、贴底对齐(有头像时≈头像下方)。本人消息(me)气泡靠右，勾在右侧。 */
+.im-bubble-row { display: inline-flex; align-items: flex-end; gap: 4px; max-width: 100%; }
+.im-msg.me .im-bubble-row { flex-direction: row; } /* me: 气泡 + 勾(勾在气泡右侧) */
+.im-tick { flex: 0 0 auto; margin-bottom: 2px; font-size: 11px; line-height: 1; opacity: 0.85; white-space: nowrap; }
 .im-tick--pend { color: var(--muted, #8b949e); }
 .im-tick--sent { color: var(--muted, #8b949e); }
-.im-tick--read { color: var(--accent, #58a6ff); font-weight: 600; }
+.im-tick--read { color: var(--aqua, #58a6ff); font-weight: 600; }
 .im-tick--fail { color: var(--danger, #f85149); font-weight: 700; }
