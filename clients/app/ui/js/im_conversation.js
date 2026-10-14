@@ -107,6 +107,12 @@ function renderLog(msgs, showSender) {
   }
   return html;
 }
+function renderTicks(s) {
+  if (s === -1) return `<span class="im-tick im-tick--fail" title="发送失败">!</span>`;
+  if (s >= 2)   return `<span class="im-tick im-tick--read" title="对方已收到">\u2713\u2713</span>`;
+  if (s === 1)  return `<span class="im-tick im-tick--sent" title="已送达服务器">\u2713</span>`;
+  return `<span class="im-tick im-tick--pend" title="发送中">\u00b7</span>`;
+}
 function msgHtml(m, showSender, cont) {
   const mine = m.from === MY_ID;
   const named = mine
@@ -125,7 +131,7 @@ function msgHtml(m, showSender, cont) {
     <span class="im-stack">
       ${sender}
       <span class="im-bubble ${rich.cls}">${rich.html}</span>
-      ${stamp}
+      ${stamp}${(mine && !m.group && !m.channel) ? renderTicks(m.status) : ""}
     </span>
   </div>`;
 }
@@ -231,11 +237,17 @@ async function sendMsg(text) {
       await NM.inv("send_group", { groupId: ACTIVE, text });
       pushMsg(ACTIVE, { id: "l" + Date.now(), from: MY_ID, body: text, ts: Date.now(), group: true, to: ACTIVE });
     } else {
-      await NM.inv("send_to", { target: ACTIVE, text });
-      pushMsg(ACTIVE, { id: "l" + Date.now(), from: MY_ID, body: text, ts: Date.now(), to: ACTIVE });
+      // 乐观插入(status=0 发送中)；send_to 返回原 gram_id → 升单勾✓并写 gramId(后续双勾按它匹配)。
+      const localId = "l" + Date.now();
+      pushMsg(ACTIVE, { id: localId, from: MY_ID, body: text, ts: Date.now(), to: ACTIVE, status: 0 });
+      const g = await NM.inv("send_to", { target: ACTIVE, text });
+      if (g) {
+        const row = (VIEW.id === ACTIVE) && VIEW.rows.find((r) => r.id === localId);
+        if (row) { row.gramId = g; row.status = 1; paintVirtual(false); }
+        if (window.ChatLog && ChatLog.mark) ChatLog.mark(ACTIVE, { id: localId, gramId: g }, 1);
+      }
     }
   } catch (e) {
-    // 发送失败（含重连后仍失败）：不乐观回显，避免幽灵本地消息；提示用户。
     if (window.toast) toast("发送失败：" + (e && e.message ? e.message : e));
   }
 }

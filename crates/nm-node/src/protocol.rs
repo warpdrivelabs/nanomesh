@@ -18,7 +18,8 @@ use crate::channels::{
     channel_sub, channel_unsub,
 };
 use crate::delivery::{
-    account_online, deliver_account, deliver_direct, deliver_group_here, deliver_or_store,
+    account_online, clear_inbox_on_receipt, deliver_account, deliver_direct, deliver_group_here,
+    deliver_or_store,
     drain_inbox_to, group_bootstrap,
 };
 use crate::devices::{
@@ -63,6 +64,31 @@ impl ProtocolHandler for ImspaceProto {
             tracing::info!(peer = %conn.remote_id().fmt_short(), "rejected revoked device");
             conn.close(0u32.into(), b"device_revoked");
             return Ok(());
+        }
+        // 限流闸①：全局并发连接上限。超则拒绝新连接，防 FD/内存耗尽（DoS 防护）。
+        // 用 sessions.len() 作权威——它随连接关闭自动回落，无需额外计数器同步。
+        if self.ctx.sessions.len() >= self.ctx.max_connections {
+            tracing::warn!(online = self.ctx.sessions.len(), max = self.ctx.max_connections,
+                peer = %conn.remote_id().fmt_short(), "rejected: connection limit reached");
+            conn.close(0u32.into(), b"server_busy");
+            return Ok(());
+        }
+        // 限流闸②：单公钥新建连接速率门。拦同一身份高频重连（churn/风暴），正常重连不受影响。
+        {
+            let now = crate::now_secs();
+            let gate = &self.ctx.conn_gate;
+            if let Some(last) = gate.get(&rid_arr).map(|e| *e.value()) {
+                if now.saturating_sub(last) < crate::CONN_RATE_MIN_SECS {
+                    tracing::warn!(peer = %conn.remote_id().fmt_short(), "rejected: connection rate limited");
+                    conn.close(0u32.into(), b"rate_limited");
+                    return Ok(());
+                }
+            }
+            // 容量兜底：表满则整表清空（惰性，牺牲一轮限流精度换无界防护）。
+            if gate.len() >= crate::CONN_GATE_CAP {
+                gate.clear();
+            }
+            gate.insert(rid_arr, now);
         }
         let rid = rid_arr.to_vec();
         self.ctx.sessions.insert(rid.clone(), conn.clone());
@@ -225,6 +251,22 @@ async fn handle_gram(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Optio
         }
         return Some(reply_gram(gram, GramKind::Receipt, None));
     }
+    // 送达回执：client 收到推送的私聊后回的 ack（kind=Receipt, ref=原gram_id, receiver=原sender）。
+    // 1) 清理该设备在本节点的离线副本（Tier2）；2) 把回执转回原 sender（支撑双勾，可跨节点）；
+    // 3) 回 Reply 而非 Receipt —— 断开"回执再触发回执"的环（防环三闸之二）。
+    if matches!(gram.kind(), GramKind::Receipt) {
+        // 防伪造：回执的 sender 必须是本连接身份。
+        if gram.sender.as_slice() != caller {
+            return Some(reply_gram(gram, GramKind::Reply, None));
+        }
+        if let Some(orig_id) = gram.ref_gram_id {
+            clear_inbox_on_receipt(ctx, rid, caller, orig_id);
+        }
+        // receiver 已是原 sender → deliver_direct 本地直投 / 离线入库 / 远端 gossip 转回。
+        let (g, c) = (gram.clone(), ctx.clone());
+        ctx.tracker.spawn(async move { deliver_direct(&g, &c).await; });
+        return Some(reply_gram(gram, GramKind::Reply, None));
+    }
     let to = &gram.receiver;
     let node_id = &ctx.node_id;
     let addressed_to_node = to.is_empty() || to.as_slice() == node_id.as_slice();
@@ -261,6 +303,7 @@ async fn handle_gram(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Optio
     match gram.kind() {
         GramKind::Command => handle_command(gram, ctx, caller, rid).await,
         GramKind::Message => Some(receipt_for(gram)),
+        GramKind::Ping => Some(reply_gram(gram, GramKind::Pong, None)), // 应用层心跳
         GramKind::Login => Some(login_ok(gram)),
         GramKind::Logout => {
             ctx.sessions.remove(rid); // 显式下线：同步移除会话

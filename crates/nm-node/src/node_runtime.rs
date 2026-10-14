@@ -227,6 +227,8 @@ impl Node {
             shutdown: tokio_util::sync::CancellationToken::new(),
             tracker: tokio_util::task::TaskTracker::new(),
             drain_timeout: std::time::Duration::from_secs(5),
+            max_connections: crate::DEFAULT_MAX_CONNECTIONS,
+            conn_gate: Arc::new(DashMap::new()),
         })
     }
 
@@ -258,6 +260,8 @@ impl Node {
             revoked: self.revoked.clone(),
             pending_fwd: self.pending_fwd.clone(),
             tracker: self.tracker.clone(),
+            max_connections: self.max_connections,
+            conn_gate: self.conn_gate.clone(),
         }
     }
 
@@ -278,6 +282,11 @@ impl Node {
     /// 设置 drain 窗口上限（nmd.toml [shutdown] drain_timeout_secs）。需在 serve 前、Arc 包裹前调用。
     pub fn set_drain_timeout(&mut self, d: std::time::Duration) {
         self.drain_timeout = d;
+    }
+
+    /// 设置全局并发连接上限（nmd.toml [limits] max_connections）。0=不限。需在 Arc 包裹前调用。
+    pub fn set_max_connections(&mut self, n: usize) {
+        self.max_connections = if n == 0 { usize::MAX } else { n };
     }
 
     pub fn addr(&self) -> nm_transport::Addr {

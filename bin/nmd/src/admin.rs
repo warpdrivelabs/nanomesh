@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use axum::{
     extract::State,
     http::StatusCode,
+    response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
@@ -113,6 +114,14 @@ pub async fn serve(
         .route("/names/set", post(names_set))
         .route("/names/del", post(names_del))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth))
+        // 健康探针：免鉴权（供 systemd/容器探针访问），merge 在 auth layer 之外。
+        // /healthz 存活（进程能响应即 200，不依赖后端，避免误杀）；/readyz 就绪（redb 可写 + endpoint 有地址，否则 503）。
+        .merge(
+            Router::new()
+                .route("/healthz", get(healthz))
+                .route("/readyz", get(readyz))
+                .with_state(state.clone()),
+        )
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -138,6 +147,31 @@ async fn auth(
         Ok(next.run(req).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+/// 存活探针：进程能响应 HTTP 即健康。**不依赖**后端状态（redb/网络），避免依赖抖动误杀进程。
+async fn healthz(State(st): State<AppState>) -> Json<Value> {
+    Json(json!({ "status": "ok", "uptime_s": st.start.elapsed().as_secs() }))
+}
+
+/// 就绪探针：节点真能服务才返回 200；redb 不可访问 / endpoint 无地址时返回 503（供编排器暂不转流量）。
+async fn readyz(State(st): State<AppState>) -> axum::response::Response {
+    match st.node.readiness() {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "ready",
+                "online": st.node.online_count(),
+                "peers": st.node.peer_count(),
+            })),
+        )
+            .into_response(),
+        Err(reason) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "status": "not_ready", "reason": reason })),
+        )
+            .into_response(),
     }
 }
 
@@ -244,6 +278,12 @@ async fn system(State(st): State<AppState>) -> Json<Value> {
     let pm = *st.proc.lock().unwrap();
     let addr = st.node.addr();
     let (roam_changes, roam_last_ms) = st.node.roam_snapshot();
+    let tables: serde_json::Map<String, Value> = st
+        .node
+        .table_sizes()
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), Value::from(v)))
+        .collect();
     Json(json!({
         "pid": std::process::id(),
         "rss_bytes": pm.rss_bytes,
@@ -256,6 +296,8 @@ async fn system(State(st): State<AppState>) -> Json<Value> {
         "ip_addrs": addr.ip_addrs().map(|a| a.to_string()).collect::<Vec<_>>(),
         "roam_changes": roam_changes,
         "roam_last_ms": roam_last_ms,
+        // P1 内存可观测：各热点表当前条目数（监控增长趋势，据此判断是否需淘汰）。
+        "table_sizes": tables,
     }))
 }
 

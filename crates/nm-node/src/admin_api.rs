@@ -140,6 +140,23 @@ impl Node {
         self.groups.len()
     }
 
+    /// 各内存热点表当前大小（P1 内存可观测）：随用户/设备/群/名增长的表，供运维监控增长趋势、
+    /// 据此判断是否需要淘汰策略。返回 (表名, 条目数) 列表。
+    pub fn table_sizes(&self) -> Vec<(&'static str, usize)> {
+        vec![
+            ("sessions", self.sessions.len()),
+            ("principals", self.principals.len()),
+            ("devices", self.devices.len()),
+            ("revoked", self.revoked.len()),
+            ("entities", self.dir.len()),
+            ("groups", self.groups.len()),
+            ("names", self.names.len()),
+            ("peers", self.peers.len()),
+            ("channels", self.channels.len()),
+            ("presence", self.presence.len()),
+        ]
+    }
+
     /// 全部已登记设备快照（后端管理台「域内命名登记」下展开某账号的设备列表用）。
     /// 每条含所属账号、设备公钥、标签、角色、实时在线态与吊销状态；在线态按当前会话/映射重算
     /// （与 device_list 一致：principals 映射 + 本连接存活）。设备仅存在于账号 home 所在节点。
@@ -224,6 +241,18 @@ impl Node {
             entities: self.dir.len(),
             groups: self.groups.len(),
         }
+    }
+
+    /// 就绪探针（/readyz）：节点是否真能服务。检查 (1) redb 可访问（有 store 时），
+    /// (2) endpoint 已绑定地址。返回 Ok(()) 为就绪；Err(原因) 供探针返回 503。
+    pub fn readiness(&self) -> std::result::Result<(), String> {
+        if let Some(s) = &self.store {
+            s.health_check().map_err(|e| format!("store: {e}"))?;
+        }
+        if self.ep.addr().addrs.is_empty() && self.ep.addr().relay_urls().next().is_none() {
+            return Err("endpoint has no address yet".into());
+        }
+        Ok(())
     }
 
     /// 踢下线：断开某公钥的会话，但**不**拉黑（区别于 `ban`）。返回是否有会话被断。

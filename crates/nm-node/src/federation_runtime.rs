@@ -226,7 +226,10 @@ impl Node {
                 }
             };
             tracing::info!(%federation, "group gossip joined");
-            let mut pub_rx = match self.group_pub_rx.lock().unwrap().take() {
+            // 先在独立作用域取出 receiver 并立即释放 MutexGuard，再 match——避免 std Mutex guard
+            // 跨越后续逻辑/await（当前安全，此写法防未来在 match 臂内引入 await 时意外跨-await 持锁）。
+            let taken = self.group_pub_rx.lock().unwrap().take();
+            let mut pub_rx = match taken {
                 Some(rx) => rx,
                 None => {
                     tracing::warn!("group sync already running");
@@ -237,7 +240,9 @@ impl Node {
             let mut last_announce = tokio::time::Instant::now() - announce_iv; // 立即先广播一次
             // F1：per_topic 开启 → 起「每群主题」事件泵（FedMsg → on_group_gossip，与火管同一处理路径）。
             if self.per_topic.load(std::sync::atomic::Ordering::Relaxed) {
-                if let Some(mut fed_rx) = self.fed_rx.lock().unwrap().take() {
+                // 先取出 receiver 并释放 guard，再进 if 块——块内有 tokio::spawn，guard 不应跨越它。
+                let taken_fed = self.fed_rx.lock().unwrap().take();
+                if let Some(mut fed_rx) = taken_fed {
                     let me = self.clone();
                     tokio::spawn(async move {
                         loop {

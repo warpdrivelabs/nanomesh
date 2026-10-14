@@ -85,6 +85,13 @@ type PendingForwardQueue = std::collections::VecDeque<PendingForwardItem>;
 const PENDING_FWD_TTL_SECS: u64 = 60; // Defect C：冷启动待发转发项最长保留，超时丢弃
 const PENDING_FWD_CAP: usize = 4096;  // Defect C：待发队列上限，防无界堆积
 
+// 连接限流（P0 DoS 防护）：
+const DEFAULT_MAX_CONNECTIONS: usize = 10_000; // 全局并发连接上限（超则拒绝新连接，防 FD/内存耗尽）
+const CONN_RATE_MIN_SECS: u64 = 1;             // 同一公钥两次新建连接的最小间隔（拦 churn/重连风暴）
+const CONN_GATE_CAP: usize = 65_536;           // conn_gate 表容量上限（满则整表清空，防无界）
+// 公钥 → 上次接受该公钥连接的 Unix 秒（单来源速率限流）。
+type ConnGate = DashMap<[u8; 32], u64>;
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -123,6 +130,9 @@ struct Ctx {
     pending_fwd: Arc<std::sync::Mutex<PendingForwardQueue>>,
     // 优雅关闭：在途投递任务追踪器（投递类 spawn 走它，关闭时 drain）。与 Node.tracker 同一实例。
     tracker: tokio_util::task::TaskTracker,
+    // 连接限流（P0）：全局并发连接上限 + 单公钥新建连接速率门。accept 热路径读。
+    max_connections: usize,
+    conn_gate: Arc<ConnGate>,
 }
 
 pub struct Node {
@@ -170,6 +180,9 @@ pub struct Node {
     tracker: tokio_util::task::TaskTracker,
     // drain 窗口上限：等在途投递清零的最长时间（nmd.toml 可配，默认 5s）。
     drain_timeout: std::time::Duration,
+    // 连接限流（P0 DoS 防护）：全局并发连接上限 + 单公钥新建连接速率门。
+    max_connections: usize,
+    conn_gate: Arc<ConnGate>,
 }
 
 /// 换网观测计数（供 admin 看板）：记录本节点端点地址变化次数与最近一次时间。

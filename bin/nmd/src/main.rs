@@ -93,6 +93,27 @@ struct Config {
     /// 优雅关闭：收到 SIGTERM/SIGINT 后等待在途投递发完的最长时间（秒）。
     #[serde(default)]
     shutdown: ShutdownCfg,
+    /// 连接限流（DoS 防护）：全局并发连接上限。
+    #[serde(default)]
+    limits: LimitsCfg,
+}
+
+/// 连接限流配置。
+#[derive(Deserialize)]
+struct LimitsCfg {
+    /// 全局并发连接上限：超过则拒绝新连接（防 FD/内存耗尽）。0=不限。默认 10000。
+    #[serde(default = "default_max_conns")]
+    max_connections: usize,
+}
+
+impl Default for LimitsCfg {
+    fn default() -> Self {
+        Self { max_connections: default_max_conns() }
+    }
+}
+
+fn default_max_conns() -> usize {
+    10_000
 }
 
 /// 优雅关闭配置。
@@ -334,8 +355,21 @@ fn print_startup_info(cfg: &Config, mode_label: &str) {
     println!();
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// 入口：手动构建多线程运行时，worker 线程数可经环境变量 `NMD_WORKER_THREADS` 调优
+/// （不设则用 tokio 默认 = CPU 核数）。海量连接/高并发时可据负载显式调大。
+fn main() -> anyhow::Result<()> {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    if let Some(n) = std::env::var("NMD_WORKER_THREADS").ok().and_then(|s| s.parse::<usize>().ok()) {
+        if n > 0 {
+            builder.worker_threads(n);
+        }
+    }
+    let rt = builder.build()?;
+    rt.block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -407,6 +441,8 @@ async fn main() -> anyhow::Result<()> {
     };
     // 优雅关闭 drain 窗口（nmd.toml [shutdown] drain_timeout_secs，默认 5s）。须在 Arc 包裹前设置。
     node.set_drain_timeout(Duration::from_secs(cfg.shutdown.drain_timeout_secs));
+    // 连接限流（nmd.toml [limits] max_connections，默认 10000；0=不限）。须在 Arc 包裹前设置。
+    node.set_max_connections(cfg.limits.max_connections);
     let node = Arc::new(node);
     // nat / selfhost 都靠发现服务上线后被按公钥拨号；lan 仅直连。
     let needs_online = matches!(mode, Mode::Nat | Mode::SelfHost);

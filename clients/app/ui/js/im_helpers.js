@@ -20,6 +20,7 @@ function slimMsg(m) {
     id: m.id, from: m.from, to: m.to, body: m.body || "", ts: m.ts || 0,
     group: !!m.group, channel: !!m.channel, typeUrl: m.typeUrl || "",
     kind: m.kind || "text", text: m.text || "",
+    status: m.status || 0, gramId: m.gramId || 0,
   };
   const media = m.media;
   if (media && typeof media === "object") {

@@ -79,7 +79,15 @@ impl RedbStore {
 
     // ---- 离线队列 ----
 
-    /// 把一条消息存入收件人的离线队列。
+    /// 健康探测：开一个读事务并打开一张表，确认底层 db 可访问（供 /readyz 就绪探针）。
+    /// 轻量只读，不写、无副作用；db 损坏/锁死时返回 Err。
+    pub fn health_check(&self) -> Result<()> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        rtx.open_table(ENTITIES).map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 把一条消息存入收件人的离线队列。单条路径保持默认 Immediate 持久（崩溃不丢）。
     pub fn push_inbox(&self, receiver: &[u8], gram: &Gram) -> Result<()> {
         let key = inbox_key(receiver, gram.gram_id);
         let val = gram.encode_to_vec();
@@ -87,6 +95,29 @@ impl RedbStore {
         {
             let mut t = wtx.open_table(INBOX).map_err(db_err)?;
             t.insert(key.as_slice(), val.as_slice()).map_err(db_err)?;
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 批量把多条消息存入离线队列——单事务单 commit。
+    /// 群/多设备扇出热路径用：N 个离线设备从 N 次事务+N 次 fsync 降为 1 次事务。
+    /// 批量场景多为可重发的群消息，且单事务已大幅降 fsync，这里用 `None` 免除本事务的 fsync
+    /// （后续任一 Immediate 写——drain/身份变更——会把它一并落盘，作天然检查点）。
+    /// `items`：(收件人, gram) 列表。
+    pub fn push_inbox_batch(&self, items: &[(&[u8], &Gram)]) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let mut wtx = self.db.begin_write().map_err(db_err)?;
+        wtx.set_durability(redb::Durability::None).map_err(db_err)?;
+        {
+            let mut t = wtx.open_table(INBOX).map_err(db_err)?;
+            for (receiver, gram) in items {
+                let key = inbox_key(receiver, gram.gram_id);
+                let val = gram.encode_to_vec();
+                t.insert(key.as_slice(), val.as_slice()).map_err(db_err)?;
+            }
         }
         wtx.commit().map_err(db_err)?;
         Ok(())
@@ -126,8 +157,26 @@ impl RedbStore {
         Ok(out)
     }
 
+    /// 删除某收件人名下指定 gram_id 的一条离线消息（送达回执到达后清理）。返回是否确有删除。
+    /// 配合 Tier2：drain_inbox_to 改 peek 推送不删，收到对应 client 回执后由本方法删除。
+    pub fn del_inbox_one(&self, receiver: &[u8], gram_id: u64) -> Result<bool> {
+        let key = inbox_key(receiver, gram_id);
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        let existed;
+        {
+            let mut t = wtx.open_table(INBOX).map_err(db_err)?;
+            existed = t.remove(key.as_slice()).map_err(db_err)?.is_some();
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(existed)
+    }
+
+    /// 某实体离线消息条数。range 直接计数，不解码 value（避免 O(n) prost 解码）。
     pub fn inbox_len(&self, receiver: &[u8]) -> Result<usize> {
-        Ok(self.peek_inbox(receiver)?.len())
+        let (lo, hi) = inbox_prefix_range(receiver);
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(INBOX).map_err(db_err)?;
+        Ok(t.range(lo.as_slice()..hi.as_slice()).map_err(db_err)?.count())
     }
 
     /// 删除所有收件人中 `timestamp_ms` 早于 `before_ms` 的离线消息，返回删除条数。

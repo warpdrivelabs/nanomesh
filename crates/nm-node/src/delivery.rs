@@ -200,12 +200,23 @@ pub(crate) async fn deliver_account(
     }
     if store_offline {
         if let Some(s) = &ctx.store {
-            for d in inbox_targets(ctx, account) {
-                if skip == Some(d.as_slice()) || reached.contains(&d) {
-                    continue;
-                }
-                if let Err(e) = s.push_inbox(&d, gram) {
-                    tracing::warn!("push_inbox failed: {e}");
+            // 批量入库：同一条 gram 投给该账号的多个离线设备——单事务单 commit（免 N 次 fsync）。
+            let targets: Vec<Vec<u8>> = inbox_targets(ctx, account)
+                .into_iter()
+                .filter(|d| skip != Some(d.as_slice()) && !reached.contains(d))
+                .collect();
+            if !targets.is_empty() {
+                let items: Vec<(&[u8], &Gram)> = targets.iter().map(|d| (d.as_slice(), gram)).collect();
+                if let Err(e) = s.push_inbox_batch(&items) {
+                    // 补偿：批量(None durability)失败 → 逐条用 push_inbox(Immediate)重试，提高落库成功率，
+                    // 不静默丢消息。逐条仍失败才告警（redb 真故障，需运维介入）。
+                    tracing::warn!("push_inbox_batch failed: {e}; falling back to per-device insert");
+                    for d in &targets {
+                        if let Err(e2) = s.push_inbox(d, gram) {
+                            tracing::error!(device = %crate::records::hex_encode(&d[..d.len().min(4)]),
+                                "offline inbox persist FAILED (message may be lost): {e2}");
+                        }
+                    }
                 }
             }
         }
@@ -213,10 +224,11 @@ pub(crate) async fn deliver_account(
     !reached.is_empty()
 }
 
-/// 取走某连接名下的离线消息并推送给它。
+/// 取某连接名下的离线消息并推送给它。Tier2：用 peek 不删——推送后保留，
+/// 待收到该连接(设备)回送的 Receipt 再由 clear_inbox_on_receipt 逐条删除（at-least-once 可靠补投）。
 pub(crate) fn drain_inbox_to(ctx: &Ctx, rid: &[u8], conn: &IrohConnection) {
     let Some(store) = &ctx.store else { return };
-    let Ok(pending) = store.drain_inbox(rid) else { return };
+    let Ok(pending) = store.peek_inbox(rid) else { return };
     if pending.is_empty() {
         return;
     }
@@ -230,6 +242,15 @@ pub(crate) fn drain_inbox_to(ctx: &Ctx, rid: &[u8], conn: &IrohConnection) {
             }
         }
     });
+}
+
+/// 送达回执到达后，清理该设备/账号在本节点的离线副本（Tier2 best-effort）。
+/// 只删发来回执的那台设备(rid)的副本 + 老账号级 key 兜底；不删该账号其它设备的副本
+/// ——它们各自收到并各自回执后再删，保证每台设备都可靠补投。
+pub(crate) fn clear_inbox_on_receipt(ctx: &Ctx, acking_rid: &[u8], acking_account: &[u8], gram_id: u64) {
+    let Some(store) = &ctx.store else { return };
+    let _ = store.del_inbox_one(acking_rid, gram_id);
+    let _ = store.del_inbox_one(acking_account, gram_id);
 }
 
 /// 私聊单播投递（不依赖 s2s 中继）：

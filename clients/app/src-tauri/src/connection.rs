@@ -36,6 +36,7 @@ pub(crate) async fn finish_session(
     let session = Arc::new(session);
     let watch = session.clone();
     let apph = app.clone();
+    let recv_session = session.clone(); // 收到他人私聊后回送达回执用
     // 前端就绪闸门：首连等 imStart 完成后调用 im_ready 放水，避免节点在「连接建立」瞬间补投的
     // 离线消息早于前端监听器而被丢弃。最多等 8s 兜底。重连时前端监听器早在，跳过门控立即放水。
     let ready_rx = if wait_ready {
@@ -67,6 +68,22 @@ pub(crate) async fn finish_session(
                     devices::node_event(&apph, &p.value);
                 }
                 continue;
+            }
+            // 送达回执（双对号）：
+            // (a) 转回的回执(kind=Receipt) → 发独立 receipt 事件给前端，升本人气泡为双勾。
+            if matches!(gram.kind(), nm_proto::GramKind::Receipt) {
+                if let Some(refid) = gram.ref_gram_id {
+                    let _ = apph.emit("core://event", json!({
+                        "type": "receipt", "ref": refid, "from": hex(&gram.sender), "ts": gram.timestamp_ms
+                    }));
+                }
+                continue;
+            }
+            // (b) 收到「他人」发来的私聊 → 回送达回执给节点（sender!=自己：排除 deliver_account 的本人同步副本，防自造双勾）。
+            if matches!(gram.kind(), nm_proto::GramKind::Message) && gram.sender.as_slice() != my_id.as_slice() {
+                let s = recv_session.clone();
+                let g = gram.clone();
+                async_runtime::spawn(async move { let _ = s.send_receipt(&g).await; });
             }
             let (type_url, body) = match gram.payload.as_ref() {
                 Some(p) => (
@@ -116,6 +133,40 @@ pub(crate) async fn finish_session(
                 let _ = tx.send(());
             });
         }
+    }
+
+    // 应用层心跳保活：每 20s ping 当前会话；ping 失败(连接死)→ 发换网信号走单飞重连（不自己拨号，
+    // 与换网哨兵/发送重连共用一条重连路径，防风暴）。任务随世代退出：重连换了 session(conn_gen 变)
+    // 后旧任务自动结束，避免多开。QUIC 层已有 3s keep-alive，这里 20s 应用层探测补"半死/假活"场景。
+    if let Some(tx) = state.roam_tx.get().cloned() {
+        let app_hb = app.clone();
+        let my_gen = conn_gen;
+        async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                let Some(st) = app_hb.try_state::<AppState>() else { break };
+                // 取当前会话 + 校验世代：世代已变=本任务对应的连接已被重连取代，退出。
+                let (sess, cur_gen) = {
+                    let g = st.conn.lock().await;
+                    match g.as_ref() {
+                        Some(c) => (c.session.clone(), c.conn_gen),
+                        None => break,
+                    }
+                };
+                if cur_gen != my_gen {
+                    break;
+                }
+                // ping 带超时判死；成功=连接活，失败/超时=发信号触发单飞重连。
+                let dead = match tokio::time::timeout(SEND_TIMEOUT, sess.ping()).await {
+                    Ok(Ok(())) => false,
+                    Ok(Err(e)) => looks_dead(&sess, &e),
+                    Err(_) => true, // 超时
+                };
+                if dead {
+                    let _ = tx.send(());
+                }
+            }
+        });
     }
 
     Ok(hex(&my_id))
@@ -428,11 +479,12 @@ pub(crate) async fn send_to(
     state: State<'_, AppState>,
     target: String,
     text: String,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let id = parse_id(&target)?; // 业务校验先做，错了直接回，不触发重连
     send_with_retry(&app, &state, move |s| {
         let text = text.clone();
-        async move { s.send_to(id, &text).await.map(|_| ()) }
+        // 返回节点 ack 回执里的 ref_gram_id = 本条消息 gram_id，供前端标记单勾✓。
+        async move { s.send_to(id, &text).await.map(|ack| ack.ref_gram_id.unwrap_or(0)) }
     })
     .await
 }

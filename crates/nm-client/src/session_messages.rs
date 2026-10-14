@@ -63,4 +63,25 @@ impl Session {
         msg.crc = nm_crypto::content_hash(body).to_vec();
         route_send(&self.conn, &msg).await
     }
+
+    /// 收到节点推送的私聊消息后，回送达回执给节点（经 bi，fire-and-forget）。
+    /// 调用方应 spawn，勿阻塞收流。节点据此清离线副本 + 转回回执给原发送方（双勾）。
+    pub async fn send_receipt(&self, orig: &Gram) -> Result<(), ClientError> {
+        let n = self.next_corr.fetch_add(1, Ordering::SeqCst); // 单调 gram_id，防被节点 SeenGrams 误去重
+        let mut r = build_gram(GramKind::Receipt, self.my_id, orig.sender.clone(), None);
+        r.gram_id = n;
+        r.ref_gram_id = Some(orig.gram_id); // 关联原消息（UI 据此匹配本人气泡升双勾）
+        let _ = route_send(&self.conn, &r).await; // 吞节点回的 Reply / 老节点 error，不打扰上层
+        Ok(())
+    }
+
+    /// 应用层心跳：向节点发 Ping，收到任何响应（含老节点 error Reply）即视为连接存活；
+    /// 仅超时 / 连接关闭才 Err（上层据此触发重连）。
+    pub async fn ping(&self) -> Result<(), ClientError> {
+        let n = self.next_corr.fetch_add(1, Ordering::SeqCst);
+        let mut p = build_gram(GramKind::Ping, self.my_id, Vec::new(), None); // receiver 空 = 面向节点
+        p.gram_id = n;
+        let _ = route_send(&self.conn, &p).await?;
+        Ok(())
+    }
 }

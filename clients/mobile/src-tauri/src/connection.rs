@@ -30,6 +30,7 @@ pub(crate) async fn finish_session(
     let session = Arc::new(session);
     let watch = session.clone();
     let apph = app.clone();
+    let recv_session = session.clone();
     async_runtime::spawn(async move {
         while let Some(gram) = inbox.recv().await {
             if let Some(p) = gram
@@ -49,6 +50,19 @@ pub(crate) async fn finish_session(
                     devices::node_event(&apph, &p.value);
                 }
                 continue;
+            }
+            if matches!(gram.kind(), nm_proto::GramKind::Receipt) {
+                if let Some(refid) = gram.ref_gram_id {
+                    let _ = apph.emit("core://event", json!({
+                        "type": "receipt", "ref": refid, "from": hex(&gram.sender), "ts": gram.timestamp_ms
+                    }));
+                }
+                continue;
+            }
+            if matches!(gram.kind(), nm_proto::GramKind::Message) && gram.sender.as_slice() != my_id.as_slice() {
+                let s = recv_session.clone();
+                let g = gram.clone();
+                async_runtime::spawn(async move { let _ = s.send_receipt(&g).await; });
             }
             let (type_url, body) = match gram.payload.as_ref() {
                 Some(p) => (
@@ -209,12 +223,12 @@ pub(crate) async fn send_to(
     state: State<'_, AppState>,
     target: String,
     text: String,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let id = parse_id(&target)?;
     let session = session_of(&state).await?;
-    session
+    let ack = session
         .send_to(id, &text)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(ack.ref_gram_id.unwrap_or(0))
 }

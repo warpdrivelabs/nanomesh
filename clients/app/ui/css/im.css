@@ -720,3 +720,10 @@ html[data-theme="light"] .home-feats li { background: color-mix(in srgb, var(--p
 .um-meta small.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .um-av.um-plus { background: var(--hover); border: none; color: var(--ink2); }
 .dlg-pane > label.set-row { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); margin-top: 4px; }
+
+/* 送达回执双对号 */
+.im-tick { margin-left: 4px; font-size: 11px; vertical-align: baseline; opacity: 0.85; }
+.im-tick--pend { color: var(--muted, #8b949e); }
+.im-tick--sent { color: var(--muted, #8b949e); }
+.im-tick--read { color: var(--accent, #58a6ff); font-weight: 600; }
+.im-tick--fail { color: var(--danger, #f85149); font-weight: 700; }

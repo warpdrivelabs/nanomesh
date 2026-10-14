@@ -58,6 +58,18 @@ function handleAgentDelta(m) {
   }
 }
 
+// 送达回执：对方已收到本人消息 → 把对应本人气泡升为双勾✓✓(status=2)。
+// ev: {ref:原gram_id, from:对方账号}。即使会话未打开也落库，重开时显示双勾。
+function handleReceipt(ev) {
+  const conv = ev.from, g = ev.ref;
+  if (!conv || !g) return;
+  if (typeof VIEW !== "undefined" && VIEW.id === conv) {
+    const row = VIEW.rows.find((r) => r.from === MY_ID && r.gramId === g);
+    if (row && (row.status || 0) < 2) { row.status = 2; if (window.paintVirtual) paintVirtual(false); }
+  }
+  if (window.ChatLog && ChatLog.mark) ChatLog.mark(conv, { gramId: g }, 2);
+}
+
 function onCoreEvent(ev) {
   if (!ev) return;
   // 重连生命周期：后端发送失败→自动重连时 emit 这些，驱动状态行进度提示。
@@ -78,6 +90,7 @@ function onCoreEvent(ev) {
     if (window.toast) toast("重连失败，请检查网络");
     return;
   }
+  if (ev.type === "receipt") { handleReceipt(ev); return; }
   if (ev.type !== "message" || !ev.msg) return;
   const m = ev.msg;
   if (m.typeUrl === AGENT_DELTA_TYPE) { handleAgentDelta(m); return; }

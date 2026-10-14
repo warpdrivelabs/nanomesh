@@ -142,6 +142,7 @@ pub(crate) fn run() {
             local_store::profile_save,
             local_store::chat_open,
             local_store::chat_tail,
+            local_store::chat_mark,
             local_store::chat_before,
             local_store::chat_around,
             local_store::chat_append,

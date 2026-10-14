@@ -149,6 +149,11 @@ impl Node {
                 if last_bcast.elapsed() >= interval {
                     let home = self.ep.id_bytes();
                     let ts = now_secs();
+                    // P1 内存上界：清理早已过期的 presence 条目——此表仅读时判 TTL、insert 从不删，
+                    // 否则每个见过的实体（含离线/已消失）永久驻留 → 无界增长。用 TTL 的 10 倍作宽松
+                    // 阈值（远超刷新周期，不误删仍活跃者），超期即删。本地在线会话下一轮广播会重新 insert。
+                    let stale_before = ts.saturating_sub(PRESENCE_TTL_SECS * 10);
+                    self.presence.retain(|_, r| r.last_seen >= stale_before);
                     let mut entities: Vec<Vec<u8>> = self
                         .sessions
                         .iter()
