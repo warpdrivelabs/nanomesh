@@ -111,7 +111,8 @@ function renderTicks(s) {
   if (s === -1) return `<span class="im-tick im-tick--fail" title="发送失败">!</span>`;
   if (s >= 2)   return `<span class="im-tick im-tick--read" title="对方已收到">\u2713\u2713</span>`;
   if (s === 1)  return `<span class="im-tick im-tick--sent" title="已送达服务器">\u2713</span>`;
-  return `<span class="im-tick im-tick--pend" title="发送中">\u00b7</span>`;
+  if (s === 0)  return `<span class="im-tick im-tick--pend" title="发送中">\u00b7</span>`;
+  return ""; // status 未定义(历史消息无送达跟踪) → 不显示勾，避免误标"发送中"
 }
 function msgHtml(m, showSender, cont) {
   const mine = m.from === MY_ID;
@@ -126,13 +127,15 @@ function msgHtml(m, showSender, cont) {
   const stamp = (!sender && time) ? `<span class="im-time">${time}</span>` : "";
   const face = window.Profile ? Profile.faceHtml(m.from, named, 32) : "";
   const rich = window.Composer ? Composer.bubble(m) : { cls: "", html: escapeHtml(m.body || "") };
+  const ticks = (mine && !m.group && !m.channel) ? renderTicks(m.status) : "";
   return `<div class="im-msg ${mine ? "me" : ""} with-av${cont ? " cont" : ""}" data-mid="${escapeHtml(m.id || "")}">
     ${face}
     <span class="im-stack">
       ${sender}
       <span class="im-bubble ${rich.cls}">${rich.html}</span>
-      ${stamp}${(mine && !m.group && !m.channel) ? renderTicks(m.status) : ""}
+      ${stamp}
     </span>
+    ${ticks}
   </div>`;
 }
 

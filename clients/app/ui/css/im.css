@@ -721,9 +721,12 @@ html[data-theme="light"] .home-feats li { background: color-mix(in srgb, var(--p
 .um-av.um-plus { background: var(--hover); border: none; color: var(--ink2); }
 .dlg-pane > label.set-row { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); margin-top: 4px; }
 
-/* 送达回执双对号 */
-.im-tick { margin-left: 4px; font-size: 11px; vertical-align: baseline; opacity: 0.85; }
+/* 送达回执双对号：作为 .im-msg 的 flex 子项，排在气泡后面；me 行(row-reverse)下落在气泡与头像之间。
+   align-self:flex-end 贴行底 → 当后面是头像(顶对齐)时，勾显示在头像下方。 */
+.im-tick { align-self: flex-end; margin-bottom: 2px; font-size: 11px; line-height: 1;
+  opacity: 0.85; flex: 0 0 auto; white-space: nowrap; }
+.im-msg.me .im-tick { margin: 0 2px 2px 0; }
 .im-tick--pend { color: var(--muted, #8b949e); }
 .im-tick--sent { color: var(--muted, #8b949e); }
-.im-tick--read { color: var(--accent, #58a6ff); font-weight: 600; }
+.im-tick--read { color: var(--aqua, #58a6ff); font-weight: 600; }
 .im-tick--fail { color: var(--danger, #f85149); font-weight: 700; }
