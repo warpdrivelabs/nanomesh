@@ -73,22 +73,34 @@ impl ProtocolHandler for ImspaceProto {
             conn.close(0u32.into(), b"server_busy");
             return Ok(());
         }
-        // 限流闸②：单公钥新建连接速率门。拦同一身份高频重连（churn/风暴），正常重连不受影响。
+        // 限流闸②：单公钥重连速率门（滑动计数窗口）。拦持续重连风暴/churn，
+        // 但放行 app 重启/切后台/断线后的正常重连（1s 内也允许，不再一刀切拒绝）。
         {
             let now = crate::now_secs();
             let gate = &self.ctx.conn_gate;
-            if let Some(last) = gate.get(&rid_arr).map(|e| *e.value()) {
-                if now.saturating_sub(last) < crate::CONN_RATE_MIN_SECS {
-                    tracing::warn!(peer = %conn.remote_id().fmt_short(), "rejected: connection rate limited");
-                    conn.close(0u32.into(), b"rate_limited");
-                    return Ok(());
-                }
-            }
-            // 容量兜底：表满则整表清空（惰性，牺牲一轮限流精度换无界防护）。
+            // 容量兜底：表满则整表清空（惰性，牺牲一轮限流精度换无界防护）。放在读改之前，避免清掉刚写的条目。
             if gate.len() >= crate::CONN_GATE_CAP {
                 gate.clear();
             }
-            gate.insert(rid_arr, now);
+            let mut rejected = false;
+            gate.entry(rid_arr)
+                .and_modify(|(win_start, count)| {
+                    if now.saturating_sub(*win_start) >= crate::CONN_RATE_WINDOW_SECS {
+                        *win_start = now; // 窗口过期 → 重置
+                        *count = 1;
+                    } else if *count >= crate::CONN_RATE_MAX_IN_WINDOW {
+                        rejected = true; // 窗口内已达上限 → 拒绝（持续风暴）
+                    } else {
+                        *count += 1;
+                    }
+                })
+                .or_insert((now, 1));
+            if rejected {
+                tracing::warn!(peer = %conn.remote_id().fmt_short(),
+                    "rejected: reconnect rate limited (storm)");
+                conn.close(0u32.into(), b"rate_limited");
+                return Ok(());
+            }
         }
         let rid = rid_arr.to_vec();
         self.ctx.sessions.insert(rid.clone(), conn.clone());

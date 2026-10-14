@@ -93,10 +93,14 @@ const LEGACY_MAX_RETRIES: u32 = 5;   // 对端 home 不支持 DirectAck 时的�
 
 // 连接限流（P0 DoS 防护）：
 const DEFAULT_MAX_CONNECTIONS: usize = 10_000; // 全局并发连接上限（超则拒绝新连接，防 FD/内存耗尽）
-const CONN_RATE_MIN_SECS: u64 = 1;             // 同一公钥两次新建连接的最小间隔（拦 churn/重连风暴）
-const CONN_GATE_CAP: usize = 65_536;           // conn_gate 表容量上限（满则整表清空，防无界）
-// 公钥 → 上次接受该公钥连接的 Unix 秒（单来源速率限流）。
-type ConnGate = DashMap<[u8; 32], u64>;
+// 单公钥重连速率门：滑动计数窗口（而非「最小间隔」——那会误杀 app 重启/切后台/断线等 1s 内的正常重连）。
+// 同一公钥在 CONN_RATE_WINDOW_SECS 窗口内允许至多 CONN_RATE_MAX_IN_WINDOW 次新建连接；
+// 超出才拒（拦真正的持续重连风暴/churn）。正常重连是小突发（几次），风暴是每秒持续多次——此门只掐后者。
+const CONN_RATE_WINDOW_SECS: u64 = 10; // 速率窗口长度
+const CONN_RATE_MAX_IN_WINDOW: u32 = 10; // 窗口内同一公钥允许的新建连接次数（突发容量）
+const CONN_GATE_CAP: usize = 65_536;   // conn_gate 表容量上限（满则整表清空，防无界）
+// 公钥 → (当前窗口起点 Unix 秒, 窗口内计数)：单来源重连速率的滑动计数窗口。
+type ConnGate = DashMap<[u8; 32], (u64, u32)>;
 
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
