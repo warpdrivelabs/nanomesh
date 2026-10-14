@@ -181,13 +181,17 @@ impl Node {
                     }
                     last_bcast = tokio::time::Instant::now();
                 }
-                match tokio::time::timeout(std::time::Duration::from_secs(1), topic.recv()).await {
-                    Ok(Some(msg)) => self.on_presence_msg(&msg.content),
-                    Ok(None) => match self.join_channel(channel, self.peers_list()).await {
-                        Ok(t) => topic = t,
-                        Err(_) => tokio::time::sleep(std::time::Duration::from_secs(2)).await,
-                    },
-                    Err(_) => {}
+                tokio::select! {
+                    biased;
+                    _ = self.shutdown.cancelled() => break,
+                    r = tokio::time::timeout(std::time::Duration::from_secs(1), topic.recv()) => match r {
+                        Ok(Some(msg)) => self.on_presence_msg(&msg.content),
+                        Ok(None) => match self.join_channel(channel, self.peers_list()).await {
+                            Ok(t) => topic = t,
+                            Err(_) => tokio::time::sleep(std::time::Duration::from_secs(2)).await,
+                        },
+                        Err(_) => {}
+                    }
                 }
             }
         })

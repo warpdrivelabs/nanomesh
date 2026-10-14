@@ -90,6 +90,27 @@ struct Config {
     /// 显式 `[federation] per_topic = false` 回退仅火管。
     #[serde(default)]
     federation: FederationCfg,
+    /// 优雅关闭：收到 SIGTERM/SIGINT 后等待在途投递发完的最长时间（秒）。
+    #[serde(default)]
+    shutdown: ShutdownCfg,
+}
+
+/// 优雅关闭配置。
+#[derive(Deserialize)]
+struct ShutdownCfg {
+    /// drain 窗口上限（秒）：等在途单播投递清零的最长时间，到点仍未清零则继续关闭。默认 5。
+    #[serde(default = "default_drain_secs")]
+    drain_timeout_secs: u64,
+}
+
+impl Default for ShutdownCfg {
+    fn default() -> Self {
+        Self { drain_timeout_secs: default_drain_secs() }
+    }
+}
+
+fn default_drain_secs() -> u64 {
+    5
 }
 
 /// 规模化联邦（F1–F5）配置。
@@ -348,7 +369,7 @@ async fn main() -> anyhow::Result<()> {
     print_startup_info(&cfg, label);
 
     let seed = load_or_create_identity(&cfg.identity)?;
-    let node = match mode {
+    let mut node = match mode {
         Mode::Nat => {
             // 穿透 NAT + 同网通用（N0：n0 公共中继 + 打洞 + 发现）。
             // bind_port>0：固定 UDP 端口——同网可按固定端口直连(配合防火墙放行)，同时保留穿透 NAT。
@@ -384,6 +405,8 @@ async fn main() -> anyhow::Result<()> {
             nm_node::Node::bind_local_persistent_on(seed, &cfg.db, cfg.bind_port).await?
         }
     };
+    // 优雅关闭 drain 窗口（nmd.toml [shutdown] drain_timeout_secs，默认 5s）。须在 Arc 包裹前设置。
+    node.set_drain_timeout(Duration::from_secs(cfg.shutdown.drain_timeout_secs));
     let node = Arc::new(node);
     // nat / selfhost 都靠发现服务上线后被按公钥拨号；lan 仅直连。
     let needs_online = matches!(mode, Mode::Nat | Mode::SelfHost);
@@ -530,6 +553,38 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    node.serve().await?;
+    // 优雅关闭哨兵：首个 SIGTERM/SIGINT 触发有序关闭；关闭过程中再收到信号则强制退出，
+    // 防 drain / iroh close 意外卡死。见 docs 优雅关闭方案。
+    {
+        let node = node.clone();
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            tracing::info!("graceful shutdown initiated");
+            node.trigger_shutdown(); // 取消 token → 后台 loop 协作退出 + serve 收尾
+            shutdown_signal().await; // 二次信号 = 强退
+            tracing::warn!("second signal received — forcing exit");
+            std::process::exit(130);
+        });
+    }
+
+    node.serve().await?; // 收到取消后：drain 在途投递 → router.shutdown()(CONNECTION_CLOSE) → 返回
+    tracing::info!("nmd shutdown complete");
     Ok(())
+}
+
+/// 等待关闭信号：unix 同时接 SIGTERM(systemd/launchd 停服)与 SIGINT(ctrl-c)；其它平台用 ctrl_c。
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+    let mut int = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+    tokio::select! {
+        _ = term.recv() => {}
+        _ = int.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
 }

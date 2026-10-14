@@ -121,6 +121,8 @@ struct Ctx {
     revoked: Arc<Revoked>,
     // Defect C：冷启动待发转发队列 (to, GroupGossip字节, 入队秒)——inbox overlay 0 邻居时暂存，邻居成型后补发。
     pending_fwd: Arc<std::sync::Mutex<PendingForwardQueue>>,
+    // 优雅关闭：在途投递任务追踪器（投递类 spawn 走它，关闭时 drain）。与 Node.tracker 同一实例。
+    tracker: tokio_util::task::TaskTracker,
 }
 
 pub struct Node {
@@ -162,6 +164,12 @@ pub struct Node {
     pending_fwd: Arc<std::sync::Mutex<PendingForwardQueue>>,
     // 换网观测（P2 看板）：本端点地址变化次数 + 最近一次变化时间（Unix ms）。供 admin /system 展示。
     roam: Arc<RoamStat>,
+    // 优雅关闭（P0）：收到 SIGTERM/SIGINT 时 cancel，后台 loop 协作退出、serve 收尾关 router。
+    shutdown: tokio_util::sync::CancellationToken,
+    // 在途投递任务追踪：关闭时有界等待其清零（drain），避免未发完的单播消息丢失。
+    tracker: tokio_util::task::TaskTracker,
+    // drain 窗口上限：等在途投递清零的最长时间（nmd.toml 可配，默认 5s）。
+    drain_timeout: std::time::Duration,
 }
 
 /// 换网观测计数（供 admin 看板）：记录本节点端点地址变化次数与最近一次时间。

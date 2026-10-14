@@ -13,6 +13,7 @@ nm-gossip = { workspace = true }
 nm-federation = { workspace = true }
 nm-crypto = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }   # 优雅关闭：CancellationToken(sync) + TaskTracker(rt)
 tracing = { workspace = true }
 thiserror = { workspace = true }
 dashmap = { workspace = true }

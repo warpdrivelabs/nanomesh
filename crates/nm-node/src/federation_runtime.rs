@@ -22,7 +22,11 @@ impl Node {
         tokio::spawn(async move {
             loop {
                 self.sync_peers_once().await;
-                tokio::time::sleep(interval).await;
+                tokio::select! {
+                    biased;
+                    _ = self.shutdown.cancelled() => break,
+                    _ = tokio::time::sleep(interval) => {}
+                }
             }
         })
     }
@@ -236,19 +240,26 @@ impl Node {
                 if let Some(mut fed_rx) = self.fed_rx.lock().unwrap().take() {
                     let me = self.clone();
                     tokio::spawn(async move {
-                        while let Some(fm) = fed_rx.recv().await {
-                            // F5 存活账本：在该群主题上收到某节点的广播 ⇒ 该节点此刻订阅并存活于此主题。
-                            if let Ok(gg) = GroupGossip::decode(fm.content.as_slice()) {
-                                if !gg.origin.is_empty()
-                                    && gg.origin.as_slice() != me.ep.id_bytes().as_slice()
-                                {
-                                    me.per_group_live
-                                        .entry(fm.group.clone())
-                                        .or_default()
-                                        .insert(gg.origin, now_ms());
+                        loop {
+                            tokio::select! {
+                                biased;
+                                _ = me.shutdown.cancelled() => break,
+                                fm = fed_rx.recv() => {
+                                    let Some(fm) = fm else { break };
+                                    // F5 存活账本：在该群主题上收到某节点的广播 ⇒ 该节点此刻订阅并存活于此主题。
+                                    if let Ok(gg) = GroupGossip::decode(fm.content.as_slice()) {
+                                        if !gg.origin.is_empty()
+                                            && gg.origin.as_slice() != me.ep.id_bytes().as_slice()
+                                        {
+                                            me.per_group_live
+                                                .entry(fm.group.clone())
+                                                .or_default()
+                                                .insert(gg.origin, now_ms());
+                                        }
+                                    }
+                                    me.on_group_gossip(&fm.content).await;
                                 }
                             }
-                            me.on_group_gossip(&fm.content).await;
                         }
                     });
                     tracing::info!("per-topic group pump started");
@@ -384,13 +395,17 @@ impl Node {
                     }
                     last_announce = tokio::time::Instant::now();
                 }
-                match tokio::time::timeout(std::time::Duration::from_millis(300), topic.recv()).await {
-                    Ok(Some(msg)) => self.on_group_gossip(&msg.content).await,
-                    Ok(None) => match self.join_channel(channel, self.peers_list()).await {
-                        Ok(t) => topic = t,
-                        Err(_) => tokio::time::sleep(std::time::Duration::from_secs(2)).await,
-                    },
-                    Err(_) => {}
+                tokio::select! {
+                    biased;
+                    _ = self.shutdown.cancelled() => break,
+                    r = tokio::time::timeout(std::time::Duration::from_millis(300), topic.recv()) => match r {
+                        Ok(Some(msg)) => self.on_group_gossip(&msg.content).await,
+                        Ok(None) => match self.join_channel(channel, self.peers_list()).await {
+                            Ok(t) => topic = t,
+                            Err(_) => tokio::time::sleep(std::time::Duration::from_secs(2)).await,
+                        },
+                        Err(_) => {}
+                    }
                 }
             }
         })
@@ -403,7 +418,11 @@ impl Node {
         tokio::spawn(async move {
             let ctx = self.ctx();
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tokio::select! {
+                    biased;
+                    _ = self.shutdown.cancelled() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                }
                 let items: Vec<(Vec<u8>, Vec<u8>, u64)> = {
                     let mut q = ctx.pending_fwd.lock().unwrap();
                     if q.is_empty() { continue; }

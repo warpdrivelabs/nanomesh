@@ -224,6 +224,9 @@ impl Node {
             revoked,
             pending_fwd: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             roam: Arc::new(crate::RoamStat::default()),
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            tracker: tokio_util::task::TaskTracker::new(),
+            drain_timeout: std::time::Duration::from_secs(5),
         })
     }
 
@@ -254,11 +257,27 @@ impl Node {
             devices: self.devices.clone(),
             revoked: self.revoked.clone(),
             pending_fwd: self.pending_fwd.clone(),
+            tracker: self.tracker.clone(),
         }
     }
 
     pub fn id(&self) -> nm_transport::Id {
         self.ep.id()
+    }
+
+    /// 触发优雅关闭：cancel token → serve() 的后台 loop 协作退出、serve 收尾关 router。幂等。
+    pub fn trigger_shutdown(&self) {
+        self.shutdown.cancel();
+    }
+
+    /// 取优雅关闭信号句柄（供 admin axum with_graceful_shutdown / 外部编排）。
+    pub fn shutdown_token(&self) -> tokio_util::sync::CancellationToken {
+        self.shutdown.clone()
+    }
+
+    /// 设置 drain 窗口上限（nmd.toml [shutdown] drain_timeout_secs）。需在 serve 前、Arc 包裹前调用。
+    pub fn set_drain_timeout(&mut self, d: std::time::Duration) {
+        self.drain_timeout = d;
     }
 
     pub fn addr(&self) -> nm_transport::Addr {
@@ -271,6 +290,7 @@ impl Node {
         tracing::info!(node = %self.ep.id().fmt_short(), "nm-node serving");
         let nmspace = ImspaceProto { ctx: self.ctx() };
         if let Some(store) = self.store.clone() {
+            let shutdown = self.shutdown.clone();
             tokio::spawn(async move {
                 loop {
                     match store.prune_inbox(now_ms().saturating_sub(INBOX_RETENTION_MS)) {
@@ -278,7 +298,12 @@ impl Node {
                         Ok(_) => {}
                         Err(e) => tracing::warn!("prune inbox failed: {e}"),
                     }
-                    tokio::time::sleep(std::time::Duration::from_secs(6 * 3600)).await;
+                    // 可取消的节拍：关闭时立即退出，不悬空 6h。
+                    tokio::select! {
+                        biased;
+                        _ = shutdown.cancelled() => break,
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(6 * 3600)) => {}
+                    }
                 }
             });
         }
@@ -287,13 +312,29 @@ impl Node {
             blacklist: self.blacklist.clone(),
         };
         // Router::spawn 会把两个 ALPN 一并注册到 endpoint（覆盖 bind 时的单 ALPN）。
-        let _router = Router::builder(self.ep.iroh().clone())
+        // 持有 router（非 _router）以便关闭时 router.shutdown()：停 accept → 优雅关连接。
+        let router = Router::builder(self.ep.iroh().clone())
             .accept(nm_transport::ALPN, nmspace)
             .accept(iroh_gossip::ALPN, gossip_gate)
             .spawn();
-        // 持有 router 并阻塞，保持「serve 跑到进程结束」的既有契约
-        //（serve 任务被弃或运行时关停时，_router 析构 → Router 停机）。
-        std::future::pending::<()>().await;
+
+        // 阻塞到收到优雅关闭信号。未触发 shutdown 时 cancelled() 永不 resolve ≡ 旧 pending()，
+        // 行为与改造前逐字节等价（测试/compute 等不触发 token 的调用方不受影响）。
+        self.shutdown.cancelled().await;
+
+        // ——优雅关闭序列——
+        // 1) 停止接纳新的在途投递任务；2) 有界等待已派发的在途投递清零（drain）。
+        self.tracker.close();
+        tracing::info!(timeout = ?self.drain_timeout, "shutdown: draining in-flight deliveries");
+        if tokio::time::timeout(self.drain_timeout, self.tracker.wait()).await.is_err() {
+            tracing::warn!("drain timed out; proceeding to close");
+        }
+        // 3) 一次原子优雅关闭：停 accept → protocols.shutdown → endpoint.close(发 CONNECTION_CLOSE)。
+        //    对端收到连接优雅关闭而非超时硬断，避免重连风暴。
+        if let Err(e) = router.shutdown().await {
+            tracing::warn!("router shutdown error: {e}");
+        }
+        tracing::info!("nm-node serve stopped");
         Ok(())
     }
 

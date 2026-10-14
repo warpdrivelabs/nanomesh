@@ -80,6 +80,7 @@ pub async fn serve(
 ) -> anyhow::Result<()> {
     let proc = Arc::new(Mutex::new(ProcMetrics::default()));
     spawn_proc_sampler(proc.clone());
+    let shutdown = node.shutdown_token(); // 优雅关闭：节点关闭时一并停 axum
     let state = AppState {
         node,
         db_path,
@@ -116,7 +117,9 @@ pub async fn serve(
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!(%addr, "admin control API listening");
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move { shutdown.cancelled().await })
+        .await?;
     Ok(())
 }
 

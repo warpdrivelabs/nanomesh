@@ -222,7 +222,7 @@ pub(crate) fn drain_inbox_to(ctx: &Ctx, rid: &[u8], conn: &IrohConnection) {
     }
     let c = conn.clone();
     tracing::info!(count = pending.len(), "delivering offline inbox");
-    tokio::spawn(async move {
+    ctx.tracker.spawn(async move {
         for g in pending {
             if let Ok(mut s) = c.open_uni().await {
                 let _ = write_gram(&mut s, &g).await;

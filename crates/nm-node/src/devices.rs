@@ -287,7 +287,7 @@ fn notify_account(ctx: &Ctx, account: &[u8], event: serde_json::Value) {
         crc: Vec::new(),
     };
     let sessions = ctx.sessions.clone();
-    tokio::spawn(async move {
+    ctx.tracker.spawn(async move {
         for r in rids {
             try_push(&r, &gram, &sessions).await;
         }

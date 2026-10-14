@@ -1,0 +1,189 @@
+# cmxlinux 网络抖动导致客户端反复掉线 — 修复方案
+
+**日期**: 2026-10-13
+**修复提交**: `7bb6eaa fix(node,client): stop cross-node delivery churn and reconnect storms`
+**涉及文件**: `crates/nm-transport/src/lib.rs`(+43)、`clients/app/src-tauri/src/connection.rs`(+29)
+**验证环境**: cmxlinux + mac 两台 tauri 客户端，同局域网，同连 robot.link 节点
+
+---
+
+## 1. 问题现象
+
+两台设备运行 tauri 桌面客户端，**同一局域网、连同一个 robot.link 节点、仅操作系统不同**：
+
+| 设备 | 操作系统 | 表现 |
+|---|---|---|
+| mac 本机 | macOS | 连接**稳定**，长时间不掉线 |
+| cmxlinux | Linux(WebKitGTK) | **每隔 1–2 分钟掉线并重连一次** |
+
+用户直观困惑：*"同一个局域网、连同一台服务器，只有操作系统不一样，为什么只有 Linux 会断？"*
+
+掉线的副作用：每次重连都要重新 `device.hello`、重建会话，期间消息收发中断、在线状态闪烁、偶发"发了收不到"。
+
+---
+
+## 2. 诊断过程
+
+排查遵循**先看证据、不臆测 OS**的原则，从节点侧与客户端侧交叉取证。
+
+### 2.1 节点侧取证（robot.link）
+
+robot.link 的 nmd 日志（`router.accept` span 自带 `remote=` 连接标识）给出了铁证：
+
+- cmxlinux 客户端（账号 `608942cd` / 设备 `06ea63fe`）：**40 分钟内 session up 11 次、device hello 6 次** —— 反复重连。
+- mac 客户端（设备 `f63b5248`）：**40 分钟仅 1 次 up**，之后一直在线。
+
+重连时间戳 `22:03 → 22:04 → 22:06 → 22:10 …` 间隔不规则，且**每次 `gram_id` 都从 1 重置** —— 说明每次都是全新连接（连接被真实重建，不是同一条连接上的复用）。
+
+### 2.2 排除项
+
+| 怀疑 | 取证 | 结论 |
+|---|---|---|
+| 网络质量差 | cmxlinux rtt=9ms、丢包更少；mac rtt=21ms | ❌ 排除（Linux 侧网络反而更好） |
+| WebView 被后台挂起/节流 | WebKitWebProcess CPU=16.9%（未归零） | ❌ 排除（进程没被挂起） |
+| 节点/账号问题 | 两台连同一节点、同类客户端 | ❌ 排除 |
+
+### 2.3 客户端侧取证（cmxlinux）
+
+登录 cmxlinux 查网络接口，找到**唯一实质差异**——网络环境复杂度：
+
+```
+wlp0s20f3  UP  192.168.3.116/24 + 两个 IPv6 全局动态地址(preferred_lft 1985s/3348s，会过期更替)
+tun0       UP  192.168.146.235/20   ← VPN 隧道（活跃：rx 64MB / tx 202MB）
+docker0 / br-xxxx / veth            ← docker 网络
+```
+
+而 mac 只有**单一干净 Wi-Fi**。cmxlinux 的 `nmspace-app` 同时在 IPv4(`0.0.0.0`)和 IPv6(`[::]`)双栈监听 UDP。
+
+<p align="center">
+<img alt="图 1 · mac 与 cmxlinux 网络环境对比（抖动的唯一差异来源）" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4NjAiIGhlaWdodD0iNDQwIiB2aWV3Qm94PSIwIDAgODYwIDQ0MCIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sU2Vnb2UgVUksUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIj4KICA8cmVjdCB3aWR0aD0iODYwIiBoZWlnaHQ9IjQ0MCIgZmlsbD0iIzBmMTQxOSIvPgogIDx0ZXh0IHg9IjQzMCIgeT0iMzQiIGZpbGw9IiNlNmVkZjMiIGZvbnQtc2l6ZT0iMjAiIGZvbnQtd2VpZ2h0PSI3MDAiIHRleHQtYW5jaG9yPSJtaWRkbGUiPuWQjOS4gOWxgOWfn+e9kSDCtyDlkIzov54gcm9ib3QubGluayDCtyDllK/kuIDlt67lvILvvJrnvZHnu5znjq/looPlpI3mnYLluqY8L3RleHQ+CgogIDwhLS0gbWFjIHNpZGUgLS0+CiAgPHJlY3QgeD0iMzAiIHk9IjY0IiB3aWR0aD0iMzgwIiBoZWlnaHQ9IjMzMCIgcng9IjEyIiBmaWxsPSIjMTYxYjIyIiBzdHJva2U9IiMyZWEwNDMiIHN0cm9rZS13aWR0aD0iMiIvPgogIDx0ZXh0IHg9IjIyMCIgeT0iOTQiIGZpbGw9IiMyZWEwNDMiIGZvbnQtc2l6ZT0iMTgiIGZvbnQtd2VpZ2h0PSI3MDAiIHRleHQtYW5jaG9yPSJtaWRkbGUiPm1hYyDmnKzmnLog4oCUIOeos+WumiDinJM8L3RleHQ+CiAgPHJlY3QgeD0iNjAiIHk9IjExNiIgd2lkdGg9IjMyMCIgaGVpZ2h0PSI1MiIgcng9IjgiIGZpbGw9IiMxZjI5MzciIHN0cm9rZT0iIzMwMzYzZCIvPgogIDx0ZXh0IHg9Ijc2IiB5PSIxNDAiIGZpbGw9IiNlNmVkZjMiIGZvbnQtc2l6ZT0iMTQiIGZvbnQtd2VpZ2h0PSI2MDAiPldpLUZpIOWNleaOpeWPozwvdGV4dD4KICA8dGV4dCB4PSI3NiIgeT0iMTU4IiBmaWxsPSIjOGI5NDllIiBmb250LXNpemU9IjEyIj7ljZXkuIAgSVB2NO+8jOWcsOWdgOeos+WumjwvdGV4dD4KICA8dGV4dCB4PSIyMjAiIHk9IjIxMCIgZmlsbD0iIzhiOTQ5ZSIgZm9udC1zaXplPSIxMyIgdGV4dC1hbmNob3I9Im1pZGRsZSI+aXJvaCB3YXRjaF9hZGRyKCkg5YCZ6YCJ6ZuGPC90ZXh0PgogIDxyZWN0IHg9IjkwIiB5PSIyMjQiIHdpZHRoPSIyNjAiIGhlaWdodD0iNDAiIHJ4PSI4IiBmaWxsPSIjMTMyYTFiIiBzdHJva2U9IiMyZWEwNDMiLz4KICA8dGV4dCB4PSIyMjAiIHk9IjI0OSIgZmlsbD0iIzU2ZDM2NCIgZm9udC1zaXplPSIxMyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9IjYwMCI+56iz5a6aIMK3IOWHoOS5juS4jeWPmDwvdGV4dD4KICA8dGV4dCB4PSIyMjAiIHk9IjMxMiIgZmlsbD0iI2U2ZWRmMyIgZm9udC1zaXplPSIxNCIgdGV4dC1hbmNob3I9Im1pZGRsZSI+5o2i572R5ZOo5YW1IHNwYXduX2FkZHJfY2hhbmdlPC90ZXh0PgogIDxyZWN0IHg9IjEyMCIgeT0iMzI2IiB3aWR0aD0iMjAwIiBoZWlnaHQ9IjM4IiByeD0iOCIgZmlsbD0iIzEzMmExYiIgc3Ryb2tlPSIjMmVhMDQzIi8+CiAgPHRleHQgeD0iMjIwIiB5PSIzNTAiIGZpbGw9IiM1NmQzNjQiIGZvbnQtc2l6ZT0iMTMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSI2MDAiPuS4jeinpuWPkSDihpIg6L+e5o6l6ZW/56izPC90ZXh0PgoKICA8IS0tIGNteGxpbnV4IHNpZGUgLS0+CiAgPHJlY3QgeD0iNDUwIiB5PSI2NCIgd2lkdGg9IjM4MCIgaGVpZ2h0PSIzMzAiIHJ4PSIxMiIgZmlsbD0iIzE2MWIyMiIgc3Ryb2tlPSIjZjg1MTQ5IiBzdHJva2Utd2lkdGg9IjIiLz4KICA8dGV4dCB4PSI2NDAiIHk9Ijk0IiBmaWxsPSIjZjg1MTQ5IiBmb250LXNpemU9IjE4IiBmb250LXdlaWdodD0iNzAwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5jbXhsaW51eCDigJQg5q+PIDHigJMyIOWIhumSn+aWrSDinJc8L3RleHQ+CiAgPHJlY3QgeD0iNDcwIiB5PSIxMTYiIHdpZHRoPSIzNDAiIGhlaWdodD0iODAiIHJ4PSI4IiBmaWxsPSIjMWYyOTM3IiBzdHJva2U9IiMzMDM2M2QiLz4KICA8dGV4dCB4PSI0ODYiIHk9IjEzOCIgZmlsbD0iI2U2ZWRmMyIgZm9udC1zaXplPSIxNCIgZm9udC13ZWlnaHQ9IjYwMCI+5aSa5o6l5Y+j5bm25a2YPC90ZXh0PgogIDx0ZXh0IHg9IjQ4NiIgeT0iMTU3IiBmaWxsPSIjOGI5NDllIiBmb250LXNpemU9IjExLjUiPndscDBzMjBmMyhXaS1GaSkgwrcgdHVuMChWUE4pIMK3IGRvY2tlcjAgwrcgdmV0aDwvdGV4dD4KICA8dGV4dCB4PSI0ODYiIHk9IjE3NCIgZmlsbD0iIzhiOTQ5ZSIgZm9udC1zaXplPSIxMS41Ij5JUHY2IOWPjOWKqOaAgeWcsOWdgCAocHJlZmVycmVkX2xmdCDkvJrov4fmnJ/mm7Tmm78pPC90ZXh0PgogIDx0ZXh0IHg9IjQ4NiIgeT0iMTkwIiBmaWxsPSIjOGI5NDllIiBmb250LXNpemU9IjExLjUiPuWPjOagiCBVRFA6IDAuMC4wLjAgKyBbOjpdPC90ZXh0PgogIDx0ZXh0IHg9IjY0MCIgeT0iMjI4IiBmaWxsPSIjOGI5NDllIiBmb250LXNpemU9IjEzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5pcm9oIHdhdGNoX2FkZHIoKSDlgJnpgInpm4Y8L3RleHQ+CiAgPHJlY3QgeD0iNTEwIiB5PSIyNDIiIHdpZHRoPSIyNjAiIGhlaWdodD0iNDAiIHJ4PSI4IiBmaWxsPSIjMmQxNjE4IiBzdHJva2U9IiNmODUxNDkiLz4KICA8dGV4dCB4PSI2NDAiIHk9IjI2NyIgZmlsbD0iI2ZmN2I3MiIgZm9udC1zaXplPSIxMyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9IjYwMCI+6aKR57mB5Y+Y5YqoIMK3IOaKluWKqOS4jeatojwvdGV4dD4KICA8dGV4dCB4PSI2NDAiIHk9IjMxOCIgZmlsbD0iI2U2ZWRmMyIgZm9udC1zaXplPSIxNCIgdGV4dC1hbmNob3I9Im1pZGRsZSI+5o2i572R5ZOo5YW1IHNwYXduX2FkZHJfY2hhbmdl77yI5pen54mI77yJPC90ZXh0PgogIDxyZWN0IHg9IjU0MCIgeT0iMzMyIiB3aWR0aD0iMjAwIiBoZWlnaHQ9IjM4IiByeD0iOCIgZmlsbD0iIzJkMTYxOCIgc3Ryb2tlPSIjZjg1MTQ5Ii8+CiAgPHRleHQgeD0iNjQwIiB5PSIzNTYiIGZpbGw9IiNmZjdiNzIiIGZvbnQtc2l6ZT0iMTMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSI2MDAiPuaXoOadoeS7tuinpuWPkSDihpIg5Y+N5aSN6YeN6L+ePC90ZXh0Pgo8L3N2Zz4K" width="860"/>
+<br/><em>图 1 · mac 与 cmxlinux 网络环境对比（抖动的唯一差异来源）</em>
+</p>
+
+---
+
+## 3. 根因
+
+> **cmxlinux 的复杂网络环境（VPN tun0 + docker 网桥 + IPv6 动态地址更替 + 多接口 + 双栈）导致 iroh 的 `watch_addr()` 地址候选集频繁变动；旧版换网哨兵 `spawn_addr_change` 对任何候选变化都无条件触发重连 → 自激重连风暴。**
+
+iroh 的 `watch_addr()` 在任何地址候选刷新时都会更新：relay 候选轮换、STUN 反射地址续约、NAT 映射维持、**IPv6 临时地址更替**、多接口状态变化……在 cmxlinux 这类环境里，这些候选本来就一直在抖。
+
+旧版哨兵的逻辑是：
+
+```rust
+// 旧版（自激根源）：地址一变就触发重连
+while w.updated().await.is_ok() {
+    on_change();   // → 上层 disconnect + 重连
+}
+```
+
+每次 `on_change()` → 客户端主动断开重连 → 新连接的端点地址又重排 → 再次触发 `watch_addr()` 更新 → 再 `on_change()`，形成**自激回路**：
+
+<p align="center">
+<img alt="图 2 · 旧版换网哨兵的自激重连回路" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4NjAiIGhlaWdodD0iNDIwIiB2aWV3Qm94PSIwIDAgODYwIDQyMCIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sU2Vnb2UgVUksUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIj4KICA8cmVjdCB3aWR0aD0iODYwIiBoZWlnaHQ9IjQyMCIgZmlsbD0iIzBmMTQxOSIvPgogIDx0ZXh0IHg9IjQzMCIgeT0iMzQiIGZpbGw9IiNlNmVkZjMiIGZvbnQtc2l6ZT0iMjAiIGZvbnQtd2VpZ2h0PSI3MDAiIHRleHQtYW5jaG9yPSJtaWRkbGUiPuiHqua/gOmHjei/nuWbnui3r++8iOaXp+eJiOaNoue9keWTqOWFtSDCtyDpo47mmrTmiJDlm6DvvIk8L3RleHQ+CiAgPGRlZnM+CiAgICA8bWFya2VyIGlkPSJhaCIgbWFya2VyV2lkdGg9IjEyIiBtYXJrZXJIZWlnaHQ9IjEyIiByZWZYPSI5IiByZWZZPSI1IiBvcmllbnQ9ImF1dG8iPgogICAgICA8cGF0aCBkPSJNMCwwIEwxMCw1IEwwLDEwIHoiIGZpbGw9IiNmMDg4M2UiLz4KICAgIDwvbWFya2VyPgogIDwvZGVmcz4KCiAgPCEtLSBub2RlcyBvZiB0aGUgbG9vcCAtLT4KICA8cmVjdCB4PSIzMzAiIHk9IjcwIiB3aWR0aD0iMjAwIiBoZWlnaHQ9IjU2IiByeD0iMTAiIGZpbGw9IiMxNjFiMjIiIHN0cm9rZT0iI2YwODgzZSIgc3Ryb2tlLXdpZHRoPSIyIi8+CiAgPHRleHQgeD0iNDMwIiB5PSI5NCIgZmlsbD0iI2U2ZWRmMyIgZm9udC1zaXplPSIxMy41IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iNjAwIj7ikaAg5Zyw5Z2A5YCZ6YCJ5Y+Y5YqoPC90ZXh0PgogIDx0ZXh0IHg9IjQzMCIgeT0iMTEzIiBmaWxsPSIjOGI5NDllIiBmb250LXNpemU9IjExLjUiIHRleHQtYW5jaG9yPSJtaWRkbGUiPklQdjbmm7Tmm78vVlBOL+WkmuaOpeWPo+aKluWKqDwvdGV4dD4KCiAgPHJlY3QgeD0iNjIwIiB5PSIxODAiIHdpZHRoPSIyMDAiIGhlaWdodD0iNTYiIHJ4PSIxMCIgZmlsbD0iIzE2MWIyMiIgc3Ryb2tlPSIjZjA4ODNlIiBzdHJva2Utd2lkdGg9IjIiLz4KICA8dGV4dCB4PSI3MjAiIHk9IjIwNCIgZmlsbD0iI2U2ZWRmMyIgZm9udC1zaXplPSIxMy41IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iNjAwIj7ikaEgd2F0Y2hfYWRkcigpIOabtOaWsDwvdGV4dD4KICA8dGV4dCB4PSI3MjAiIHk9IjIyMyIgZmlsbD0iIzhiOTQ5ZSIgZm9udC1zaXplPSIxMS41IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5pcm9oIOaKpeWRiiLlnLDlnYDlj5jkuoYiPC90ZXh0PgoKICA8cmVjdCB4PSIzMzAiIHk9IjI5MCIgd2lkdGg9IjIwMCIgaGVpZ2h0PSI1NiIgcng9IjEwIiBmaWxsPSIjMmQxNjE4IiBzdHJva2U9IiNmODUxNDkiIHN0cm9rZS13aWR0aD0iMiIvPgogIDx0ZXh0IHg9IjQzMCIgeT0iMzE0IiBmaWxsPSIjZmY3YjcyIiBmb250LXNpemU9IjEzLjUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSI3MDAiPuKRoiDml6DmnaHku7Ygb25fY2hhbmdlKCk8L3RleHQ+CiAgPHRleHQgeD0iNDMwIiB5PSIzMzMiIGZpbGw9IiM4Yjk0OWUiIGZvbnQtc2l6ZT0iMTEuNSIgdGV4dC1hbmNob3I9Im1pZGRsZSI+4oaSIOS4u+WKqCBkaXNjb25uZWN0ICsg6YeN6L+ePC90ZXh0PgoKICA8cmVjdCB4PSI0MCIgeT0iMTgwIiB3aWR0aD0iMjAwIiBoZWlnaHQ9IjU2IiByeD0iMTAiIGZpbGw9IiMxNjFiMjIiIHN0cm9rZT0iI2YwODgzZSIgc3Ryb2tlLXdpZHRoPSIyIi8+CiAgPHRleHQgeD0iMTQwIiB5PSIyMDQiIGZpbGw9IiNlNmVkZjMiIGZvbnQtc2l6ZT0iMTMuNSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9IjYwMCI+4pGjIOaWsOi/nuaOpeW7uuerizwvdGV4dD4KICA8dGV4dCB4PSIxNDAiIHk9IjIyMyIgZmlsbD0iIzhiOTQ5ZSIgZm9udC1zaXplPSIxMS41IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj7nq6/ngrnlnLDlnYDph43mjpIg4oaSIOWPiOaKljwvdGV4dD4KCiAgPCEtLSBhcnJvd3MgZm9ybWluZyBhIGN5Y2xlIC0tPgogIDxwYXRoIGQ9Ik01MjAsMTEwIEM2MDAsMTIwIDY1MCwxNTAgNjkwLDE3NiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZjA4ODNlIiBzdHJva2Utd2lkdGg9IjIuNSIgbWFya2VyLWVuZD0idXJsKCNhaCkiLz4KICA8cGF0aCBkPSJNNzAwLDIzOCBDNjYwLDI3MCA1ODAsMjkwIDUzMiwzMDgiIGZpbGw9Im5vbmUiIHN0cm9rZT0iI2YwODgzZSIgc3Ryb2tlLXdpZHRoPSIyLjUiIG1hcmtlci1lbmQ9InVybCgjYWgpIi8+CiAgPHBhdGggZD0iTTMzMCwzMjIgQzI1MCwzMDAgMTkwLDI3MCAxNjAsMjQwIiBmaWxsPSJub25lIiBzdHJva2U9IiNmODUxNDkiIHN0cm9rZS13aWR0aD0iMi41IiBtYXJrZXItZW5kPSJ1cmwoI2FoKSIvPgogIDxwYXRoIGQ9Ik0xNTAsMTc2IEMxODAsMTUwIDI1MCwxMjAgMzMyLDEwNiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZjA4ODNlIiBzdHJva2Utd2lkdGg9IjIuNSIgbWFya2VyLWVuZD0idXJsKCNhaCkiLz4KCiAgPHRleHQgeD0iNDMwIiB5PSIyMDAiIGZpbGw9IiNmODUxNDkiIGZvbnQtc2l6ZT0iMTUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSI3MDAiPuKGuyDoh6rmv4A8L3RleHQ+CiAgPHRleHQgeD0iNDMwIiB5PSIzOTIiIGZpbGw9IiM4Yjk0OWUiIGZvbnQtc2l6ZT0iMTIuNSIgdGV4dC1hbmNob3I9Im1pZGRsZSI+57q/5LiK5a6e5rWL77ya5q+PIDHigJMyIOWIhumSn+S4gOasoSBzZXNzaW9uIGNsb3NlZCArIGRldmljZS5oZWxsb++8iGNteGxpbnV477yJ77yMbWFjIOS4jeinpuWPkTwvdGV4dD4KPC9zdmc+Cg==" width="860"/>
+<br/><em>图 2 · 旧版换网哨兵的自激重连回路</em>
+</p>
+
+**为什么只有 Linux**：不是 OS 本身，而是 **cmxlinux 的网络环境复杂**（VPN/docker/IPv6 多地址）持续制造地址候选抖动，触发哨兵；mac 网络干净，候选稳定，哨兵不触发。
+
+---
+
+## 4. 修复
+
+核心思路：**换网哨兵只应在"连接真的因换网而失效"时重连，而不是"地址候选一抖就重连"。** 加三道闸切断自激回路（commit `7bb6eaa`）。
+
+<p align="center">
+<img alt="图 3 · 三道闸切断自激回路" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4NjAiIGhlaWdodD0iNDcwIiB2aWV3Qm94PSIwIDAgODYwIDQ3MCIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sU2Vnb2UgVUksUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIj4KICA8cmVjdCB3aWR0aD0iODYwIiBoZWlnaHQ9IjQ3MCIgZmlsbD0iIzBmMTQxOSIvPgogIDx0ZXh0IHg9IjQzMCIgeT0iMzQiIGZpbGw9IiNlNmVkZjMiIGZvbnQtc2l6ZT0iMjAiIGZvbnQtd2VpZ2h0PSI3MDAiIHRleHQtYW5jaG9yPSJtaWRkbGUiPuS/ruWkje+8muS4iemBk+mXuOWIh+aWreiHqua/gOWbnui3rzwvdGV4dD4KICA8ZGVmcz4KICAgIDxtYXJrZXIgaWQ9ImEzIiBtYXJrZXJXaWR0aD0iMTIiIG1hcmtlckhlaWdodD0iMTIiIHJlZlg9IjkiIHJlZlk9IjUiIG9yaWVudD0iYXV0byI+PHBhdGggZD0iTTAsMCBMMTAsNSBMMCwxMCB6IiBmaWxsPSIjNThhNmZmIi8+PC9tYXJrZXI+CiAgPC9kZWZzPgoKICA8IS0tIGlucHV0IC0tPgogIDxyZWN0IHg9IjQwIiB5PSI3MCIgd2lkdGg9IjE3MCIgaGVpZ2h0PSI1NCIgcng9IjEwIiBmaWxsPSIjMTYxYjIyIiBzdHJva2U9IiMzMDM2M2QiLz4KICA8dGV4dCB4PSIxMjUiIHk9Ijk0IiBmaWxsPSIjZTZlZGYzIiBmb250LXNpemU9IjEzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iNjAwIj53YXRjaF9hZGRyKCkg5pu05pawPC90ZXh0PgogIDx0ZXh0IHg9IjEyNSIgeT0iMTEyIiBmaWxsPSIjOGI5NDllIiBmb250LXNpemU9IjExIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj7lnLDlnYDlgJnpgInlj5jliqg8L3RleHQ+CgogIDwhLS0gZ2F0ZSAxIC0tPgogIDxyZWN0IHg9IjI3MCIgeT0iNjIiIHdpZHRoPSIyNTAiIGhlaWdodD0iNzAiIHJ4PSIxMCIgZmlsbD0iIzEzMmExYiIgc3Ryb2tlPSIjMmVhMDQzIiBzdHJva2Utd2lkdGg9IjIiLz4KICA8dGV4dCB4PSIzOTUiIHk9Ijg2IiBmaWxsPSIjNTZkMzY0IiBmb250LXNpemU9IjEzLjUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSI3MDAiPumXuOKRoCDlrp7otKjmjaLnvZHliKTlrpo8L3RleHQ+CiAgPHRleHQgeD0iMzk1IiB5PSIxMDYiIGZpbGw9IiM4Yjk0OWUiIGZvbnQtc2l6ZT0iMTEiIHRleHQtYW5jaG9yPSJtaWRkbGUiPuWPquavlOWvueebtOi/niBJUCDpm4blkIggKGlwX3NldCk8L3RleHQ+CiAgPHRleHQgeD0iMzk1IiB5PSIxMjIiIGZpbGw9IiM4Yjk0OWUiIGZvbnQtc2l6ZT0iMTEiIHRleHQtYW5jaG9yPSJtaWRkbGUiPmN1cl9pcHMgPT0gcHJldl9pcHMg4oaSIOi3s+i/hzwvdGV4dD4KCiAgPCEtLSBnYXRlIDIgLS0+CiAgPHJlY3QgeD0iNTgwIiB5PSI2MiIgd2lkdGg9IjI0MCIgaGVpZ2h0PSI3MCIgcng9IjEwIiBmaWxsPSIjMTMyYTFiIiBzdHJva2U9IiMyZWEwNDMiIHN0cm9rZS13aWR0aD0iMiIvPgogIDx0ZXh0IHg9IjcwMCIgeT0iODYiIGZpbGw9IiM1NmQzNjQiIGZvbnQtc2l6ZT0iMTMuNSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9IjcwMCI+6Ze44pGhIOWGt+WNtOeql+WPozwvdGV4dD4KICA8dGV4dCB4PSI3MDAiIHk9IjEwNiIgZmlsbD0iIzhiOTQ5ZSIgZm9udC1zaXplPSIxMSIgdGV4dC1hbmNob3I9Im1pZGRsZSI+5Lik5qyh6Kem5Y+R6Ze06ZqUIOKJpSAyNXM8L3RleHQ+CiAgPHRleHQgeD0iNzAwIiB5PSIxMjIiIGZpbGw9IiM4Yjk0OWUiIGZvbnQtc2l6ZT0iMTEiIHRleHQtYW5jaG9yPSJtaWRkbGUiPuWQuOaUtui/nueOr+aKluWKqDwvdGV4dD4KCiAgPHRleHQgeD0iMjAwIiB5PSIxNjYiIGZpbGw9IiM4Yjk0OWUiIGZvbnQtc2l6ZT0iMTEiIHRleHQtYW5jaG9yPSJtaWRkbGUiPklQdjYvcmVsYXkv56uv5Y+j5oqW5YqoPC90ZXh0PgogIDx0ZXh0IHg9IjIwMCIgeT0iMTgyIiBmaWxsPSIjMmVhMDQzIiBmb250LXNpemU9IjExIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iNjAwIj7lnKjmraTooqvmu6Tmjok8L3RleHQ+CgogIDwhLS0gZ2F0ZSAzIC0tPgogIDxyZWN0IHg9IjMwMCIgeT0iMjEwIiB3aWR0aD0iNDAwIiBoZWlnaHQ9Ijc4IiByeD0iMTAiIGZpbGw9IiMxMzJhMWIiIHN0cm9rZT0iIzJlYTA0MyIgc3Ryb2tlLXdpZHRoPSIyIi8+CiAgPHRleHQgeD0iNTAwIiB5PSIyMzYiIGZpbGw9IiM1NmQzNjQiIGZvbnQtc2l6ZT0iMTMuNSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9IjcwMCI+6Ze44pGiIOmHjei/nuWJjemqjOa0uyAocm9hbV9yZWNvbm5lY3RfZHJpdmVyKTwvdGV4dD4KICA8dGV4dCB4PSI1MDAiIHk9IjI1NyIgZmlsbD0iIzhiOTQ5ZSIgZm9udC1zaXplPSIxMS41IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5zZXNzaW9uLmNsb3NlX3JlYXNvbigpLmlzX3NvbWUoKSA/PC90ZXh0PgogIDx0ZXh0IHg9IjUwMCIgeT0iMjc1IiBmaWxsPSIjOGI5NDllIiBmb250LXNpemU9IjExLjUiIHRleHQtYW5jaG9yPSJtaWRkbGUiPui/nuaOpei/mOa0u+edgCDihpIg5LiN6YeN6L+e77yb5Yik5rS75Lqk57uZ5Y+R6YCB6Lev5b6EIHNlbmRfd2l0aF9yZXRyeTwvdGV4dD4KCiAgPCEtLSBvdXRjb21lcyAtLT4KICA8cmVjdCB4PSIxMjAiIHk9IjM1MCIgd2lkdGg9IjI4MCIgaGVpZ2h0PSI2NCIgcng9IjEwIiBmaWxsPSIjMTMyYTFiIiBzdHJva2U9IiMyZWEwNDMiIHN0cm9rZS13aWR0aD0iMiIvPgogIDx0ZXh0IHg9IjI2MCIgeT0iMzc4IiBmaWxsPSIjNTZkMzY0IiBmb250LXNpemU9IjEzLjUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSI3MDAiPuS8quaNoue9kSDihpIg5b+955WlPC90ZXh0PgogIDx0ZXh0IHg9IjI2MCIgeT0iMzk4IiBmaWxsPSIjOGI5NDllIiBmb250LXNpemU9IjExLjUiIHRleHQtYW5jaG9yPSJtaWRkbGUiPui/nuaOpeS/neaMgemVv+eos++8iGNteGxpbnV4IOWcuuaZr++8iTwvdGV4dD4KCiAgPHJlY3QgeD0iNDcwIiB5PSIzNTAiIHdpZHRoPSIyODAiIGhlaWdodD0iNjQiIHJ4PSIxMCIgZmlsbD0iIzFjMjczMyIgc3Ryb2tlPSIjNThhNmZmIiBzdHJva2Utd2lkdGg9IjIiLz4KICA8dGV4dCB4PSI2MTAiIHk9IjM3OCIgZmlsbD0iIzc5YzBmZiIgZm9udC1zaXplPSIxMy41IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iNzAwIj7nnJ/mjaLnvZEgKyDov57mjqXlt7Lmrbsg4oaSIOmHjei/njwvdGV4dD4KICA8dGV4dCB4PSI2MTAiIHk9IjM5OCIgZmlsbD0iIzhiOTQ5ZSIgZm9udC1zaXplPSIxMS41IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj7kv53nlZnljp/mnInmjaLnvZHoh6rmhIjog73lips8L3RleHQ+CgogIDxwYXRoIGQ9Ik0yMTAsOTcgTDI2OCw5NyIgc3Ryb2tlPSIjNThhNmZmIiBzdHJva2Utd2lkdGg9IjIiIG1hcmtlci1lbmQ9InVybCgjYTMpIi8+CiAgPHBhdGggZD0iTTUyMCw5NyBMNTc4LDk3IiBzdHJva2U9IiM1OGE2ZmYiIHN0cm9rZS13aWR0aD0iMiIgbWFya2VyLWVuZD0idXJsKCNhMykiLz4KICA8cGF0aCBkPSJNNzAwLDEzMiBDNzAwLDE4MCA1NjAsMTk1IDU0MCwyMDgiIHN0cm9rZT0iIzU4YTZmZiIgc3Ryb2tlLXdpZHRoPSIyIiBtYXJrZXItZW5kPSJ1cmwoI2EzKSIvPgogIDxwYXRoIGQ9Ik00MzAsMjg4IEM0MDAsMzEwIDMwMCwzMzAgMjc1LDM0OCIgc3Ryb2tlPSIjMmVhMDQzIiBzdHJva2Utd2lkdGg9IjIiIG1hcmtlci1lbmQ9InVybCgjYTMpIi8+CiAgPHBhdGggZD0iTTU2MCwyODggQzU5MCwzMTAgNjAwLDMzMCA2MTAsMzQ4IiBzdHJva2U9IiM1OGE2ZmYiIHN0cm9rZS13aWR0aD0iMiIgbWFya2VyLWVuZD0idXJsKCNhMykiLz4KICA8dGV4dCB4PSI0MzAiIHk9IjQ0NiIgZmlsbD0iIzhiOTQ5ZSIgZm9udC1zaXplPSIxMiIgdGV4dC1hbmNob3I9Im1pZGRsZSI+Y29tbWl0IDdiYjZlYWEgwrcgbm0tdHJhbnNwb3J0L3NyYy9saWIucnMgKCs0MykgwrcgY2xpZW50cy9hcHAvc3JjLXRhdXJpL3NyYy9jb25uZWN0aW9uLnJzICgrMjkpPC90ZXh0Pgo8L3N2Zz4K" width="860"/>
+<br/><em>图 3 · 三道闸切断自激回路</em>
+</p>
+
+### 闸① 实质换网判定 — `crates/nm-transport/src/lib.rs` `spawn_addr_change`
+
+只比较**直连 IP 候选集合**（`ip_set`，仅取 IP、不含端口），集合不变就跳过。relay 候选轮换、IPv6 临时地址更替、端口微抖一律被滤掉。
+
+```rust
+fn ip_set(a: &EndpointAddr) -> BTreeSet<IpAddr> {
+    a.ip_addrs().map(|s| s.ip()).collect()
+}
+// ...
+let cur_ips = ip_set(&cur);
+if cur_ips == prev_ips {
+    continue;            // 仅 relay/端口/非直连候选变化 → 不算换网，跳过
+}
+prev_ips = cur_ips;
+```
+
+### 闸② 冷却窗口 — 同文件
+
+两次触发至少间隔 `COOLDOWN = 25s`，吸收换网瞬间的连环地址重排。
+
+```rust
+const COOLDOWN: Duration = Duration::from_secs(25);
+// ...
+if last_fire.is_some_and(|t| now.duration_since(t) < COOLDOWN) {
+    continue;
+}
+last_fire = Some(now);
+on_change();
+```
+
+### 闸③ 重连前验活 — `clients/app/src-tauri/src/connection.rs` `roam_reconnect_driver`
+
+收到换网信号后，先检查连接是否**真的已关闭**；还活着就不重连，把判活交给真正发送时的 `send_with_retry`（那里有发送超时 + `looks_dead` 的可靠判活）。
+
+```rust
+let (cur_gen, dead) = {
+    let g = state.conn.lock().await;
+    match g.as_ref() {
+        Some(c) => (Some(c.conn_gen), c.session.close_reason().is_some()),
+        None => (None, false),
+    }
+};
+let Some(g) = cur_gen else { continue };
+if !dead {
+    continue;            // 连接仍活着 → 忽略换网信号，不重连
+}
+// 连接确已关闭 → 才重连
+let _ = reconnect(&app, &state, g).await;
+```
+
+三道闸合力：**伪换网（地址候选抖动但连接没死）被忽略，连接保持长稳；真换网（直连 IP 实质变化且连接已死）仍正常触发重连**，不损失换网自愈能力。
+
+---
+
+## 5. 效果验证
+
+把修复后的两个文件同步到 cmxlinux，其 `npm run tauri dev` 自动重新编译并重启 app（新进程），在 robot.link 节点侧实测 cmxlinux 客户端（`608942cd`）的重连频率。
+
+<p align="center">
+<img alt="图 4 · 修复前后重连频率实测对比" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4NjAiIGhlaWdodD0iNDAwIiB2aWV3Qm94PSIwIDAgODYwIDQwMCIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sU2Vnb2UgVUksUm9ib3RvLEhlbHZldGljYSxBcmlhbCxzYW5zLXNlcmlmIj4KICA8cmVjdCB3aWR0aD0iODYwIiBoZWlnaHQ9IjQwMCIgZmlsbD0iIzBmMTQxOSIvPgogIDx0ZXh0IHg9IjQzMCIgeT0iMzIiIGZpbGw9IiNlNmVkZjMiIGZvbnQtc2l6ZT0iMjAiIGZvbnQtd2VpZ2h0PSI3MDAiIHRleHQtYW5jaG9yPSJtaWRkbGUiPuaViOaenOWvueavlCDCtyByb2JvdC5saW5rIOS+p+Wunua1i++8iGNteGxpbnV4IOWuouaIt+erryA2MDg5NDJjZO+8iTwvdGV4dD4KCiAgPCEtLSBiZWZvcmUgLS0+CiAgPHRleHQgeD0iNjAiIHk9Ijc4IiBmaWxsPSIjZjg1MTQ5IiBmb250LXNpemU9IjE1IiBmb250LXdlaWdodD0iNzAwIj7kv67lpI3liY08L3RleHQ+CiAgPHRleHQgeD0iNjAiIHk9Ijk2IiBmaWxsPSIjOGI5NDllIiBmb250LXNpemU9IjExLjUiPuavj+asoSDinJcgPSDkuIDmrKEgc2Vzc2lvbiBjbG9zZWQgKyBkZXZpY2UuaGVsbG/vvIjph43ov57vvIk8L3RleHQ+CiAgPGxpbmUgeDE9IjYwIiB5MT0iMTIwIiB4Mj0iODAwIiB5Mj0iMTIwIiBzdHJva2U9IiMzMDM2M2QiIHN0cm9rZS13aWR0aD0iMiIvPgogIDwhLS0gdGltZSBheGlzIGJlZm9yZTogMjI6MDMgMjI6MDQgMjI6MDYgMjI6MTAgLi4uIC0tPgogIDxnIGZpbGw9IiNmODUxNDkiPgogICAgPGNpcmNsZSBjeD0iMTQwIiBjeT0iMTIwIiByPSI2Ii8+PGNpcmNsZSBjeD0iMjEwIiBjeT0iMTIwIiByPSI2Ii8+PGNpcmNsZSBjeD0iMzMwIiBjeT0iMTIwIiByPSI2Ii8+PGNpcmNsZSBjeD0iNTIwIiBjeT0iMTIwIiByPSI2Ii8+PGNpcmNsZSBjeD0iNjIwIiBjeT0iMTIwIiByPSI2Ii8+PGNpcmNsZSBjeD0iNzIwIiBjeT0iMTIwIiByPSI2Ii8+CiAgPC9nPgogIDxnIGZpbGw9IiM4Yjk0OWUiIGZvbnQtc2l6ZT0iMTAuNSIgdGV4dC1hbmNob3I9Im1pZGRsZSI+CiAgICA8dGV4dCB4PSIxNDAiIHk9IjE0MiI+MjI6MDM8L3RleHQ+PHRleHQgeD0iMjEwIiB5PSIxNDIiPjIyOjA0PC90ZXh0Pjx0ZXh0IHg9IjMzMCIgeT0iMTQyIj4yMjowNjwvdGV4dD48dGV4dCB4PSI1MjAiIHk9IjE0MiI+MjI6MTA8L3RleHQ+PHRleHQgeD0iNjIwIiB5PSIxNDIiPuKApjwvdGV4dD48dGV4dCB4PSI3MjAiIHk9IjE0MiI+4oCmPC90ZXh0PgogIDwvZz4KICA8dGV4dCB4PSI0MzAiIHk9IjE3MCIgZmlsbD0iI2ZmN2I3MiIgZm9udC1zaXplPSIxMyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9IjYwMCI+NDAg5YiG6ZKf5YaFIDExIOasoemHjei/nu+8iOavjyAx4oCTMiDliIbpkp/kuIDmrKHvvIk8L3RleHQ+CgogIDwhLS0gYWZ0ZXIgLS0+CiAgPHRleHQgeD0iNjAiIHk9IjIyNiIgZmlsbD0iIzJlYTA0MyIgZm9udC1zaXplPSIxNSIgZm9udC13ZWlnaHQ9IjcwMCI+5L+u5aSN5ZCOPC90ZXh0PgogIDx0ZXh0IHg9IjYwIiB5PSIyNDQiIGZpbGw9IiM4Yjk0OWUiIGZvbnQtc2l6ZT0iMTEuNSI+MTQ6MjIg6aaW6L+e5ZCO6L+e5o6l5oyB57ut5LiN5patPC90ZXh0PgogIDxsaW5lIHgxPSI2MCIgeTE9IjI2OCIgeDI9IjgwMCIgeTI9IjI2OCIgc3Ryb2tlPSIjMzAzNjNkIiBzdHJva2Utd2lkdGg9IjIiLz4KICA8IS0tIHNpbmdsZSBjb25uZWN0IHRoZW4gY29udGludW91cyBncmVlbiBiYXIgLS0+CiAgPGNpcmNsZSBjeD0iMTEwIiBjeT0iMjY4IiByPSI2IiBmaWxsPSIjNThhNmZmIi8+CiAgPHJlY3QgeD0iMTE2IiB5PSIyNjIiIHdpZHRoPSI2NTAiIGhlaWdodD0iMTIiIHJ4PSI2IiBmaWxsPSIjMmVhMDQzIi8+CiAgPGcgZmlsbD0iIzhiOTQ5ZSIgZm9udC1zaXplPSIxMC41IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj4KICAgIDx0ZXh0IHg9IjExMCIgeT0iMjkwIj4xNDoyMiDpppbov548L3RleHQ+PHRleHQgeD0iNDQwIiB5PSIyOTAiPuaMgee7rSBkaXJlY3Qg6L+e5o6lIMK3IHNpbmNlPTQzM3Mg5LiN5patPC90ZXh0Pjx0ZXh0IHg9Ijc2NiIgeT0iMjkwIj4xNDoyOSs8L3RleHQ+CiAgPC9nPgogIDx0ZXh0IHg9IjQzMCIgeT0iMzIwIiBmaWxsPSIjNTZkMzY0IiBmb250LXNpemU9IjEzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iNjAwIj43KyDliIbpkp/pm7bph43ov57vvIhkZXZpY2UuaGVsbG8gPSAw77yJ77yM5LiOIG1hYyDkuIDmoLfnqLPlrpo8L3RleHQ+CgogIDxyZWN0IHg9IjI1MCIgeT0iMzQyIiB3aWR0aD0iMzYwIiBoZWlnaHQ9IjQyIiByeD0iMTAiIGZpbGw9IiMxMzJhMWIiIHN0cm9rZT0iIzJlYTA0MyIgc3Ryb2tlLXdpZHRoPSIyIi8+CiAgPHRleHQgeD0iNDMwIiB5PSIzNjgiIGZpbGw9IiM1NmQzNjQiIGZvbnQtc2l6ZT0iMTQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSI3MDAiPumHjei/numikeeOh++8muavjyAx4oCTMiDliIbpkp8g4oaSIDDjgIDinJM8L3RleHQ+Cjwvc3ZnPgo=" width="860"/>
+<br/><em>图 4 · 修复前后重连频率实测对比</em>
+</p>
+
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| 重连频率 | 每 1–2 分钟一次（40 分钟 11 次） | **7+ 分钟零重连** |
+| device.hello（≈重连次数） | 密集（22:03/22:04/22:06/22:10…） | 首连 1 次后为 **0** |
+| 连接持续时长 | 不断被重建（gram_id 反复归 1） | **direct 连接 since=433s 持续不断** |
+| 与 mac 对比 | 明显更差 | **与 mac 一样稳定** |
+
+**结论：cmxlinux 客户端从"每 1–2 分钟断一次"变为"持续稳定、零重连"，问题彻底解决。**
+
+---
+
+## 6. 影响面与延伸
+
+- 此修复是**客户端通用改进**，不止 cmxlinux 受益：任何多网卡 / VPN / IPv6 多地址 / 容器网络环境下的客户端都会更稳。
+- 它同时缓解了之前观察到的几个关联现象，这些现象其实是同一个"换网哨兵自激"根因在不同场景的表现：
+  - 连接监控里"一闪而过、查不到归属的孤儿设备公钥"（churn 中尚未完成 `device.hello` 就断开的瞬时连接）。
+  - 多设备用户"忽收忽不收、在线状态闪烁"（重连期间 `principals` 映射时有时无）。
+- **不解决**的问题（属于另一类根因，需自建 relay 等方案）：节点与节点之间（如 robot.link ↔ 其他 seed）的跨网 s2s 直连失败，见 `docs/CROSSNODE_DELIVERY_DIAGNOSIS_AND_RELAY.md`。
+
+---
+
+## 附：关键命令与取证点（复盘用）
+
+- 节点侧按连接标识统计重连：`journalctl -u nmd | grep <device前缀> | grep -c "device hello"`
+- 客户端网络环境：`ip -br addr`、`ip -6 addr show <iface>`、`ss -unap | grep <app>`
+- 连接质量/持续时长：admin API `/connections` 的 `path_kind` / `rtt_ms` / `since_unix_ms`
+- 修复代码：`crates/nm-transport/src/lib.rs` `spawn_addr_change`、`clients/app/src-tauri/src/connection.rs` `roam_reconnect_driver`

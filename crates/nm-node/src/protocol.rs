@@ -37,7 +37,7 @@ use crate::presence::{presence_status, PresenceRec};
 use crate::records::hex_decode_n;
 use crate::retire::group_topic_retireable;
 use crate::roster::{roster_add, roster_list, roster_remove, roster_update};
-use crate::{now_secs, Ctx, SessionMeta, Sessions, LIVE_TTL_MS};
+use crate::{now_secs, Ctx, SessionMeta, LIVE_TTL_MS};
 
 /// nmspace 单播/命令/联邦协议处理器：包住既有的每连接处理逻辑，注册到 `Router` 的 `nmspace/0`。
 pub(crate) struct ImspaceProto {
@@ -215,7 +215,7 @@ async fn handle_gram(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Optio
     // 阻塞给发送方的 ack → 前端「发送很迟钝」。故后台扇出、立即回执（存转发语义）。
     if matches!(gram.kind(), GramKind::GroupMessage) {
         let (g, c, who, r) = (gram.clone(), ctx.clone(), caller.to_vec(), rid.to_vec());
-        tokio::spawn(async move { fanout_group(&g, &c, &who, &r).await });
+        ctx.tracker.spawn(async move { fanout_group(&g, &c, &who, &r).await });
         return Some(receipt_for(gram));
     }
     // Relay 信封（来自对等节点的跨节点转发）：解出内层 gram，按本地投递。
@@ -235,7 +235,7 @@ async fn handle_gram(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Optio
                 if target.attributes.get("require_grant").map(String::as_str) == Some("true") {
                     if let Err(reason) = authorize_routed(gram, caller, &target) {
                         tracing::warn!(%reason, "routed command denied");
-                        push_command_denied(gram, rid, &ctx.sessions, &reason);
+                        push_command_denied(gram, rid, ctx, &reason);
                         return Some(reply_gram(gram, GramKind::Receipt, None));
                     }
                 }
@@ -245,7 +245,7 @@ async fn handle_gram(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Optio
         // 单播私聊改走 gossip（本地投递不了则联邦广播，对端节点投递）——取代 NAT 下常不通的 s2s 中继。
         if matches!(gram.kind(), GramKind::Message) {
             let (g, c, who, r) = (gram.clone(), ctx.clone(), caller.to_vec(), rid.to_vec());
-            tokio::spawn(async move {
+            ctx.tracker.spawn(async move {
                 deliver_direct(&g, &c).await;
                 // 已发同步：同账号的其它设备也收到一份（客户端按 sender==自己 归入会话）。
                 if g.receiver != who {
@@ -606,7 +606,8 @@ fn authorize_routed(gram: &Gram, caller: &[u8], target: &Entity) -> std::result:
 }
 
 /// 把「命令被拒」作为 CommandResult 推回调用方在线会话（若在线）。
-fn push_command_denied(gram: &Gram, caller: &[u8], sessions: &Sessions, reason: &str) {
+fn push_command_denied(gram: &Gram, caller: &[u8], ctx: &Ctx, reason: &str) {
+    let sessions = &ctx.sessions;
     let corr = gram
         .payload
         .as_ref()
@@ -623,7 +624,7 @@ fn push_command_denied(gram: &Gram, caller: &[u8], sessions: &Sessions, reason: 
     }));
     reply.ref_gram_id = Some(gram.gram_id);
     reply.receiver = caller.to_vec();
-    tokio::spawn(async move {
+    ctx.tracker.spawn(async move {
         if let Ok(mut sname) = conn.open_uni().await {
             let _ = write_gram(&mut sname, &reply).await;
             let _ = sname.finish();

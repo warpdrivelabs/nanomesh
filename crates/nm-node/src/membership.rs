@@ -331,18 +331,22 @@ impl Node {
                     last_announce = tokio::time::Instant::now();
                 }
                 // 带 1s 超时的收播：既能及时收，又能周期回到顶部广播/清扫。
-                match tokio::time::timeout(std::time::Duration::from_secs(1), topic.recv()).await {
-                    Ok(Some(msg)) => self.on_membership_msg(&msg.content, &cfg.federation),
-                    Ok(None) => {
-                        // 频道关闭：重新加入。
-                        match self.join_channel(channel, self.peers_list()).await {
-                            Ok(t) => topic = t,
-                            Err(_) => {
-                                tokio::time::sleep(std::time::Duration::from_secs(2)).await
+                tokio::select! {
+                    biased;
+                    _ = self.shutdown.cancelled() => break,
+                    r = tokio::time::timeout(std::time::Duration::from_secs(1), topic.recv()) => match r {
+                        Ok(Some(msg)) => self.on_membership_msg(&msg.content, &cfg.federation),
+                        Ok(None) => {
+                            // 频道关闭：重新加入。
+                            match self.join_channel(channel, self.peers_list()).await {
+                                Ok(t) => topic = t,
+                                Err(_) => {
+                                    tokio::time::sleep(std::time::Duration::from_secs(2)).await
+                                }
                             }
                         }
+                        Err(_) => {} // 超时：正常，回到循环顶部。
                     }
-                    Err(_) => {} // 超时：正常，回到循环顶部。
                 }
                 if last_sweep.elapsed() >= announce_iv {
                     self.sweep_discovered(ttl_secs);
@@ -372,7 +376,11 @@ impl Node {
                         self.resolve_member_index(ak).await;
                     }
                 }
-                tokio::time::sleep(iv).await;
+                tokio::select! {
+                    biased;
+                    _ = self.shutdown.cancelled() => break,
+                    _ = tokio::time::sleep(iv) => {}
+                }
             }
         })
     }
