@@ -278,6 +278,7 @@ async fn system(State(st): State<AppState>) -> Json<Value> {
     let pm = *st.proc.lock().unwrap();
     let addr = st.node.addr();
     let (roam_changes, roam_last_ms) = st.node.roam_snapshot();
+    let (grp_fanouts, grp_acks, grp_retx, grp_giveups) = st.node.group_metrics_snapshot();
     let tables: serde_json::Map<String, Value> = st
         .node
         .table_sizes()
@@ -298,6 +299,11 @@ async fn system(State(st): State<AppState>) -> Json<Value> {
         "roam_last_ms": roam_last_ms,
         // P1 内存可观测：各热点表当前条目数（监控增长趋势，据此判断是否需淘汰）。
         "table_sizes": tables,
+        // 群消息可靠扇出到达率观测：扇出跟踪/收到 ack/重传/超期放弃。acks≈fanouts 且 retransmits/giveups 低 = 健康。
+        "group_fanouts": grp_fanouts,
+        "group_acks": grp_acks,
+        "group_retransmits": grp_retx,
+        "group_giveups": grp_giveups,
     }))
 }
 

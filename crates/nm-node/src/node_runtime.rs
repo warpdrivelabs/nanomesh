@@ -230,6 +230,7 @@ impl Node {
             max_connections: crate::DEFAULT_MAX_CONNECTIONS,
             conn_gate: Arc::new(DashMap::new()),
             ack_nodes: Arc::new(DashSet::new()),
+            group_metrics: Arc::new(crate::GroupMetrics::default()),
         })
     }
 
@@ -264,6 +265,7 @@ impl Node {
             max_connections: self.max_connections,
             conn_gate: self.conn_gate.clone(),
             ack_nodes: self.ack_nodes.clone(),
+            group_metrics: self.group_metrics.clone(),
         }
     }
 

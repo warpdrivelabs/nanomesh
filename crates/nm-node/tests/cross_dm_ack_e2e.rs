@@ -28,8 +28,11 @@ async fn online(seed: [u8; 32], addr: &nm_transport::Addr) -> (nm_client::Client
 #[tokio::test]
 #[ignore = "flaky: same iroh Minimal-mode cross-node connectivity as per_topic_inbox_dm; validates the E2E ack loop (outbox clears on DirectAck) when connectivity holds. Run with --ignored."]
 async fn cross_dm_ack_clears_outbox() {
-    let a = Arc::new(nm_node::Node::bind_local([71u8; 32]).await.unwrap());
-    let b = Arc::new(nm_node::Node::bind_local([72u8; 32]).await.unwrap());
+    // 持久节点(有 redb store)——outbox 落盘在 store，bind_local(无 store) 会让可靠投递空转(假阳性)。
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let a = Arc::new(nm_node::Node::bind_local_persistent([71u8; 32], dir_a.path().join("a.redb")).await.unwrap());
+    let b = Arc::new(nm_node::Node::bind_local_persistent([72u8; 32], dir_b.path().join("b.redb")).await.unwrap());
     a.add_peer_addr(b.addr());
     b.add_peer_addr(a.addr());
     a.set_per_topic(true);
@@ -72,13 +75,26 @@ async fn cross_dm_ack_clears_outbox() {
     .unwrap_or(false);
     assert!(subscribed, "B 未在超时内订阅 bob 的收件箱主题");
 
-    // owner → bob：持续重发直到 bob 收到（首投可能丢，靠 outbox 重传补）。
+    // owner → bob：持续重发（首投可能丢，靠 outbox 重传补）。
     let send = tokio::spawn(async move {
         for _ in 0..60 {
             let _ = owner.send_to(bob_id, "可靠单聊").await;
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     });
+
+    // ① 确认 outbox 路径确被走到：A 经目录同步学到 bob 的 home(B)=远端 → deliver_direct 持久跟踪 → pending 一度 > 0。
+    //    (否则 A 不知 bob 为远端，不建条目，清零检查平凡成立=假阳性。)
+    let tracked = tokio::time::timeout(Duration::from_secs(25), async {
+        loop {
+            if a.outbox_pending() > 0 { break true; }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(tracked, "A 从未跟踪跨节点 DM（未学到 bob 的 home_node）——ack 闭环未被真正验证");
+
     let got = tokio::time::timeout(Duration::from_secs(30), bob.recv())
         .await
         .expect("bob 未在超时内收到私聊")
@@ -86,7 +102,8 @@ async fn cross_dm_ack_clears_outbox() {
     assert_eq!(got.kind(), GramKind::Message);
     assert_eq!(String::from_utf8(got.payload.unwrap().value).unwrap(), "可靠单聊");
 
-    // 关键断言：A 的待确认发件箱最终清零 = A 收到了 B 回的 DirectAck（E2E ack 闭环成立）。
+    // ② 关键断言：停发后 A 的待确认发件箱最终清零 = A 收到了 B 回的 DirectAck（E2E ack 闭环成立）。
+    send.abort();
     let cleared = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if a.outbox_pending() == 0 {
@@ -97,6 +114,5 @@ async fn cross_dm_ack_clears_outbox() {
     })
     .await
     .unwrap_or(false);
-    send.abort();
     assert!(cleared, "A 的 outbox 未清零 → 未收到 DirectAck（ack 闭环断裂）");
 }

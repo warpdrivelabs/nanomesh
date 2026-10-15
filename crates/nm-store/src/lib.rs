@@ -39,6 +39,10 @@ const OUTBOX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("outbox");
 /// 跨节点 Direct 持久去重：key = sender(32)++gram_id(8BE)++crc(8)，val = first_seen_ms(8BE)。
 /// 并入 crc 防 client 重启 gram_id 回绕导致的误去重。SeenGrams 内存版的持久权威兜底。
 const DEDUP_DIRECT: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dedup_direct");
+/// 跨节点群消息可靠扇出·待确认发件箱：key = gid(32)++sender(32)++gram_id(8BE)，
+/// val = first_ms(8)++retries(4)++next_due_ms(8)++n_pending(2)++[node(32)*n]++gram_bytes。
+/// 按「待 ack 成员节点集」跟踪：收到某节点 GroupAck 即移除该 node，集合空则删、停重传。
+const GROUP_OUTBOX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("group_outbox");
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -58,6 +62,18 @@ pub struct OutboxRow {
     pub first_ms: u64,
     pub retries: u32,
     pub next_due_ms: u64,
+    pub gram_bytes: Vec<u8>,
+}
+
+/// 群消息待确认发件箱一行（跨节点可靠扇出重传任务用）。`pending_nodes`=尚未回 GroupAck 的成员 home 节点。
+pub struct GroupOutboxRow {
+    pub gid: Vec<u8>,
+    pub sender: Vec<u8>,
+    pub gram_id: u64,
+    pub first_ms: u64,
+    pub retries: u32,
+    pub next_due_ms: u64,
+    pub pending_nodes: Vec<Vec<u8>>,
     pub gram_bytes: Vec<u8>,
 }
 
@@ -91,6 +107,7 @@ impl RedbStore {
             wtx.open_table(REVOKED).map_err(db_err)?;
             wtx.open_table(OUTBOX).map_err(db_err)?;
             wtx.open_table(DEDUP_DIRECT).map_err(db_err)?;
+            wtx.open_table(GROUP_OUTBOX).map_err(db_err)?;
         }
         wtx.commit().map_err(db_err)?;
         Ok(Self { db })
@@ -287,6 +304,119 @@ impl RedbStore {
         wtx.commit().map_err(db_err)?;
         Ok(n)
     }
+
+    // ── 跨节点群消息可靠扇出：待确认发件箱 GROUP_OUTBOX（按待 ack 成员节点集跟踪）──
+
+    fn group_outbox_key(gid: &[u8], sender: &[u8], gram_id: u64) -> Vec<u8> {
+        let mut k = Vec::with_capacity(gid.len() + sender.len() + 8);
+        k.extend_from_slice(gid);
+        k.extend_from_slice(sender);
+        k.extend_from_slice(&gram_id.to_be_bytes());
+        k
+    }
+
+    fn group_outbox_encode(first_ms: u64, retries: u32, next_due_ms: u64,
+                           pending: &[Vec<u8>], gram_bytes: &[u8]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(22 + pending.len() * 32 + gram_bytes.len());
+        v.extend_from_slice(&first_ms.to_be_bytes());
+        v.extend_from_slice(&retries.to_be_bytes());
+        v.extend_from_slice(&next_due_ms.to_be_bytes());
+        v.extend_from_slice(&(pending.len() as u16).to_be_bytes());
+        for n in pending { v.extend_from_slice(n); } // 每个节点 id 定长 32
+        v.extend_from_slice(gram_bytes);
+        v
+    }
+
+    /// 解出 (first_ms, retries, next_due_ms, pending_nodes, gram_bytes)；格式不符返回 None。
+    fn group_outbox_decode(v: &[u8]) -> Option<(u64, u32, u64, Vec<Vec<u8>>, Vec<u8>)> {
+        if v.len() < 22 { return None; }
+        let first_ms = u64::from_be_bytes(v[0..8].try_into().ok()?);
+        let retries = u32::from_be_bytes(v[8..12].try_into().ok()?);
+        let next_due_ms = u64::from_be_bytes(v[12..20].try_into().ok()?);
+        let n = u16::from_be_bytes(v[20..22].try_into().ok()?) as usize;
+        let nodes_end = 22 + n * 32;
+        if v.len() < nodes_end { return None; }
+        let mut pending = Vec::with_capacity(n);
+        for i in 0..n { pending.push(v[22 + i * 32..22 + (i + 1) * 32].to_vec()); }
+        let gram_bytes = v[nodes_end..].to_vec();
+        Some((first_ms, retries, next_due_ms, pending, gram_bytes))
+    }
+
+    /// 存/覆盖一条群待确认条目（Immediate 落盘）。`pending_nodes`=期望回 ack 的成员 home 节点集。
+    pub fn group_outbox_put(&self, gid: &[u8], sender: &[u8], gram_id: u64, first_ms: u64,
+                            retries: u32, next_due_ms: u64, pending_nodes: &[Vec<u8>],
+                            gram_bytes: &[u8]) -> Result<()> {
+        let key = Self::group_outbox_key(gid, sender, gram_id);
+        let val = Self::group_outbox_encode(first_ms, retries, next_due_ms, pending_nodes, gram_bytes);
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        { let mut tb = wtx.open_table(GROUP_OUTBOX).map_err(db_err)?;
+          tb.insert(key.as_slice(), val.as_slice()).map_err(db_err)?; }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 收到某成员节点的 GroupAck：从待 ack 集移除该 node；集合空则删条目。
+    /// 返回 (found=条目存在, cleared=移除后已全清并删除)。幂等（node 不在集中也不报错）。
+    pub fn group_outbox_ack_node(&self, gid: &[u8], sender: &[u8], gram_id: u64, node: &[u8]) -> Result<(bool, bool)> {
+        let key = Self::group_outbox_key(gid, sender, gram_id);
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        let mut found = false;
+        let mut cleared = false;
+        {
+            let mut tb = wtx.open_table(GROUP_OUTBOX).map_err(db_err)?;
+            let existing = tb.get(key.as_slice()).map_err(db_err)?.map(|g| g.value().to_vec());
+            if let Some(bytes) = existing {
+                found = true;
+                if let Some((first_ms, retries, next_due_ms, mut pending, gram_bytes)) =
+                    Self::group_outbox_decode(&bytes)
+                {
+                    pending.retain(|n| n.as_slice() != node);
+                    if pending.is_empty() {
+                        tb.remove(key.as_slice()).map_err(db_err)?;
+                        cleared = true;
+                    } else {
+                        let val = Self::group_outbox_encode(first_ms, retries, next_due_ms, &pending, &gram_bytes);
+                        tb.insert(key.as_slice(), val.as_slice()).map_err(db_err)?;
+                    }
+                }
+            }
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok((found, cleared))
+    }
+
+    /// 删一条群待确认条目（达期限放弃）。幂等。
+    pub fn group_outbox_del(&self, gid: &[u8], sender: &[u8], gram_id: u64) -> Result<bool> {
+        let key = Self::group_outbox_key(gid, sender, gram_id);
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        let existed;
+        { let mut tb = wtx.open_table(GROUP_OUTBOX).map_err(db_err)?;
+          existed = tb.remove(key.as_slice()).map_err(db_err)?.is_some(); }
+        wtx.commit().map_err(db_err)?;
+        Ok(existed)
+    }
+
+    /// 全量加载群待确认条目（重传任务每 tick 扫；稳态近空）。key 前 72 字节=gid32+sender32+gram8。
+    pub fn group_outbox_all(&self) -> Result<Vec<GroupOutboxRow>> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let tb = rtx.open_table(GROUP_OUTBOX).map_err(db_err)?;
+        let mut out = Vec::new();
+        for item in tb.iter().map_err(db_err)? {
+            let (k, v) = item.map_err(db_err)?;
+            let k = k.value();
+            if k.len() != 72 { continue; }
+            let Some((first_ms, retries, next_due_ms, pending_nodes, gram_bytes)) =
+                Self::group_outbox_decode(v.value()) else { continue };
+            out.push(GroupOutboxRow {
+                gid: k[0..32].to_vec(),
+                sender: k[32..64].to_vec(),
+                gram_id: u64::from_be_bytes(k[64..72].try_into().unwrap()),
+                first_ms, retries, next_due_ms, pending_nodes, gram_bytes,
+            });
+        }
+        Ok(out)
+    }
+
 
     /// 某实体离线消息条数。range 直接计数，不解码 value（避免 O(n) prost 解码）。
     pub fn inbox_len(&self, receiver: &[u8]) -> Result<usize> {

@@ -347,6 +347,34 @@ async fn fanout_group(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) {
         body: Some(nm_proto::pb::group_gossip::Body::Msg(gram.clone())),
     };
     let bytes = gg.encode_to_vec();
+    // 跨节点可靠扇出：记录「期望回 GroupAck 的远端成员 home 节点集」，持久入 group_outbox，
+    // 由重传任务重发到群主题直到各节点确认或达 24h 期限。先落盘再 publish（防 publish 后崩溃既没确认也没持久）。
+    // 按「节点」去重跟踪——一节点多成员只需一个 ack。home 未知的成员无法跟踪，靠后续 backfill（L2）兜。
+    if let Some(store) = &ctx.store {
+        let mut pending: Vec<Vec<u8>> = Vec::new();
+        for m in &group.members {
+            if let Some(e) = ctx.dir.entities.get(m.as_slice()) {
+                let home = &e.home_node;
+                if !home.is_empty()
+                    && home.as_slice() != ctx.node_id.as_slice()
+                    && !pending.iter().any(|n| n.as_slice() == home.as_slice())
+                {
+                    pending.push(home.clone());
+                }
+            }
+        }
+        if !pending.is_empty() {
+            let now = now_ms();
+            let first_due = now + crate::OUTBOX_BACKOFF_MS[0];
+            if let Err(e) = store.group_outbox_put(
+                &gram.receiver, &gram.sender, gram.gram_id, now, 0, first_due, &pending, &bytes,
+            ) {
+                tracing::error!("group outbox persist FAILED (reliable fanout not guaranteed): {e}");
+            } else {
+                ctx.group_metrics.fanouts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
     let per_topic = ctx.per_topic.load(std::sync::atomic::Ordering::Relaxed);
     // F5：当「本群所有远端成员(home!=本节点)的 home 都在该群主题上存活」时，省略火管的群消息副本——
     // 该消息仅经每群主题投递(仅成员节点收)，实现真正「仅成员可达」。保守：任一远端 home 存活未知/过期

@@ -209,6 +209,7 @@ message GroupGossip {
     DeviceRevoke revoke = 6;          // 设备吊销（自带签名，各节点验签后持久化并拒绝该设备）
     InboxLive inbox_live = 7;         // F3 退火管：收件人 home 在 nmspace-inbox:<account> 上的存活心跳；发送方据此（origin=该 home）判定可省略火管 Direct 副本
     DirectAck direct_ack = 8;         // 跨节点单聊可靠投递：对端 home 收到并落库 Direct 后，回发到 nmspace-inbox:<原sender>，发送方据此停持久重传
+    GroupAck group_ack = 9;           // 跨节点群消息可靠扇出：成员节点收到并投递群 Msg 后，在群主题回发，发送方 home 据此按节点销账、停重传
   }
 }
 // F3：收件人收件箱存活心跳。由收件人 home 节点在 nmspace-inbox:<account> 周期广播；
@@ -225,6 +226,17 @@ message DirectAck {
   uint64 gram_id  = 2;                // 原消息 gram_id
   bytes  receiver = 3;                // 原消息 receiver（outbox key 第二段，精确匹配）
   bytes  crc      = 4;                // 原消息 crc（防 client 重启 gram_id 回绕导致的误匹配）
+}
+
+// 跨节点群消息可靠扇出确认：成员的 home 节点收到群 Msg 并投递给本地成员后，在群主题 nmspace-group:<gid>
+// （发送方 home 本就订阅以发群消息）回发此 ack。发送方 home 据 (gid,sender,gram_id) 定位待确认条目，
+// 把 node 从「待 ack 节点集」移除；集合清空即停重传。按「节点」而非「成员」确认——一节点多成员只需一个 ack。
+message GroupAck {
+  bytes  gid     = 1;                 // 群 id（= 群主题标签）
+  bytes  sender  = 2;                 // 原群消息 sender（与 gram_id 共同定位发送方的待确认条目）
+  uint64 gram_id = 3;                 // 原群消息 gram_id
+  bytes  crc     = 4;                 // 原消息 crc（防 client 重启 gram_id 回绕导致的误匹配）
+  bytes  node    = 5;                 // 回执节点 id（= 发送方待 ack 节点集中要移除的那个成员 home 节点）
 }
 
 // 频道 / 主题（P4）：iroh-gossip 主题上的开放 pub/sub（1→N 广播，订阅制，大规模）。

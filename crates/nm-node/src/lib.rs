@@ -145,6 +145,8 @@ struct Ctx {
     conn_gate: Arc<ConnGate>,
     // 跨节点可靠投递：已广告支持 DirectAck 的节点 id（能力协商；重传据此决定是否有界降级）。
     ack_nodes: Arc<DashSet<Vec<u8>>>,
+    // 群消息可靠扇出观测（与 Node.group_metrics 同一实例）。
+    group_metrics: Arc<GroupMetrics>,
 }
 
 pub struct Node {
@@ -197,6 +199,8 @@ pub struct Node {
     conn_gate: Arc<ConnGate>,
     // 跨节点可靠投递：已广告支持 DirectAck 的节点 id（能力协商）。
     ack_nodes: Arc<DashSet<Vec<u8>>>,
+    // 群消息可靠扇出观测（供 admin 看板）。
+    group_metrics: Arc<GroupMetrics>,
 }
 
 /// 换网观测计数（供 admin 看板）：记录本节点端点地址变化次数与最近一次时间。
@@ -206,6 +210,20 @@ pub struct RoamStat {
     pub changes: std::sync::atomic::AtomicU64,
     /// 最近一次地址变化的 Unix 毫秒（0 = 启动以来未变化）。
     pub last_change_ms: std::sync::atomic::AtomicU64,
+}
+
+/// 群消息可靠扇出观测（供 admin 看板判定到达率）：扇出跟踪数 / 收到 ack 数 / 重传次数 / 超期放弃数。
+/// 稳态下 acks 应紧跟 fanouts、retransmits 近 0；retransmits 持续攀升或 giveups>0 = 某成员节点长期不可达。
+#[derive(Default)]
+pub struct GroupMetrics {
+    /// 发起并持久跟踪（有远端成员节点）的群消息条数。
+    pub fanouts: std::sync::atomic::AtomicU64,
+    /// 收到的有效 GroupAck 数（命中本节点待确认条目）。
+    pub acks: std::sync::atomic::AtomicU64,
+    /// 群消息重传次数（到期未全 ack 时重发到群主题）。
+    pub retransmits: std::sync::atomic::AtomicU64,
+    /// 达 24h 期限仍未全 ack 而放弃的群消息条数。
+    pub giveups: std::sync::atomic::AtomicU64,
 }
 
 impl RoamStat {
@@ -255,11 +273,12 @@ mod p0_tests {
     #[test]
     fn seen_grams_dedup() {
         let mut s = SeenGrams::default();
-        assert!(s.first_seen(&[1u8; 32], 7), "首次见应投递");
-        assert!(!s.first_seen(&[1u8; 32], 7), "重复 (sender,gram_id) 应丢弃");
-        assert!(s.first_seen(&[1u8; 32], 8), "不同 gram_id 应投递");
-        assert!(s.first_seen(&[2u8; 32], 7), "不同 sender、同 gram_id 应投递");
-        assert!(!s.first_seen(&[2u8; 32], 7), "再次重复应丢弃");
+        assert!(s.first_seen(&[1u8; 32], 7, b"crcA"), "首次见应投递");
+        assert!(!s.first_seen(&[1u8; 32], 7, b"crcA"), "重复 (sender,gram_id,crc) 应丢弃");
+        assert!(s.first_seen(&[1u8; 32], 8, b"crcA"), "不同 gram_id 应投递");
+        assert!(s.first_seen(&[2u8; 32], 7, b"crcA"), "不同 sender、同 gram_id 应投递");
+        assert!(!s.first_seen(&[2u8; 32], 7, b"crcA"), "再次重复应丢弃");
+        assert!(s.first_seen(&[1u8; 32], 7, b"crcB"), "同 (sender,gram_id) 但不同 crc 应投递(防 client 重启 gram_id 回绕误判)");
     }
 
     #[test]

@@ -168,17 +168,47 @@ impl Node {
                 self.merge_group_lww(g);
             }
             Some(nm_proto::pb::group_gossip::Body::Msg(gram)) => {
-                // 去重（F1-2）：火管 + 每群主题双写时同一条 Msg 会到两次，按 (sender, gram_id) 只投一次。
-                if !self.seen.lock().unwrap().first_seen(&gram.sender, gram.gram_id) {
-                    return;
-                }
                 let Some(group) = self.groups.get(&gram.receiver).map(|g| g.clone()) else {
-                    return; // 尚未学到该群（announce 未到）→ 跳过；周期公告后续会补
+                    return; // 尚未学到该群（announce 未到）→ 跳过且不 ack；发送方重传会在学到群后补达
                 };
-                // 每个成员仅由本节点负责的部分投递：在线设备直投；本节点为其 home 则离线设备入库。
-                for m in &group.members {
-                    let home_here = is_home_here(&ctx, m);
-                    deliver_account(m, &gram, &ctx, home_here, None).await;
+                // 本节点是否有该群本地成员（home==本节点）——发送方的期望 ack 节点集=有成员的节点，故据此决定是否回 GroupAck。
+                let have_local = group.members.iter().any(|m| is_home_here(&ctx, m));
+                // 去重：内存快筛（含 crc）+ 持久权威（含 crc，防 client 重启 gram_id 回绕误判 & 跨重启/LRU 滚出后的重传）。
+                let mem_first = self.seen.lock().unwrap().first_seen(&gram.sender, gram.gram_id, &gram.crc);
+                let persist_first = match &ctx.store {
+                    Some(s) => s
+                        .dedup_seen(&gram.sender, gram.gram_id, &gram.crc)
+                        .map(|seen| !seen)
+                        .unwrap_or(true),
+                    None => mem_first,
+                };
+                // 仅首见才真正投递；**投递后**才持久 mark（防"标记了却没投出"的空洞 → 发送方重传能补）。
+                if mem_first && persist_first {
+                    for m in &group.members {
+                        let home_here = is_home_here(&ctx, m);
+                        deliver_account(m, &gram, &ctx, home_here, None).await;
+                    }
+                    if let Some(s) = &ctx.store {
+                        let _ = s.dedup_mark(&gram.sender, gram.gram_id, &gram.crc, now_ms());
+                    }
+                }
+                // 回 GroupAck（跨节点可靠扇出）：仅当本节点确有该群本地成员才回（= 发送方期望 ack 的节点）。
+                // 首见/重复都回——重复多因 ack 丢失、发送方在重传。经群主题（发送方 home 本就订阅）+ 火管兜底。
+                if have_local {
+                    let ack = GroupGossip {
+                        origin: self.ep.id_bytes().to_vec(),
+                        body: Some(nm_proto::pb::group_gossip::Body::GroupAck(nm_proto::pb::GroupAck {
+                            gid: gram.receiver.clone(),
+                            sender: gram.sender.clone(),
+                            gram_id: gram.gram_id,
+                            crc: gram.crc.clone(),
+                            node: self.ep.id_bytes().to_vec(),
+                        })),
+                    };
+                    let ab = ack.encode_to_vec();
+                    let _ = self.fed.join_group(&gram.receiver, group_bootstrap(&group, &ctx)).await;
+                    let _ = self.fed.publish(&gram.receiver, ab.clone()).await;
+                    let _ = self.group_pub.send(ab); // 火管兜底（发送方 home 必在火管上）
                 }
             }
             Some(nm_proto::pb::group_gossip::Body::Direct(gram)) => {
@@ -188,7 +218,7 @@ impl Node {
                     return;
                 }
                 // 一级内存快筛：火管 + inbox 主题双写同一条会到两次。
-                let mem_first = self.seen.lock().unwrap().first_seen(&gram.sender, gram.gram_id);
+                let mem_first = self.seen.lock().unwrap().first_seen(&gram.sender, gram.gram_id, &gram.crc);
                 let home_here = is_home_here(&ctx, to);
                 // 二级持久去重（含 crc，防 client 重启 gram_id 回绕误判）查询——先查不标记。
                 let persist_first = match &ctx.store {
@@ -230,6 +260,22 @@ impl Node {
                         Ok(true) => tracing::debug!("outbox cleared by DirectAck"),
                         Ok(false) => {}
                         Err(e) => tracing::warn!("outbox_del failed: {e}"),
+                    }
+                }
+            }
+            Some(nm_proto::pb::group_gossip::Body::GroupAck(ack)) => {
+                // 本节点是原群消息 sender 的 home（持有 group_outbox 条目）→ 把回执节点从待 ack 集移除；
+                // 全清则停重传。GroupAck 不再回 ack、不入 outbox —— 无回环。别的 home 的 ack 在本地无匹配条目，忽略。
+                if let Some(s) = &ctx.store {
+                    match s.group_outbox_ack_node(&ack.gid, &ack.sender, ack.gram_id, &ack.node) {
+                        Ok((true, cleared)) => {
+                            ctx.group_metrics.acks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if cleared {
+                                tracing::debug!("group outbox cleared by GroupAck (all member nodes acked)");
+                            }
+                        }
+                        Ok((false, _)) => {} // 非本节点跟踪的条目
+                        Err(e) => tracing::warn!("group_outbox_ack_node failed: {e}"),
                     }
                 }
             }
@@ -541,6 +587,41 @@ impl Node {
                     }
                     // 顺带清去重表（按龄，对齐重传上限）。
                     let _ = store.dedup_prune(now_m.saturating_sub(crate::OUTBOX_MAX_HORIZON_MS));
+
+                    // ── 跨节点群消息可靠扇出重传（GroupAck 驱动）──
+                    let grows = store.group_outbox_all().unwrap_or_default();
+                    for row in grows {
+                        use std::sync::atomic::Ordering::Relaxed;
+                        // 达 24h 期限 → 放弃 + 告警（记尚未 ack 的成员节点数）。
+                        if now_m.saturating_sub(row.first_ms) > crate::OUTBOX_MAX_HORIZON_MS {
+                            tracing::warn!(gram_id = row.gram_id, pending = row.pending_nodes.len(),
+                                "group message giving up after horizon (member node(s) unreachable)");
+                            let _ = store.group_outbox_del(&row.gid, &row.sender, row.gram_id);
+                            ctx.group_metrics.giveups.fetch_add(1, Relaxed);
+                            continue;
+                        }
+                        if now_m < row.next_due_ms { continue; } // 未到重试点
+                        // 向后兼容：若所有待 ack 节点都未广告 GroupAck 能力 → 有界重传后放弃，不无限打爆老节点。
+                        let any_ack_capable = row.pending_nodes.iter().any(|n| ctx.ack_nodes.contains(n));
+                        if !any_ack_capable && row.retries >= crate::LEGACY_MAX_RETRIES {
+                            tracing::debug!("group member nodes without GroupAck; bounded retransmit exhausted");
+                            let _ = store.group_outbox_del(&row.gid, &row.sender, row.gram_id);
+                            continue;
+                        }
+                        // 重发到群主题（若知群）+ 火管兜底（总能到各成员节点；收端 dedup 幂等，已 ack 的节点跳过投递但会再 ack）。
+                        if let Some(g) = ctx.groups.get(&row.gid).map(|g| g.clone()) {
+                            let _ = ctx.fed.join_group(&row.gid, group_bootstrap(&g, &ctx)).await;
+                            let _ = ctx.fed.publish(&row.gid, row.gram_bytes.clone()).await;
+                        }
+                        let _ = ctx.group_pub.send(row.gram_bytes.clone());
+                        ctx.group_metrics.retransmits.fetch_add(1, Relaxed);
+                        // 退避推进（pending 节点集不变，等 GroupAck 逐个销账）。
+                        let r1 = row.retries.saturating_add(1);
+                        let backoff = crate::OUTBOX_BACKOFF_MS
+                            [(r1 as usize).min(crate::OUTBOX_BACKOFF_MS.len() - 1)];
+                        let _ = store.group_outbox_put(&row.gid, &row.sender, row.gram_id,
+                            row.first_ms, r1, now_m + backoff, &row.pending_nodes, &row.gram_bytes);
+                    }
                 }
             }
         })

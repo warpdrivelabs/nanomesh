@@ -155,6 +155,7 @@ impl Node {
             ("channels", self.channels.len()),
             ("presence", self.presence.len()),
             ("outbox_pending", self.outbox_pending()),
+            ("group_outbox_pending", self.group_outbox_pending()),
         ]
     }
 
@@ -167,6 +168,28 @@ impl Node {
             .and_then(|s| s.outbox_all().ok())
             .map(|v| v.len())
             .unwrap_or(0)
+    }
+
+    /// 跨节点群消息可靠扇出：当前待成员节点确认（GroupAck）的发件箱条目数。
+    /// 稳态近 0；持续偏高 = 某成员 home 节点长期不可达。测试据此断言「发群消息后非空 → 成员节点 ack 后清零」。
+    pub fn group_outbox_pending(&self) -> usize {
+        self.store
+            .as_ref()
+            .and_then(|s| s.group_outbox_all().ok())
+            .map(|v| v.len())
+            .unwrap_or(0)
+    }
+
+    /// 群消息可靠扇出观测快照：(扇出跟踪数, 收到 ack 数, 重传次数, 超期放弃数)。供 admin /system 展示到达率。
+    pub fn group_metrics_snapshot(&self) -> (u64, u64, u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let m = &self.group_metrics;
+        (
+            m.fanouts.load(Relaxed),
+            m.acks.load(Relaxed),
+            m.retransmits.load(Relaxed),
+            m.giveups.load(Relaxed),
+        )
     }
 
     /// 全部已登记设备快照（后端管理台「域内命名登记」下展开某账号的设备列表用）。
