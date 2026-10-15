@@ -611,12 +611,12 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Op
         "device.freeze" => device_freeze(ctx, &cmd),
         // ── 频道 / 主题（P4）──
         "channel.create" => channel_create(ctx, caller, rid, &cmd).await,
-        "channel.sub" => channel_sub(ctx, rid, &cmd).await,
-        "channel.unsub" => channel_unsub(ctx, rid, &cmd),
+        "channel.sub" => channel_sub(ctx, caller, &cmd).await,
+        "channel.unsub" => channel_unsub(ctx, caller, &cmd).await,
         "channel.publish" => channel_publish(ctx, caller, &cmd),
         "channel.backfill" => channel_backfill(ctx, &cmd),
         "channel.set_meta" => channel_set_meta(ctx, caller, &cmd),
-        "channel.list" => channel_list(ctx),
+        "channel.list" => channel_list(ctx, caller),
         "group.list" => {
             let mine: Vec<Group> = groups
                 .iter()

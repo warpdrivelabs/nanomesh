@@ -6,7 +6,7 @@
 //!   前缀 range 扫描即可取某实体的全部离线消息，`gram_id` 单调保证 FIFO。
 //! - `ENTITIES`：key = `entity_id(32)`，value = prost 编码的 `Entity`（目录持久化）。
 
-use nm_proto::{BlobData, DeviceInfo, DeviceRevoke, Entity, Gram, Group, NameRecord};
+use nm_proto::{BlobData, Channel, ChannelMsg, DeviceInfo, DeviceRevoke, Entity, Gram, Group, NameRecord};
 use prost::Message;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
@@ -43,6 +43,26 @@ const DEDUP_DIRECT: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dedup_
 /// val = first_ms(8)++retries(4)++next_due_ms(8)++n_pending(2)++[node(32)*n]++gram_bytes。
 /// 按「待 ack 成员节点集」跟踪：收到某节点 GroupAck 即移除该 node，集合空则删、停重传。
 const GROUP_OUTBOX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("group_outbox");
+// ── 频道（P4 升级：持久化 + 全局定序 + 可靠广播）──
+/// 频道元信息：key = channel_id(32)，value = prost 编码的 Channel。重启回填频道目录。
+const CHANNELS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("channels");
+/// 账号级订阅：key = account(32)++channel_id(32)，value = 订阅时间 Unix ms(8BE)。
+/// 账号级（非连接级）→ 重启/换设备仍订阅；前缀扫某账号的全部订阅。
+const CHANNEL_SUBS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("channel_subs");
+/// 频道消息持久日志：key = channel_id(32)++seq(8BE)，value = prost 编码的 ChannelMsg。
+/// 前缀区间扫做回填；按龄+条数裁剪。(channel_id,seq) 唯一 → 日志本身即去重（点查）。
+const CHANNEL_LOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("channel_log");
+/// 频道 seq 计数器（仅 home）：key = channel_id(32)，value = 下一个待分配 seq(8BE)。
+/// 永不裁剪（日志会裁，故不能用 log-max 推算，否则 seq 复用）。单事务 RMW。
+const CHANNEL_SEQ: TableDefinition<&[u8], &[u8]> = TableDefinition::new("channel_seq");
+/// 频道签名私钥（仅 home）：key = channel_id(32，= 公钥)，value = 私钥(32)。仅本地、绝不广播。
+const CHANNEL_SECRETS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("channel_secrets");
+/// 频道定序幂等表（仅 home）：key = channel_id(32)++sender(32)++nonce(≤32)，value = 已分配 seq(8BE)。
+/// 让「持久先于广播」与「publisher 重传」都幂等：命中即重广播同一 seq，不重分配。按龄裁剪。
+const CHANNEL_INTAKE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("channel_intake");
+/// 频道发布待确认发件箱（publisher 侧）：key = channel_id(32)++sender(32)++nonce(≤32)，
+/// val = first_ms(8)++retries(4)++next_due_ms(8)++pubreq_bytes。看到自己的 sequenced 消息/收 PubReject 即删。
+const CHANNEL_OUTBOX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("channel_outbox");
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -77,6 +97,17 @@ pub struct GroupOutboxRow {
     pub gram_bytes: Vec<u8>,
 }
 
+/// 频道发布待确认发件箱一行（publisher 侧重传任务用）。`pubreq_bytes`=编码的 ChannelPubReq。
+pub struct ChannelOutboxRow {
+    pub channel_id: Vec<u8>,
+    pub sender: Vec<u8>,
+    pub nonce: Vec<u8>,
+    pub first_ms: u64,
+    pub retries: u32,
+    pub next_due_ms: u64,
+    pub pubreq_bytes: Vec<u8>,
+}
+
 fn db_err(e: impl std::fmt::Display) -> StoreError {
     StoreError::Db(e.to_string())
 }
@@ -108,6 +139,13 @@ impl RedbStore {
             wtx.open_table(OUTBOX).map_err(db_err)?;
             wtx.open_table(DEDUP_DIRECT).map_err(db_err)?;
             wtx.open_table(GROUP_OUTBOX).map_err(db_err)?;
+            wtx.open_table(CHANNELS).map_err(db_err)?;
+            wtx.open_table(CHANNEL_SUBS).map_err(db_err)?;
+            wtx.open_table(CHANNEL_LOG).map_err(db_err)?;
+            wtx.open_table(CHANNEL_SEQ).map_err(db_err)?;
+            wtx.open_table(CHANNEL_SECRETS).map_err(db_err)?;
+            wtx.open_table(CHANNEL_INTAKE).map_err(db_err)?;
+            wtx.open_table(CHANNEL_OUTBOX).map_err(db_err)?;
         }
         wtx.commit().map_err(db_err)?;
         Ok(Self { db })
@@ -412,6 +450,330 @@ impl RedbStore {
                 sender: k[32..64].to_vec(),
                 gram_id: u64::from_be_bytes(k[64..72].try_into().unwrap()),
                 first_ms, retries, next_due_ms, pending_nodes, gram_bytes,
+            });
+        }
+        Ok(out)
+    }
+
+    // ── 频道（P4）：元信息 / 账号订阅 / 全局日志 / seq 计数 / 私钥 / 定序幂等 / 发件箱 ──
+
+    /// 存/覆盖频道元信息。
+    pub fn put_channel(&self, c: &Channel) -> Result<()> {
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        { let mut t = wtx.open_table(CHANNELS).map_err(db_err)?;
+          t.insert(c.channel_id.as_slice(), c.encode_to_vec().as_slice()).map_err(db_err)?; }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+    /// 读单个频道元信息。
+    pub fn channel(&self, channel_id: &[u8]) -> Result<Option<Channel>> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(CHANNELS).map_err(db_err)?;
+        match t.get(channel_id).map_err(db_err)? {
+            Some(v) => Ok(Some(Channel::decode(v.value()).map_err(|e| StoreError::Decode(e.to_string()))?)),
+            None => Ok(None),
+        }
+    }
+    /// 全部已知频道（启动回填目录 + rejoin 主题用）。
+    pub fn all_channels(&self) -> Result<Vec<Channel>> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(CHANNELS).map_err(db_err)?;
+        let mut out = Vec::new();
+        for item in t.iter().map_err(db_err)? {
+            let (_k, v) = item.map_err(db_err)?;
+            if let Ok(c) = Channel::decode(v.value()) { out.push(c); }
+        }
+        Ok(out)
+    }
+
+    fn chan_sub_key(account: &[u8], channel_id: &[u8]) -> Vec<u8> {
+        let mut k = Vec::with_capacity(account.len() + channel_id.len());
+        k.extend_from_slice(account);
+        k.extend_from_slice(channel_id);
+        k
+    }
+    /// 记一条账号级订阅（account 订阅 channel_id）。幂等覆盖。
+    pub fn channel_sub_put(&self, account: &[u8], channel_id: &[u8], ts_ms: u64) -> Result<()> {
+        let key = Self::chan_sub_key(account, channel_id);
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        { let mut t = wtx.open_table(CHANNEL_SUBS).map_err(db_err)?;
+          t.insert(key.as_slice(), ts_ms.to_be_bytes().as_slice()).map_err(db_err)?; }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+    /// 删一条账号级订阅（unsub）。幂等。
+    pub fn channel_sub_del(&self, account: &[u8], channel_id: &[u8]) -> Result<bool> {
+        let key = Self::chan_sub_key(account, channel_id);
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        let existed;
+        { let mut t = wtx.open_table(CHANNEL_SUBS).map_err(db_err)?;
+          existed = t.remove(key.as_slice()).map_err(db_err)?.is_some(); }
+        wtx.commit().map_err(db_err)?;
+        Ok(existed)
+    }
+    /// 某账号订阅的全部频道 id（前缀区间扫）。
+    pub fn channel_subs_of(&self, account: &[u8]) -> Result<Vec<Vec<u8>>> {
+        let (lo, hi) = prefix_range(account);
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(CHANNEL_SUBS).map_err(db_err)?;
+        let mut out = Vec::new();
+        for item in t.range(lo.as_slice()..hi.as_slice()).map_err(db_err)? {
+            let (k, _v) = item.map_err(db_err)?;
+            let k = k.value();
+            if k.len() == account.len() + 32 { out.push(k[account.len()..].to_vec()); }
+        }
+        Ok(out)
+    }
+    /// 全部订阅去重后的频道 id（启动时据此 rejoin 主题，无论哪个本地账号订阅）。
+    pub fn channel_subs_all_ids(&self) -> Result<Vec<Vec<u8>>> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(CHANNEL_SUBS).map_err(db_err)?;
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for item in t.iter().map_err(db_err)? {
+            let (k, _v) = item.map_err(db_err)?;
+            let k = k.value();
+            if k.len() >= 32 {
+                let cid = k[k.len() - 32..].to_vec();
+                if seen.insert(cid.clone()) { out.push(cid); }
+            }
+        }
+        Ok(out)
+    }
+
+    fn chan_log_key(channel_id: &[u8], seq: u64) -> Vec<u8> {
+        let mut k = Vec::with_capacity(channel_id.len() + 8);
+        k.extend_from_slice(channel_id);
+        k.extend_from_slice(&seq.to_be_bytes());
+        k
+    }
+    /// 写一条频道日志消息（key = cid++seq）。`(cid,seq)` 唯一 → 覆盖即幂等。
+    pub fn channel_log_put(&self, m: &ChannelMsg) -> Result<()> {
+        let key = Self::chan_log_key(&m.channel_id, m.seq);
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        { let mut t = wtx.open_table(CHANNEL_LOG).map_err(db_err)?;
+          t.insert(key.as_slice(), m.encode_to_vec().as_slice()).map_err(db_err)?; }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+    /// 该 (cid,seq) 是否已存（点查去重，O(log n)）。
+    pub fn channel_log_has(&self, channel_id: &[u8], seq: u64) -> Result<bool> {
+        let key = Self::chan_log_key(channel_id, seq);
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(CHANNEL_LOG).map_err(db_err)?;
+        Ok(t.get(key.as_slice()).map_err(db_err)?.is_some())
+    }
+    /// 回填：取 seq 在 (since_seq, ∞) 的消息，最多 limit 条（按 seq 升序）。
+    pub fn channel_log_since(&self, channel_id: &[u8], since_seq: u64, limit: usize) -> Result<Vec<ChannelMsg>> {
+        let lo = Self::chan_log_key(channel_id, since_seq.saturating_add(1));
+        let (_p, hi) = prefix_range(channel_id);
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(CHANNEL_LOG).map_err(db_err)?;
+        let mut out = Vec::new();
+        for item in t.range(lo.as_slice()..hi.as_slice()).map_err(db_err)? {
+            let (_k, v) = item.map_err(db_err)?;
+            if let Ok(m) = ChannelMsg::decode(v.value()) { out.push(m); }
+            if out.len() >= limit { break; }
+        }
+        Ok(out)
+    }
+    /// 该频道当前日志的最小/最大 seq（earliest/max 水位；日志空返回 None）。
+    pub fn channel_log_bounds(&self, channel_id: &[u8]) -> Result<Option<(u64, u64)>> {
+        let (lo, hi) = prefix_range(channel_id);
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(CHANNEL_LOG).map_err(db_err)?;
+        let mut rng = t.range(lo.as_slice()..hi.as_slice()).map_err(db_err)?;
+        let first = match rng.next() { Some(it) => it.map_err(db_err)?.0.value().to_vec(), None => return Ok(None) };
+        let last = match rng.next_back() { Some(it) => it.map_err(db_err)?.0.value().to_vec(), None => first.clone() };
+        let seq_of = |k: &[u8]| u64::from_be_bytes(k[k.len() - 8..].try_into().unwrap());
+        Ok(Some((seq_of(&first), seq_of(&last))))
+    }
+    /// 从 floor+1 起连续无断层的最高 seq（回填游标）：扫 (floor, ∞)，遇第一个断层即止。
+    /// 例：floor=0、日志有 {1,2,5,6} → 返回 2（缺 3 → 从 2 之后回填）。空/全缺 → floor。
+    pub fn channel_log_contiguous_upto(&self, channel_id: &[u8], floor: u64) -> Result<u64> {
+        let lo = Self::chan_log_key(channel_id, floor.saturating_add(1));
+        let (_p, hi) = prefix_range(channel_id);
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(CHANNEL_LOG).map_err(db_err)?;
+        let mut contiguous = floor;
+        for item in t.range(lo.as_slice()..hi.as_slice()).map_err(db_err)? {
+            let (k, _v) = item.map_err(db_err)?;
+            let k = k.value();
+            let seq = u64::from_be_bytes(k[k.len() - 8..].try_into().unwrap());
+            if seq == contiguous + 1 {
+                contiguous = seq;
+            } else {
+                break; // 断层
+            }
+        }
+        Ok(contiguous)
+    }
+    /// 裁剪频道日志：删 seq < floor_seq 的条目。返回删除条数（配合保留策略按龄/条数算 floor）。
+    pub fn channel_log_prune(&self, channel_id: &[u8], floor_seq: u64) -> Result<usize> {
+        let lo = Self::chan_log_key(channel_id, u64::MIN);
+        let hi = Self::chan_log_key(channel_id, floor_seq); // 半开上界：删 [0, floor_seq)
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        let mut n = 0usize;
+        { let mut t = wtx.open_table(CHANNEL_LOG).map_err(db_err)?;
+          for item in t.extract_from_if(lo.as_slice()..hi.as_slice(), |_, _| true).map_err(db_err)? {
+              item.map_err(db_err)?; n += 1; } }
+        wtx.commit().map_err(db_err)?;
+        Ok(n)
+    }
+
+    /// home 分配下一个 seq（单事务 RMW：读 → +1 回写 → 返回分配值）。永不依赖日志推算，防裁剪后复用。
+    pub fn channel_seq_next(&self, channel_id: &[u8]) -> Result<u64> {
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        let assigned;
+        {
+            let mut t = wtx.open_table(CHANNEL_SEQ).map_err(db_err)?;
+            let cur = t.get(channel_id).map_err(db_err)?
+                .map(|v| u64::from_be_bytes(v.value().try_into().unwrap_or([0u8; 8])))
+                .unwrap_or(1); // 从 1 起
+            assigned = cur;
+            t.insert(channel_id, (cur + 1).to_be_bytes().as_slice()).map_err(db_err)?;
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(assigned)
+    }
+    /// 读当前 seq 高水位（下一个待分配值；未初始化返回 1）。
+    pub fn channel_seq_peek(&self, channel_id: &[u8]) -> Result<u64> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(CHANNEL_SEQ).map_err(db_err)?;
+        Ok(t.get(channel_id).map_err(db_err)?
+            .map(|v| u64::from_be_bytes(v.value().try_into().unwrap_or([0u8; 8])))
+            .unwrap_or(1))
+    }
+
+    /// 存频道私钥（仅 home）。
+    pub fn put_channel_secret(&self, channel_id: &[u8], secret: &[u8]) -> Result<()> {
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        { let mut t = wtx.open_table(CHANNEL_SECRETS).map_err(db_err)?;
+          t.insert(channel_id, secret).map_err(db_err)?; }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+    /// 读频道私钥（home 判定：Some → 本节点是该频道定序器）。
+    pub fn channel_secret(&self, channel_id: &[u8]) -> Result<Option<Vec<u8>>> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(CHANNEL_SECRETS).map_err(db_err)?;
+        Ok(t.get(channel_id).map_err(db_err)?.map(|v| v.value().to_vec()))
+    }
+
+    fn chan_intake_key(channel_id: &[u8], sender: &[u8], nonce: &[u8]) -> Vec<u8> {
+        let mut k = Vec::with_capacity(channel_id.len() + sender.len() + nonce.len());
+        k.extend_from_slice(channel_id);
+        k.extend_from_slice(sender);
+        k.extend_from_slice(nonce);
+        k
+    }
+    /// 定序幂等：若 (cid,sender,nonce) 已分配过 seq 返回 Some(seq)，否则记入 now_ms 占位并返回 None。
+    /// 注意：真正的 seq 在 home 单事务里与 LOG/SEQ 一起写；此表仅记「nonce→seq」供重传命中重广播。
+    pub fn channel_intake_get(&self, channel_id: &[u8], sender: &[u8], nonce: &[u8]) -> Result<Option<u64>> {
+        let key = Self::chan_intake_key(channel_id, sender, nonce);
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(CHANNEL_INTAKE).map_err(db_err)?;
+        Ok(t.get(key.as_slice()).map_err(db_err)?
+            .map(|v| u64::from_be_bytes(v.value()[..8].try_into().unwrap_or([0u8; 8]))))
+    }
+    /// 定序提交（home 专用，单事务三写之一不便合并时的独立入口；正常由 channel_sequence 原子完成）。
+    pub fn channel_intake_put(&self, channel_id: &[u8], sender: &[u8], nonce: &[u8], seq: u64) -> Result<()> {
+        let key = Self::chan_intake_key(channel_id, sender, nonce);
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        { let mut t = wtx.open_table(CHANNEL_INTAKE).map_err(db_err)?;
+          t.insert(key.as_slice(), seq.to_be_bytes().as_slice()).map_err(db_err)?; }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+
+    /// home 定序核心：**单事务原子**完成「分配 seq + 写日志 + 记 intake」。崩溃安全的关键。
+    /// 若 (cid,sender,nonce) 已定序过（重传/重复 PubReq）→ 不重分配，返回已有 (seq, 已存的 ChannelMsg)。
+    /// 否则分配新 seq，用 `make_msg(seq)` 构造并签名 ChannelMsg，持久化，返回。调用方 commit 后才广播。
+    pub fn channel_sequence(
+        &self,
+        channel_id: &[u8],
+        sender: &[u8],
+        nonce: &[u8],
+        make_msg: impl FnOnce(u64) -> ChannelMsg,
+    ) -> Result<(u64, ChannelMsg, bool)> {
+        let ik = Self::chan_intake_key(channel_id, sender, nonce);
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        let result;
+        {
+            let mut intake = wtx.open_table(CHANNEL_INTAKE).map_err(db_err)?;
+            if let Some(v) = intake.get(ik.as_slice()).map_err(db_err)? {
+                // 已定序 → 重传命中：取回已存日志条目重广播，不重分配。
+                let seq = u64::from_be_bytes(v.value()[..8].try_into().unwrap_or([0u8; 8]));
+                drop(v);
+                let lk = Self::chan_log_key(channel_id, seq);
+                let log = wtx.open_table(CHANNEL_LOG).map_err(db_err)?;
+                let msg = match log.get(lk.as_slice()).map_err(db_err)? {
+                    Some(mv) => ChannelMsg::decode(mv.value()).map_err(|e| StoreError::Decode(e.to_string()))?,
+                    None => return Err(StoreError::Db("intake without log entry".into())),
+                };
+                result = (seq, msg, false);
+            } else {
+                // 首见 → 分配 seq、构造签名消息、三写（SEQ+LOG+INTAKE）同一事务。
+                let mut seqt = wtx.open_table(CHANNEL_SEQ).map_err(db_err)?;
+                let seq = seqt.get(channel_id).map_err(db_err)?
+                    .map(|v| u64::from_be_bytes(v.value().try_into().unwrap_or([0u8; 8]))).unwrap_or(1);
+                seqt.insert(channel_id, (seq + 1).to_be_bytes().as_slice()).map_err(db_err)?;
+                let msg = make_msg(seq);
+                let lk = Self::chan_log_key(channel_id, seq);
+                { let mut log = wtx.open_table(CHANNEL_LOG).map_err(db_err)?;
+                  log.insert(lk.as_slice(), msg.encode_to_vec().as_slice()).map_err(db_err)?; }
+                intake.insert(ik.as_slice(), seq.to_be_bytes().as_slice()).map_err(db_err)?;
+                result = (seq, msg, true);
+            }
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(result)
+    }
+
+    // ── 频道发布发件箱（publisher 侧，仿 OUTBOX）──
+    fn chan_outbox_key(channel_id: &[u8], sender: &[u8], nonce: &[u8]) -> Vec<u8> {
+        Self::chan_intake_key(channel_id, sender, nonce)
+    }
+    pub fn channel_outbox_put(&self, channel_id: &[u8], sender: &[u8], nonce: &[u8],
+                              first_ms: u64, retries: u32, next_due_ms: u64, pubreq_bytes: &[u8]) -> Result<()> {
+        let key = Self::chan_outbox_key(channel_id, sender, nonce);
+        let mut val = Vec::with_capacity(20 + pubreq_bytes.len());
+        val.extend_from_slice(&first_ms.to_be_bytes());
+        val.extend_from_slice(&retries.to_be_bytes());
+        val.extend_from_slice(&next_due_ms.to_be_bytes());
+        val.extend_from_slice(pubreq_bytes);
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        { let mut t = wtx.open_table(CHANNEL_OUTBOX).map_err(db_err)?;
+          t.insert(key.as_slice(), val.as_slice()).map_err(db_err)?; }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+    pub fn channel_outbox_del(&self, channel_id: &[u8], sender: &[u8], nonce: &[u8]) -> Result<bool> {
+        let key = Self::chan_outbox_key(channel_id, sender, nonce);
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        let existed;
+        { let mut t = wtx.open_table(CHANNEL_OUTBOX).map_err(db_err)?;
+          existed = t.remove(key.as_slice()).map_err(db_err)?.is_some(); }
+        wtx.commit().map_err(db_err)?;
+        Ok(existed)
+    }
+    pub fn channel_outbox_all(&self) -> Result<Vec<ChannelOutboxRow>> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(CHANNEL_OUTBOX).map_err(db_err)?;
+        let mut out = Vec::new();
+        for item in t.iter().map_err(db_err)? {
+            let (k, v) = item.map_err(db_err)?;
+            let k = k.value();
+            let v = v.value();
+            if k.len() < 64 || v.len() < 20 { continue; }
+            out.push(ChannelOutboxRow {
+                channel_id: k[0..32].to_vec(),
+                sender: k[32..64].to_vec(),
+                nonce: k[64..].to_vec(),
+                first_ms: u64::from_be_bytes(v[0..8].try_into().unwrap()),
+                retries: u32::from_be_bytes(v[8..12].try_into().unwrap()),
+                next_due_ms: u64::from_be_bytes(v[12..20].try_into().unwrap()),
+                pubreq_bytes: v[20..].to_vec(),
             });
         }
         Ok(out)
@@ -840,6 +1202,20 @@ fn inbox_prefix_range(receiver: &[u8]) -> (Vec<u8>, Vec<u8>) {
     }
     // receiver 全为 0xFF：上界用一个比任何 key 都大的值（多加一字节）。
     let mut hi = inbox_key(receiver, u64::MAX);
+    hi.push(0xFF);
+    (lo, hi)
+}
+
+/// 任意前缀的半开区间 `[prefix, prefix+1)`：lo=prefix 本身，hi=把 prefix 当大整数 +1。
+/// 供「prefix ++ 定长后缀」的前缀扫（频道订阅 account++cid、频道日志 cid++seq）。
+fn prefix_range(prefix: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let lo = prefix.to_vec();
+    let mut hi = prefix.to_vec();
+    for i in (0..hi.len()).rev() {
+        if hi[i] == 0xFF { hi[i] = 0; } else { hi[i] += 1; return (lo, hi); }
+    }
+    // 前缀全 0xFF：上界加一字节兜底。
+    let mut hi = prefix.to_vec();
     hi.push(0xFF);
     (lo, hi)
 }

@@ -508,6 +508,44 @@ impl Node {
         })
     }
 
+    /// P4 启动恢复：从持久化重建本节点订阅的频道（重 join 主题 + 回填 subs）。
+    /// 一次性任务（非循环），在 serve 后调用一次即可。
+    pub fn spawn_channel_restore(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let ctx = self.ctx();
+            crate::channels::restore_channels(&ctx).await;
+        })
+    }
+
+    /// P4 频道发现（需 [dns] url）：周期性 home 发布频道 pkarr 记录、订阅者解析 seed 入 `pkarr_seeds`
+    /// 供 ensure_channel 冷启动 bootstrap。无 pkarr 端点则本任务空转退出。
+    pub fn spawn_channel_pkarr(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = self.shutdown.cancelled() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
+                }
+                if self.pkarr_endpoint().is_none() {
+                    continue; // 未配置 pkarr → 仅靠 peers + 邀请链接发现
+                }
+                // 本节点当前持有的频道（内存运行态）。
+                let cids: Vec<Vec<u8>> = self.channels.iter().map(|e| e.key().clone()).collect();
+                for cid in cids {
+                    if crate::channels::node_is_channel_home(&self.store, &cid) {
+                        self.pkarr_publish_channel(&cid).await; // home：发布自己为 seed
+                    } else {
+                        let seeds = self.pkarr_resolve_channel(&cid).await; // 订阅者：解析 home seed
+                        if !seeds.is_empty() {
+                            self.pkarr_seeds.insert(cid.clone(), seeds);
+                        }
+                    }
+                }
+            }
+        })
+    }
+
     /// Defect C: cold-start pending-forward flush. Every ~2s: re-publish queued DMs whose
     /// recipient inbox overlay now HAS neighbors; drop items past TTL. Recipient dedups on
     /// (sender,gram_id), so a re-publish that overlaps the firehose copy is harmless.

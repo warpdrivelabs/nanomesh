@@ -262,6 +262,7 @@ impl Node {
             revoked: self.revoked.clone(),
             pending_fwd: self.pending_fwd.clone(),
             tracker: self.tracker.clone(),
+            shutdown: self.shutdown.clone(),
             max_connections: self.max_connections,
             conn_gate: self.conn_gate.clone(),
             ack_nodes: self.ack_nodes.clone(),

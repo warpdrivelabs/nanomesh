@@ -99,16 +99,37 @@
     });
   }
 
+  // 邀请链接：nmspace:channel/<64hex>?name=<URL编码名称>。编码公钥 id + 可选名称提示。
+  function buildInvite(cid, name) {
+    const q = name ? ("?name=" + encodeURIComponent(name)) : "";
+    return "nmspace:channel/" + cid + q;
+  }
+  // 从「邀请链接」或「裸 64hex」解析出 {cid, name}。无效返回 null。
+  function parseInvite(raw) {
+    const s = (raw || "").trim();
+    const m = s.match(/^nmspace:channel\/([0-9a-fA-F]{64})(?:\?name=([^&]*))?/);
+    if (m) return { cid: m[1].toLowerCase(), name: m[2] ? decodeURIComponent(m[2]) : "" };
+    if (/^[0-9a-fA-F]{64}$/.test(s)) return { cid: s.toLowerCase(), name: "" };
+    return null;
+  }
+  // 复制频道邀请链接到剪贴板（owner/订阅者分享用）。
+  async function copyInvite(cid) {
+    const c = byId(cid);
+    const link = buildInvite(cid, c && c.name ? c.name : "");
+    try { await navigator.clipboard.writeText(link); if (window.toast) toast("邀请链接已复制"); }
+    catch (_) { if (window.toast) toast("复制失败"); }
+  }
+
   async function subscribeByPaste() {
-    const raw = await prompt2("订阅频道", "粘贴频道 id（64 位 hex）", "");
+    const raw = await prompt2("订阅频道", "粘贴频道邀请链接或 64 位 hex id", "");
     if (!raw) return;
-    const cid = /^[0-9a-fA-F]{64}$/.test(raw.trim()) ? raw.trim().toLowerCase() : null;
-    if (!cid) { if (window.toast) toast("请输入 64 位频道 id hex"); return; }
+    const inv = parseInvite(raw);
+    if (!inv) { if (window.toast) toast("请输入邀请链接或 64 位频道 id"); return; }
     try {
-      await NM.inv("channel_sub", { channelId: cid, name: "" });
-      await primeOne(cid, "");
+      await NM.inv("channel_sub", { channelId: inv.cid, name: inv.name });
+      await primeOne(inv.cid, inv.name);
       await renderChannelsList();
-      if (window.openChannel) openChannel(cid);
+      if (window.openChannel) openChannel(inv.cid);
       if (window.toast) toast("已订阅");
     } catch (e) { if (window.toast) toast("订阅失败：" + (e && e.message ? e.message : e)); }
   }
@@ -121,10 +142,13 @@
   async function primeOne(cid, name) {
     try {
       await NM.inv("channel_sub", { channelId: cid, name });
+      // 回填游标 = 本地已存最大 seq（live 事件现在带 seq 并持久化，故可续拉而非每次从 0 全量）。
       const last = window.ChatLog ? ChatLog.meta(cid).last : null;
       const since = last && last.seq ? last.seq : 0;
       const msgs = await NM.inv("channel_backfill", { channelId: cid, sinceSeq: since });
-      if (window.imBackfill) window.imBackfill(cid, (msgs || []).map((m) => ({ id: "c" + m.seq, from: m.from, body: m.body, ts: m.ts, channel: true, to: cid })));
+      // id 与 live 事件一致用 "<cid>:<seq>"（修「同一条消息 live/backfill 两套 id → 重复显示」），
+      // 并带 seq → 持久化后下次回填游标生效 + 按 seq 排序。
+      if (window.imBackfill) window.imBackfill(cid, (msgs || []).map((m) => ({ id: cid + ":" + m.seq, from: m.from, body: m.body, ts: m.ts, seq: m.seq, channel: true, to: cid })));
     } catch (_) {}
   }
 
@@ -153,6 +177,6 @@
     const se = document.getElementById("chn-search"); if (se) se.addEventListener("input", paintChannelsList);
   })();
 
-  window.Channels = { refresh, hydrate, byId, isOwner, editChannel, list: () => CHANNELS, primeChannels, syncSelection };
+  window.Channels = { refresh, hydrate, byId, isOwner, editChannel, list: () => CHANNELS, primeChannels, syncSelection, copyInvite, buildInvite };
   window.renderChannelsList = renderChannelsList;
 })();

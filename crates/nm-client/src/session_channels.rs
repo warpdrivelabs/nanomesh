@@ -20,6 +20,7 @@ impl Session {
         name: &str,
         topic: &str,
         avatar_url: &str,
+        secret: &[u8],
     ) -> Result<(), ClientError> {
         self.channel_op(
             "channel.create",
@@ -28,6 +29,7 @@ impl Session {
                 name: name.to_string(),
                 topic: topic.to_string(),
                 avatar_url: avatar_url.to_string(),
+                secret: secret.to_vec(),
             },
         )
         .await
@@ -48,6 +50,7 @@ impl Session {
                 name: name.to_string(),
                 topic: topic.to_string(),
                 avatar_url: avatar_url.to_string(),
+                ..Default::default()
             },
         )
         .await
@@ -120,6 +123,7 @@ impl Session {
             value: ChannelBackfillReq {
                 channel_id: channel_id.to_vec(),
                 since_seq,
+                limit: 0, // 0 = 服务端默认页大小；Phase 3 前端可传实际值
             }
             .encode_to_vec(),
         };

@@ -276,9 +276,13 @@ pub(crate) async fn channel_create(
         return Err("头像过大（请用更小的图）".into());
     }
     let session = session_of(&state).await?;
-    let cid = nm_transport::SecretKey::generate().to_bytes(); // 随机 32 字节频道 id
+    // keyed 频道：生成密钥对，channel_id = 公钥，私钥交 home 节点存 CHANNEL_SECRETS 做定序器签名。
+    // （修旧版 bug：旧版把私钥标量直接当 id，而 id 会在邀请/订阅里分享 → 私钥泄漏。）
+    let sk = nm_transport::SecretKey::generate();
+    let cid = *sk.public().as_bytes();
+    let secret = sk.to_bytes();
     session
-        .channel_create(cid, name.trim(), topic.trim(), avatar.trim())
+        .channel_create(cid, name.trim(), topic.trim(), avatar.trim(), &secret)
         .await
         .map_err(|e| e.to_string())?;
     Ok(hex(&cid))

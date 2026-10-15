@@ -241,35 +241,82 @@ message GroupAck {
 
 // 频道 / 主题（P4）：iroh-gossip 主题上的开放 pub/sub（1→N 广播，订阅制，大规模）。
 // 与「群」区别：群=封闭成员表、双向、小规模；频道=开放订阅、广播、可海量订阅者。
+// 定位：广播/公告（少写多读）。所有发布经频道 home 节点全局定序（分配单调 seq + home 签名），
+// 订阅者只信 home 签名的 sequenced 消息；home 持 channel_id 对应私钥（CHANNEL_SECRETS，不广播）。
+// 发布策略：open（任意订阅者可发）| owner_only（仅 owner，新建默认）。白名单留待后续。
+enum PubPolicy {
+  PUB_POLICY_OPEN = 0;                // 任意订阅者可发（旧行为）
+  PUB_POLICY_OWNER_ONLY = 1;          // 仅 owner 可发（广播/公告默认）
+}
 message Channel {
-  bytes channel_id = 1;               // 32 字节频道标识
+  bytes channel_id = 1;               // 32 字节频道标识（keyed 频道 = home 持私钥的公钥）
   string name = 2;
-  bytes owner = 3;                    // 创建者（可定发布白名单 / 事后审核）
+  bytes owner = 3;                    // 创建者
   int64 created_at = 4;
   string topic = 5;                   // 频道简介/主题
   string avatar_url = 6;              // 频道头像："b3:<hash>" 或内联 data:URI
-  bytes home_node = 7;                // 频道创建者的家节点（头像 blob 所在；跨节点解析用）
+  bytes home_node = 7;                // 频道归属（定序器）节点；头像 blob 所在、跨节点解析用
+  PubPolicy pub_policy = 8;           // 发布策略（默认 OPEN=0 保向后兼容；新建频道设 OWNER_ONLY）
+  bool keyed = 9;                     // true=channel_id 为真实公钥、home 签名可验；false=legacy 随机 id（降级信任）
+  uint64 earliest_seq = 10;           // home 日志裁剪后仍保有的最小 seq（晚加入者据此 clamp，低于此的历史不可得）
 }
-// 频道消息（gossip 载荷 + 转发给订阅者）。sender 为发布者；seq 单调用于回填游标/去重。
+// 频道消息（home 定序后的权威广播 + 转发给订阅者）。seq 为频道级全局单调；home_sig 由 home 签。
 message ChannelMsg {
   bytes channel_id = 1;
-  bytes sender = 2;
-  uint64 seq = 3;
-  int64 ts = 4;
+  bytes sender = 2;                   // 原发布者
+  uint64 seq = 3;                     // 频道级全局单调序号（home 分配；排序/去重/回填游标唯一依据）
+  int64 ts = 4;                       // 发布者本地时间戳（仅展示；排序以 seq 为准，防时钟偏移）
   string body = 5;
+  bytes nonce = 6;                    // 发布者生成的幂等 nonce（publisher 据此匹配自己的 sequenced 消息、停重传）
+  bytes home_sig = 7;                 // home 对消息规范字节的签名（订阅者强制验：防伪造帖抢占 seq 槽）
+  bytes sender_sig = 8;               // 发布者对 PubReq 的签名（审计用；v1 订阅者不重验）
 }
-// 频道 gossip 载荷信封：消息 or 元信息（名称/简介/头像）广播，令订阅者收敛频道展示信息。
+// 发布意图（未定序）：发布节点广播到频道主题，由 home 验权+分配 seq+签名后回广播 ChannelMsg。
+message ChannelPubReq {
+  bytes channel_id = 1;
+  bytes sender = 2;
+  int64 ts = 3;
+  string body = 4;
+  bytes nonce = 5;                    // 幂等键：home 的 CHANNEL_INTAKE 按 (cid,sender,nonce) 去重定序
+  bytes sender_sig = 6;               // 发布者签名（home 验发布者身份）
+}
+// 发布被拒（home 签名的负 ack）：publisher 立即清 outbox + UI 提示，不再 24h 空等。
+message ChannelPubReject {
+  bytes channel_id = 1;
+  bytes sender = 2;
+  bytes nonce = 3;
+  string reason = 4;                  // 如 "owner_only" / "bad_sig"
+  bytes home_sig = 5;                 // home 签（publisher 仅认对 channel_id 可验的拒绝）
+}
+// 频道存活心跳：home 周期在频道主题广播，广告当前 seq 水位 + 定序能力（能力协商/混版回退）。
+message ChannelLive {
+  bytes channel_id = 1;
+  uint64 max_seq = 2;                 // 当前最高 seq（订阅者据此发现断层/落后 → 触发回填）
+  uint64 earliest_seq = 3;            // 日志下限（回填 clamp 依据）
+  bool supports_sequencing = 4;       // 本 home 支持定序器（缺=老节点 → publisher 回退 legacy 直广播）
+}
+// 频道 gossip 载荷信封：消息/元信息/发布意图/回填/拒绝/心跳。老节点只认 msg|meta，其余忽略（向后兼容）。
 message ChannelGram {
   oneof kind {
-    ChannelMsg msg = 1;               // 一条频道消息
-    Channel meta = 2;                 // 频道元信息广播（owner/已知者周期重播，晚订阅者据此补全）
+    ChannelMsg msg = 1;               // 一条（已定序）频道消息
+    Channel meta = 2;                 // 频道元信息广播（home/已知者周期重播，晚订阅者据此补全）
+    ChannelPubReq pub_req = 3;        // 发布意图（→ home 定序）
+    ChannelBackfillReq backfill_req = 4; // 回填请求（→ home 应答 Log）
+    ChannelLog log = 5;               // 回填应答（分页）
+    ChannelPubReject reject = 6;      // 发布被拒（home → publisher）
+    ChannelLive live = 7;             // home 存活/水位心跳
   }
 }
-message ChannelOp   { bytes channel_id = 1; string name = 2; string topic = 3; string avatar_url = 4; } // create/sub/set_meta 参数
+message ChannelOp   { bytes channel_id = 1; string name = 2; string topic = 3; string avatar_url = 4; bytes secret = 5; } // create/sub/set_meta 参数；create 时 secret=频道私钥(32)，home 存 CHANNEL_SECRETS 供定序器签名，channel_id 须=其公钥
 message ChannelPub  { bytes channel_id = 1; string body = 2; }                    // publish 参数
 message ChannelList { repeated Channel channels = 1; }
-message ChannelBackfillReq { bytes channel_id = 1; uint64 since_seq = 2; }
-message ChannelLog  { repeated ChannelMsg msgs = 1; }
+message ChannelBackfillReq { bytes channel_id = 1; uint64 since_seq = 2; uint32 limit = 3; } // limit=0 用服务端默认
+message ChannelLog  {
+  repeated ChannelMsg msgs = 1;
+  uint64 earliest_seq = 2;            // home 日志下限（client clamp contiguous，防无限回填已裁剪的历史）
+  uint64 next_seq = 3;               // 下一页游标（more=true 时据此续拉）
+  bool more = 4;                      // 是否还有更多（分页未尽）
+}
 
 // Job / 任务（算力网：训练、推理、批处理）
 message ResourceReq { map<string, string> selectors = 1; }   // model / gpu / region / ...

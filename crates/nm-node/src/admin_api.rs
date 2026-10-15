@@ -156,6 +156,7 @@ impl Node {
             ("presence", self.presence.len()),
             ("outbox_pending", self.outbox_pending()),
             ("group_outbox_pending", self.group_outbox_pending()),
+            ("channel_outbox_pending", self.channel_outbox_pending()),
         ]
     }
 
@@ -176,6 +177,16 @@ impl Node {
         self.store
             .as_ref()
             .and_then(|s| s.group_outbox_all().ok())
+            .map(|v| v.len())
+            .unwrap_or(0)
+    }
+
+    /// 频道发布待确认发件箱条目数（publisher 侧，远端 home）。稳态近 0；
+    /// 持续偏高 = 某频道 home 长期不可达。测试据此断言「远端发布后非空 → 收到 Msg/Reject 后清零」。
+    pub fn channel_outbox_pending(&self) -> usize {
+        self.store
+            .as_ref()
+            .and_then(|s| s.channel_outbox_all().ok())
             .map(|v| v.len())
             .unwrap_or(0)
     }

@@ -140,6 +140,8 @@ struct Ctx {
     pending_fwd: Arc<std::sync::Mutex<PendingForwardQueue>>,
     // 优雅关闭：在途投递任务追踪器（投递类 spawn 走它，关闭时 drain）。与 Node.tracker 同一实例。
     tracker: tokio_util::task::TaskTracker,
+    // 优雅关闭信号（与 Node.shutdown 同一实例）：长驻任务（如频道收播泵）据此协作退出。
+    shutdown: tokio_util::sync::CancellationToken,
     // 连接限流（P0）：全局并发连接上限 + 单公钥新建连接速率门。accept 热路径读。
     max_connections: usize,
     conn_gate: Arc<ConnGate>,

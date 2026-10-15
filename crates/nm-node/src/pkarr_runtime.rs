@@ -62,4 +62,28 @@ impl Node {
         };
         pkarr_rec::parse(&gid_arr, &payload).unwrap_or_default()
     }
+
+    /// P4：频道发现——home 把本节点（该频道定序器）签名为该频道的 seed，PUT 到 pkarr relay。
+    /// 复用 `pkarr_rec` 编解码（按频道公钥签名；channel_id 即公钥、私钥在 CHANNEL_SECRETS）。
+    /// 无 pkarr / 非 home（无频道私钥）则跳过。晚加入者据频道 id 解析到 seed 即可入网回填历史。
+    pub async fn pkarr_publish_channel(&self, channel_id: &[u8]) {
+        let Some(url) = self.pkarr_endpoint() else { return };
+        let Some(store) = &self.store else { return };
+        let Ok(Some(secret_bytes)) = store.channel_secret(channel_id) else { return };
+        let Ok(sk_arr) = <[u8; 32]>::try_from(secret_bytes.as_slice()) else { return };
+        let sk = nm_transport::SecretKey::from_bytes(&sk_arr);
+        let seeds: Vec<[u8; 32]> = vec![self.ep.id_bytes()]; // home 节点为 seed（定序器=权威源）
+        let Ok(payload) = pkarr_rec::build(&sk, &seeds) else { return };
+        let endpoint = format!("{}/{}", url.trim_end_matches('/'), sk.public().to_z32());
+        match self.http.put(&endpoint).body(payload).send().await {
+            Ok(r) if r.status().is_success() => tracing::debug!("pkarr channel record published"),
+            Ok(r) => tracing::debug!(status = %r.status(), "pkarr channel publish non-success"),
+            Err(e) => tracing::debug!("pkarr channel publish failed: {e}"),
+        }
+    }
+
+    /// P4：据频道公钥从 pkarr relay 解析 seed 节点集合（GET + 验签）。无 pkarr / 解析失败则空。
+    pub async fn pkarr_resolve_channel(&self, channel_id: &[u8]) -> Vec<[u8; 32]> {
+        self.pkarr_resolve_group(channel_id).await // 同一 relay/编解码；公钥命名空间天然隔离群与频道
+    }
 }

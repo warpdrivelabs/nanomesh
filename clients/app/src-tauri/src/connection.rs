@@ -92,15 +92,24 @@ pub(crate) async fn finish_session(
                 ),
                 None => (String::new(), String::new()),
             };
+            let is_channel = matches!(gram.kind(), nm_proto::GramKind::ChannelPublish);
+            // 频道消息：seq 是 home 定序器分配的全局权威序号 → 用 "<cid>:<seq>" 做稳定 id，
+            // 令实时广播与 backfill 回填指向同一条（修「同一条消息两套 id → SQLite 重复显示」的 bug）。
+            // 私聊/群：gram_id 是发送方每连接从 1 起的计数，重连会重复 → 拼发送方+时间戳才唯一。
+            let msg_id = if is_channel {
+                format!("{}:{}", hex(&gram.receiver), gram.gram_id)
+            } else {
+                format!("{}-{}-{}", hex(&gram.sender), gram.timestamp_ms, gram.gram_id)
+            };
             let ev = json!({
                 "type": "message",
                 "msg": {
-                    // gram_id 是发送方每个连接从 1 起的计数，重连会重复；拼上发送方与时间戳才唯一
-                    "id": format!("{}-{}-{}", hex(&gram.sender), gram.timestamp_ms, gram.gram_id),
+                    "id": msg_id,
                     "from": hex(&gram.sender),
                     "to": hex(&gram.receiver),                 // 群消息=群id；频道=频道id；私聊=本人id
                     "group": matches!(gram.kind(), nm_proto::GramKind::GroupMessage),
-                    "channel": matches!(gram.kind(), nm_proto::GramKind::ChannelPublish),
+                    "channel": is_channel,
+                    "seq": gram.gram_id,                       // 频道：全局 seq（排序/回填游标）；其它忽略
                     "typeUrl": type_url,
                     "body": body,
                     "ts": gram.timestamp_ms,

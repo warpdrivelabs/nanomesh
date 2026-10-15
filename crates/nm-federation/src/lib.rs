@@ -39,6 +39,14 @@ pub fn names_topic_key(domain: &str) -> [u8; 32] {
     topic_key(b"nmspace-names:", domain.as_bytes())
 }
 
+/// 频道 → gossip 主题键：`blake3("nmspace-channel:" ++ channel_id)`（P4）。
+/// 订阅该频道的节点 join → 频道消息/定序/回填/心跳只在订阅者间扩散。
+/// 注：取代旧 `channels.rs` 直连 `ChannelHub` 的 `blake3(blake3("nmspace:channel:"+hex))` 方案，
+/// 统一纳入 Federation 自愈泵；换 topic 会重排叠加网，Phase 1 一次性切换。
+pub fn channel_topic_key(channel_id: &[u8]) -> [u8; 32] {
+    topic_key(b"nmspace-channel:", channel_id)
+}
+
 fn topic_key(prefix: &[u8], id: &[u8]) -> [u8; 32] {
     let mut buf = Vec::with_capacity(prefix.len() + id.len());
     buf.extend_from_slice(prefix);
@@ -123,6 +131,11 @@ impl Federation {
         self.join_topic(names_topic_key(domain), domain.as_bytes().to_vec(), bootstrap).await
     }
 
+    /// P4：加入某频道主题（**幂等**）。订阅该频道的节点 join 后收频道消息/定序/回填/心跳。
+    pub async fn join_channel(&self, channel_id: &[u8], bootstrap: Vec<[u8; 32]>) -> Result<(), FederationError> {
+        self.join_topic(channel_topic_key(channel_id), channel_id.to_vec(), bootstrap).await
+    }
+
     /// 加入某主题并接入其叠加网（**幂等**）。`label` 随每条收播装入 [`FedMsg::group`] 供宿主路由。
     ///
     /// `bootstrap` 为已知对端节点公钥（群= `home_node` ∪ 已知成员 home；收件箱= 收件人 home；F2 起 DHT 兜底）。
@@ -185,6 +198,11 @@ impl Federation {
         self.subs.lock().await.remove(&inbox_topic_key(account));
     }
 
+    /// P4：离开某频道主题（幂等）。本节点无账号订阅该频道时调用，停泵退出叠加网。
+    pub async fn leave_channel(&self, channel_id: &[u8]) {
+        self.subs.lock().await.remove(&channel_topic_key(channel_id));
+    }
+
     /// 向某群主题广播字节（须先 [`Federation::join_group`]，否则 [`FederationError::NotJoined`]）。
     pub async fn publish(&self, gid: &[u8], payload: Vec<u8>) -> Result<(), FederationError> {
         self.publish_topic(group_topic_key(gid), payload).await
@@ -209,6 +227,21 @@ impl Federation {
     /// F4：向某域名命名主题广播字节（须先 [`Federation::join_names`]）。`NameRecord` 复制用。
     pub async fn publish_names(&self, domain: &str, payload: Vec<u8>) -> Result<(), FederationError> {
         self.publish_topic(names_topic_key(domain), payload).await
+    }
+
+    /// P4：向某频道主题广播字节（须先 [`Federation::join_channel`]）。频道消息/定序/回填/心跳用。
+    pub async fn publish_channel(&self, channel_id: &[u8], payload: Vec<u8>) -> Result<(), FederationError> {
+        self.publish_topic(channel_topic_key(channel_id), payload).await
+    }
+
+    /// P4：某频道主题当前的直接邻居数（0 = 叠加网未成型，publish 会被丢弃）。
+    pub async fn channel_neighbors(&self, channel_id: &[u8]) -> usize {
+        self.subs
+            .lock()
+            .await
+            .get(&channel_topic_key(channel_id))
+            .map(|s| s.neighbors.load(Ordering::Relaxed))
+            .unwrap_or(0)
     }
 
     async fn publish_topic(&self, key: [u8; 32], payload: Vec<u8>) -> Result<(), FederationError> {
