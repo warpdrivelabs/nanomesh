@@ -254,11 +254,12 @@ pub(crate) async fn send_group(
     state: State<'_, AppState>,
     group_id: String,
     text: String,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let gid = parse_id(&group_id)?;
     send_with_retry(&app, &state, move |s| {
         let text = text.clone();
-        async move { s.send_group(gid, &text).await.map(|_| ()) }
+        // 返回 node ack 的 ref_gram_id = 本条群消息 gram_id，供前端标记单勾✓（消息已达 home node）。
+        async move { s.send_group(gid, &text).await.map(|ack| ack.ref_gram_id.unwrap_or(0)) }
     })
     .await
 }

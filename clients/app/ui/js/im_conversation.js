@@ -121,7 +121,10 @@ function msgHtml(m, showSender, cont) {
     : (window.entityName ? entityName(m.from) : (m.from || "").slice(0, 6) + "…");
   const who = mine ? (window.t ? t("conv.me") : "我") : named;
   const time = msgClock(m.ts);
-  const ticks = (mine && !m.group && !m.channel) ? renderTicks(m.status) : "";
+  // 私聊：完整对号(转圈→单勾→双勾)；群聊：仅单勾(到达 home node，无逐成员已读聚合，status>1 钳回单勾)；频道：不显示。
+  const ticks = (mine && !m.channel)
+    ? renderTicks((m.group && m.status > 1) ? 1 : m.status)
+    : "";
   // 对号跟在时间后面：有 sender 行则放 sender 的时间后；否则放 stamp(气泡下方时间)后。
   const sender = (showSender && !cont)
     ? `<span class="im-sender">${escapeHtml(who)}${time ? `<span class="im-time">${time}</span>` : ""}${ticks}</span>`
@@ -228,20 +231,36 @@ function paintVirtual(stick) {
   if (keepBottom) log.scrollTop = log.scrollHeight;
   viewPainting = painting;
 }
+// 发送失败：把乐观插入的那条消息标记为差号✗(status=-1)并持久化，不再一直转圈。
+function failOptimistic(localId) {
+  if (!localId) return;
+  const row = (VIEW.id === ACTIVE) && VIEW.rows.find((r) => r.id === localId);
+  if (row) { row.status = -1; paintVirtual(false); }
+  if (window.ChatLog && ChatLog.mark) ChatLog.mark(ACTIVE, { id: localId }, -1);
+}
 async function sendMsg(text) {
   text = (text || "").trim();
   if (!text || !ACTIVE) return;
   const isGroup = !!(window.Groups && Groups.byId(ACTIVE));
   const isChannel = !isGroup && !!(window.Channels && Channels.byId(ACTIVE));
+  let localId = null;
   try {
     if (isChannel) {
       await NM.inv("channel_publish", { channelId: ACTIVE, body: text }); // 节点会回投给本地订阅者(含自己)，不做乐观插入以免重复
     } else if (isGroup) {
-      await NM.inv("send_group", { groupId: ACTIVE, text });
-      pushMsg(ACTIVE, { id: "l" + Date.now(), from: MY_ID, body: text, ts: Date.now(), group: true, to: ACTIVE });
+      // 乐观插入(status=0 发送中)；send_group 返回原 gram_id → 升单勾✓(消息已达 home node)。
+      // 群聊只到单勾(无逐成员已读聚合)；接收方不对群消息回 client-receipt，故不会升双勾。
+      localId = "l" + Date.now();
+      pushMsg(ACTIVE, { id: localId, from: MY_ID, body: text, ts: Date.now(), group: true, to: ACTIVE, status: 0 });
+      const g = await NM.inv("send_group", { groupId: ACTIVE, text });
+      if (g) {
+        const row = (VIEW.id === ACTIVE) && VIEW.rows.find((r) => r.id === localId);
+        if (row) { row.gramId = g; row.status = 1; paintVirtual(false); }
+        if (window.ChatLog && ChatLog.mark) ChatLog.mark(ACTIVE, { id: localId, gramId: g }, 1);
+      }
     } else {
       // 乐观插入(status=0 发送中)；send_to 返回原 gram_id → 升单勾✓并写 gramId(后续双勾按它匹配)。
-      const localId = "l" + Date.now();
+      localId = "l" + Date.now();
       pushMsg(ACTIVE, { id: localId, from: MY_ID, body: text, ts: Date.now(), to: ACTIVE, status: 0 });
       const g = await NM.inv("send_to", { target: ACTIVE, text });
       if (g) {
@@ -251,6 +270,7 @@ async function sendMsg(text) {
       }
     }
   } catch (e) {
+    failOptimistic(localId); // 出错 → 差号✗(私聊/群聊同处理)
     if (window.toast) toast("发送失败：" + (e && e.message ? e.message : e));
   }
 }
@@ -259,25 +279,27 @@ async function sendRich(media) {
   if (!ACTIVE || !window.Composer) return;
   const isGroup = !!(window.Groups && Groups.byId(ACTIVE));
   const isChannel = !isGroup && !!(window.Channels && Channels.byId(ACTIVE));
+  let localId = null;
   try {
     if (isChannel) {
       await NM.inv("channel_publish", { channelId: ACTIVE, body: Composer.channelBody(media) });
     } else {
-      // 与文本一致：乐观插入(私聊 status=0 发送中)；send_rich 返回原 gram_id → 升单勾✓。
-      const localId = "l" + Date.now();
+      // 与文本一致：乐观插入(status=0 发送中)；send_rich 返回原 gram_id → 升单勾✓(私聊/群聊同处理)。
+      localId = "l" + Date.now();
       const encoded = Composer.encode(media);
       pushMsg(ACTIVE, {
         id: localId, from: MY_ID, to: ACTIVE, ts: Date.now(), group: isGroup,
-        typeUrl: "nmspace.v1/chat", body: encoded, status: isGroup ? undefined : 0,
+        typeUrl: "nmspace.v1/chat", body: encoded, status: 0,
       });
       const g = await NM.inv("send_rich", { target: ACTIVE, body: encoded, group: isGroup });
-      if (g && !isGroup) {
+      if (g) {
         const row = (VIEW.id === ACTIVE) && VIEW.rows.find((r) => r.id === localId);
         if (row) { row.gramId = g; row.status = 1; paintVirtual(false); }
         if (window.ChatLog && ChatLog.mark) ChatLog.mark(ACTIVE, { id: localId, gramId: g }, 1);
       }
     }
   } catch (e) {
+    failOptimistic(localId); // 出错 → 差号✗
     if (window.toast) toast("发送失败：" + (e && e.message ? e.message : e));
   }
 }
