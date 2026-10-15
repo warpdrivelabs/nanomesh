@@ -78,6 +78,7 @@
         await renderChannelsList();
         if (window.openChannel) openChannel(cid);
         if (window.toast) toast("频道已创建");
+        shareChannel(cid); // 创建后立即弹出邀请链接，方便 owner 分享（否则别人无从加入）
       },
     });
   }
@@ -118,6 +119,29 @@
     const link = buildInvite(cid, c && c.name ? c.name : "");
     try { await navigator.clipboard.writeText(link); if (window.toast) toast("邀请链接已复制"); }
     catch (_) { if (window.toast) toast("复制失败"); }
+  }
+
+  // 分享频道弹窗：展示邀请链接（只读可选中）+ 一键复制。对方粘贴到「订阅」即可加入。
+  function shareChannel(cid) {
+    const c = byId(cid);
+    const link = buildInvite(cid, c && c.name ? c.name : "");
+    const m = document.createElement("div"); m.className = "sec-overlay on";
+    m.innerHTML = `<div class="sec-box"><div class="sec-head">分享频道<button class="sec-x">${nmIcon("close")}</button></div>
+      <div class="sec-body"><div class="sec-sec">
+        <div class="sec-hint">把邀请链接发给好友，对方在「频道 → 订阅」粘贴即可加入：</div>
+        <input class="sec-input sh-link" readonly value="${escapeHtml(link)}">
+        <div class="sec-actions"><button class="ns-btn sh-c">关闭</button><button class="ns-btn ns-primary sh-ok">复制链接</button></div>
+      </div></div></div>`;
+    document.body.appendChild(m);
+    const inp = m.querySelector(".sh-link"); inp.focus(); inp.select();
+    const done = () => m.remove();
+    m.querySelector(".sec-x").onclick = done;
+    m.querySelector(".sh-c").onclick = done;
+    m.querySelector(".sh-ok").onclick = async () => {
+      try { await navigator.clipboard.writeText(link); if (window.toast) toast("邀请链接已复制"); } catch (_) {}
+      done();
+    };
+    m.addEventListener("click", (e) => { if (e.target === m) done(); });
   }
 
   async function subscribeByPaste() {
@@ -177,6 +201,6 @@
     const se = document.getElementById("chn-search"); if (se) se.addEventListener("input", paintChannelsList);
   })();
 
-  window.Channels = { refresh, hydrate, byId, isOwner, editChannel, list: () => CHANNELS, primeChannels, syncSelection, copyInvite, buildInvite };
+  window.Channels = { refresh, hydrate, byId, isOwner, editChannel, list: () => CHANNELS, primeChannels, syncSelection, copyInvite, buildInvite, shareChannel };
   window.renderChannelsList = renderChannelsList;
 })();

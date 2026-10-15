@@ -219,7 +219,7 @@ async fn run_channel(
             let snap = meta.lock().unwrap().clone();
             if !snap.name.is_empty() || !snap.topic.is_empty() || !snap.avatar_url.is_empty() {
                 let env = ChannelGram { kind: Some(Kind::Meta(snap)) };
-                let _ = topic.publish(env.encode_to_vec()).await;
+                publish_channel_gram(&ctx, &topic, &env).await;
             }
         }
         // home 水位心跳：广告 (max_seq, earliest_seq, supports_sequencing=keyed)，订阅者据此发现落后 → 回填。
@@ -235,7 +235,7 @@ async fn run_channel(
                     supports_sequencing: keyed,
                 };
                 let env = ChannelGram { kind: Some(Kind::Live(live)) };
-                let _ = topic.publish(env.encode_to_vec()).await;
+                publish_channel_gram(&ctx, &topic, &env).await;
             }
         }
         // publisher outbox 重传：到期未确认的 PubReq 重广播 + 指数退避 + 24h 放弃。
@@ -250,14 +250,14 @@ async fn run_channel(
             out = pub_rx.recv() => {
                 match out {
                     Some(ChannelOut::Sequenced(m)) => {
-                        // home 本地产出的已定序消息：本地投递 + 广播 Msg（已落库于 sequence_pubreq）。
+                        // home 本地产出的已定序消息：本地投递 + 双写广播 Msg（已落库于 sequence_pubreq）。
                         channel_deliver(&ctx, &m, &subs).await;
                         let env = ChannelGram { kind: Some(Kind::Msg(m)) };
-                        let _ = topic.publish(env.encode_to_vec()).await;
+                        publish_channel_gram(&ctx, &topic, &env).await;
                     }
                     Some(ChannelOut::Req(req)) => {
                         // 远端 home：持久入 CHANNEL_OUTBOX（重传直到看到自己的 sequenced Msg / 收 Reject / 24h 放弃），
-                        // 再广播发布意图到频道主题，由 home 定序回广播 Msg。
+                        // 再双写广播发布意图（火管兜底：home 无需频道 overlay 即可收到并定序）。
                         if let Some(s) = &ctx.store {
                             let now = now_ms();
                             let _ = s.channel_outbox_put(
@@ -266,11 +266,11 @@ async fn run_channel(
                             );
                         }
                         let env = ChannelGram { kind: Some(Kind::PubReq(req)) };
-                        let _ = topic.publish(env.encode_to_vec()).await;
+                        publish_channel_gram(&ctx, &topic, &env).await;
                     }
                     Some(ChannelOut::Meta(c)) => {
                         let env = ChannelGram { kind: Some(Kind::Meta(c)) };
-                        let _ = topic.publish(env.encode_to_vec()).await;
+                        publish_channel_gram(&ctx, &topic, &env).await;
                         last_meta_bcast = std::time::Instant::now();
                     }
                     None => break, // 所有 pub_tx 已 drop（entry 移除）→ 收摊
@@ -295,13 +295,13 @@ async fn run_channel(
                                         Ok(m) => {
                                             channel_deliver(&ctx, &m, &subs).await;
                                             let env = ChannelGram { kind: Some(Kind::Msg(m)) };
-                                            let _ = topic.publish(env.encode_to_vec()).await;
+                                            publish_channel_gram(&ctx, &topic, &env).await;
                                         }
                                         Err(reason) => {
                                             if let Some(sk) = channel_home_sk(&ctx, &channel_id) {
                                                 let rej = build_pub_reject(&sk, &req, &reason);
                                                 let env = ChannelGram { kind: Some(Kind::Reject(rej)) };
-                                                let _ = topic.publish(env.encode_to_vec()).await;
+                                                publish_channel_gram(&ctx, &topic, &env).await;
                                             }
                                         }
                                     }
@@ -321,7 +321,7 @@ async fn run_channel(
                                 if is_channel_home(&ctx, &channel_id) {
                                     if let Some(log) = build_backfill_log(&ctx, &req) {
                                         let env = ChannelGram { kind: Some(Kind::Log(log)) };
-                                        let _ = topic.publish(env.encode_to_vec()).await;
+                                        publish_channel_gram(&ctx, &topic, &env).await;
                                     }
                                 }
                             }
@@ -500,7 +500,7 @@ async fn maybe_backfill(ctx: &Ctx, channel_id: &[u8], live: &nm_proto::ChannelLi
     }
     let req = ChannelBackfillReq { channel_id: channel_id.to_vec(), since_seq: contiguous, limit: CHANNEL_BACKFILL_LIMIT as u32 };
     let env = ChannelGram { kind: Some(nm_proto::pb::channel_gram::Kind::BackfillReq(req)) };
-    let _ = topic.publish(env.encode_to_vec()).await;
+    publish_channel_gram(ctx, topic, &env).await;
     tracing::debug!(contiguous, home_max = live.max_seq, "channel backfill requested (gap below home water-mark)");
 }
 
@@ -521,10 +521,10 @@ async fn retransmit_outbox(ctx: &Ctx, channel_id: &[u8], topic: &mut nm_gossip::
         if now < row.next_due_ms {
             continue; // 未到重试点
         }
-        // 重广播 PubReq（home 侧 intake 幂等：重复 nonce 不重分配 seq，只重广播已有 Msg）。
+        // 重广播 PubReq（火管兜底：home 无需频道 overlay；intake 幂等：重复 nonce 不重分配 seq）。
         if let Ok(req) = ChannelPubReq::decode(row.pubreq_bytes.as_slice()) {
             let env = ChannelGram { kind: Some(nm_proto::pb::channel_gram::Kind::PubReq(req)) };
-            let _ = topic.publish(env.encode_to_vec()).await;
+            publish_channel_gram(ctx, topic, &env).await;
         }
         let r1 = row.retries.saturating_add(1);
         let backoff = crate::OUTBOX_BACKOFF_MS[(r1 as usize).min(crate::OUTBOX_BACKOFF_MS.len() - 1)];
@@ -550,6 +550,125 @@ fn channel_gram(m: &ChannelMsg) -> Gram {
         crc: Vec::new(),
     }
 }
+
+/// 发布一条 ChannelGram：**双写**——频道专属主题（低延迟、规模化收敛）+ 联邦火管（全节点可见兜底）。
+/// 火管兜底是跨节点订阅者能收到元信息/消息的关键：订阅者的 home 无条件订阅火管，无需频道 overlay 先成型。
+/// 对齐群 announce 的全网可见路径。火管载荷 = GroupGossip{origin=本节点, channel=cg}。
+async fn publish_channel_gram(ctx: &Ctx, topic: &nm_gossip::ChannelTopic, env: &ChannelGram) {
+    let bytes = env.encode_to_vec();
+    let _ = topic.publish(bytes).await; // 频道专属主题
+    let gg = nm_proto::GroupGossip {
+        origin: ctx.node_id.to_vec(),
+        body: Some(nm_proto::pb::group_gossip::Body::Channel(env.clone())),
+    };
+    let _ = ctx.group_pub.send(gg.encode_to_vec()); // 联邦火管（全节点）
+}
+
+/// 处理从**联邦火管**收到的频道信封（`on_group_gossip` 的 Channel 分支转入）。
+/// 只需 `ctx`（subs/meta 从 ctx.channels 重新取）。本节点可能并未订阅该频道（火管全网可见）→
+/// 仅在 home（应答 PubReq/BackfillReq）或已订阅（ingest Msg / merge Meta）时处理，否则忽略。
+pub(crate) async fn handle_channel_firehose(ctx: &Ctx, cg: &ChannelGram) {
+    use nm_proto::pb::channel_gram::Kind;
+    let Some(kind) = &cg.kind else { return };
+    let cid: &[u8] = match kind {
+        Kind::Msg(m) => &m.channel_id,
+        Kind::Meta(c) => &c.channel_id,
+        Kind::PubReq(r) => &r.channel_id,
+        Kind::Reject(r) => &r.channel_id,
+        Kind::BackfillReq(r) => &r.channel_id,
+        Kind::Live(l) => &l.channel_id,
+        Kind::Log(log) => {
+            // 回填应答经火管广播：订阅者 ingest 其消息（去重幂等）。取首条的 channel_id 作归属。
+            if let Some(first) = log.msgs.first() { &first.channel_id } else { return }
+        }
+    };
+    let home = is_channel_home(ctx, cid);
+    let subscribed = ctx.channels.contains_key(cid);
+    match kind {
+        Kind::PubReq(req) if home => {
+            // home 经火管收到发布意图 → 定序 + 经火管回广播 Msg（也会被频道专属主题的本地任务接住）。
+            match sequence_pubreq(ctx, req) {
+                Ok(m) => {
+                    if let Some(e) = ctx.channels.get(cid) {
+                        channel_deliver(ctx, &m, &e.subs).await;
+                    }
+                    broadcast_channel_firehose(ctx, &ChannelGram { kind: Some(Kind::Msg(m)) });
+                }
+                Err(reason) => {
+                    if let Some(sk) = channel_home_sk(ctx, cid) {
+                        let rej = build_pub_reject(&sk, req, &reason);
+                        broadcast_channel_firehose(ctx, &ChannelGram { kind: Some(Kind::Reject(rej)) });
+                    }
+                }
+            }
+        }
+        Kind::BackfillReq(req) if home => {
+            if let Some(log) = build_backfill_log(ctx, req) {
+                broadcast_channel_firehose(ctx, &ChannelGram { kind: Some(Kind::Log(log)) });
+            }
+        }
+        Kind::Msg(m) if subscribed => {
+            if let Some(e) = ctx.channels.get(cid) {
+                let subs = e.subs.clone();
+                drop(e);
+                channel_ingest(ctx, m, &subs).await;
+            }
+            if let Some(s) = &ctx.store {
+                let _ = s.channel_outbox_del(&m.channel_id, &m.sender, &m.nonce); // publisher 侧清 outbox
+            }
+        }
+        Kind::Reject(rej) if subscribed => {
+            if verify_pub_reject(rej) {
+                if let Some(s) = &ctx.store {
+                    let _ = s.channel_outbox_del(&rej.channel_id, &rej.sender, &rej.nonce);
+                }
+            }
+        }
+        Kind::Meta(c) if subscribed => {
+            if let Some(e) = ctx.channels.get(cid) {
+                merge_channel_meta(ctx, &e.meta, c);
+            }
+        }
+        Kind::Log(log) if subscribed => {
+            // 回填应答：逐条 ingest（验签+去重+投递）。
+            let subs = ctx.channels.get(cid).map(|e| e.subs.clone());
+            if let Some(subs) = subs {
+                for m in &log.msgs {
+                    if m.channel_id == cid {
+                        channel_ingest(ctx, m, &subs).await;
+                    }
+                }
+            }
+        }
+        // Live 经火管到达：仅在已订阅且需要时触发回填（回填请求走火管 BackfillReq）。
+        Kind::Live(live) if subscribed => {
+            maybe_backfill_firehose(ctx, cid, live).await;
+        }
+        _ => {}
+    }
+}
+
+/// 仅经火管广播一条 ChannelGram（home 对火管 PubReq/BackfillReq 的应答走此路——本节点可能无频道专属 topic 句柄）。
+fn broadcast_channel_firehose(ctx: &Ctx, env: &ChannelGram) {
+    let gg = nm_proto::GroupGossip {
+        origin: ctx.node_id.to_vec(),
+        body: Some(nm_proto::pb::group_gossip::Body::Channel(env.clone())),
+    };
+    let _ = ctx.group_pub.send(gg.encode_to_vec());
+}
+
+/// 火管版回填触发：订阅者据 home 水位心跳判断落后 → 经火管广播 BackfillReq（home 经火管应答 Log）。
+async fn maybe_backfill_firehose(ctx: &Ctx, channel_id: &[u8], live: &nm_proto::ChannelLive) {
+    let Some(s) = &ctx.store else { return };
+    let floor = live.earliest_seq.saturating_sub(1);
+    let contiguous = s.channel_log_contiguous_upto(channel_id, floor).unwrap_or(floor);
+    if contiguous >= live.max_seq {
+        return;
+    }
+    let req = ChannelBackfillReq { channel_id: channel_id.to_vec(), since_seq: contiguous, limit: CHANNEL_BACKFILL_LIMIT as u32 };
+    broadcast_channel_firehose(ctx, &ChannelGram { kind: Some(nm_proto::pb::channel_gram::Kind::BackfillReq(req)) });
+}
+
 
 pub(crate) async fn channel_create(ctx: &Ctx, caller: &[u8], _rid: &[u8], cmd: &Command) -> (bool, Option<Any>, String) {
     match cmd.params.as_ref().and_then(|p| ChannelOp::decode(p.value.as_slice()).ok()) {

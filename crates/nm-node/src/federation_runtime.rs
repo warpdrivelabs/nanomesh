@@ -299,6 +299,11 @@ impl Node {
                     self.ack_nodes.remove(&origin);
                 }
             }
+            Some(nm_proto::pb::group_gossip::Body::Channel(cg)) => {
+                // P4 频道火管兜底：全节点无条件收到频道 Meta/定序消息/发布意图/回填，
+                // 令跨节点订阅者的 home 无需频道专属 overlay 先成型即可处理（根治「订阅后收不到名称/图标/消息」）。
+                crate::channels::handle_channel_firehose(&ctx, &cg).await;
+            }
             None => {}
         }
     }

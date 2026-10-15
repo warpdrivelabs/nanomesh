@@ -40,6 +40,10 @@ async fn channel_cross_node_delivery_and_backfill() {
     for n in [a.clone(), b.clone()] {
         tokio::spawn(async move { let _ = n.serve().await; });
     }
+    // 每个节点启动联邦火管（与生产一致）——频道 Meta/消息经火管全节点兜底，
+    // 跨节点订阅者的 home 无需频道专属 overlay 先成型即可收到（根治「订阅后收不到名称/图标/消息」）。
+    a.clone().spawn_group_sync("nmspace".into());
+    b.clone().spawn_group_sync("nmspace".into());
 
     let (cid, sk) = new_channel();
     // A = owner + home（建 keyed 频道，持私钥 → 定序器）。
@@ -52,10 +56,11 @@ async fn channel_cross_node_delivery_and_backfill() {
     owner.channel_publish(cid, "历史2").await.expect("pub h2");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // B 订阅（另一节点）。
+    // B 订阅（另一节点）——用**空名称**模拟「粘贴裸 id 订阅」的真实场景：
+    // 名称/图标只能靠 home 的 Meta 经火管传来（正是部署复现的失败点）。
     let (_bc, mut bob) = online([64u8; 32], &b_addr).await;
     bob.register_as::<kinds::Person>(&PersonProfile::default(), "Bob", HashMap::new()).await.unwrap();
-    bob.channel_sub(cid, "公告频道").await.expect("B sub");
+    bob.channel_sub(cid, "").await.expect("B sub");
 
     // A 持续再发（实时路径）+ Live 心跳驱动 B 回填历史。
     let send = tokio::spawn(async move {
@@ -88,4 +93,18 @@ async fn channel_cross_node_delivery_and_backfill() {
         }
     }).await.unwrap_or(false);
     assert!(backfilled, "B 未补齐订阅前的历史（回填闭环断裂）");
+
+    // 根治点验证：B 虽以空名称订阅，仍应经火管收到 home 的 Meta → channel_list 显示真实频道名。
+    // （部署复现的失败：订阅后无名称/图标，正是 Meta 没跨节点到达。）
+    let meta_seen = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Ok(list) = bob.channel_list().await {
+                if list.iter().any(|c| c.channel_id == cid.to_vec() && c.name == "公告频道") {
+                    break true;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }).await.unwrap_or(false);
+    assert!(meta_seen, "B 未收到 home 的频道 Meta（名称/图标跨节点不可见——根治失败）");
 }

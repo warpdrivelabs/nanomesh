@@ -47,8 +47,8 @@ function renderConversation() {
     ${body}`;
   const copyEl = document.getElementById("conv-copy");
   if (copyEl) copyEl.addEventListener("click", async () => {
-    // 频道：复制「邀请链接」（含公钥 id + 名称提示，点开即订阅）；群/私聊：复制 id。
-    if (chn && window.Channels && Channels.copyInvite) { Channels.copyInvite(ACTIVE); return; }
+    // 频道：打开分享弹窗（邀请链接 + 复制）；群/私聊：复制 id。
+    if (chn && window.Channels && Channels.shareChannel) { Channels.shareChannel(ACTIVE); return; }
     try { await navigator.clipboard.writeText(ACTIVE); if (window.toast) toast((grp ? "群" : "") + " id 已复制"); }
     catch (_) { if (window.toast) toast("复制失败"); }
   });
