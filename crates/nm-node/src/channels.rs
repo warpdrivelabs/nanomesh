@@ -217,7 +217,7 @@ async fn run_channel(
         if last_meta_bcast.elapsed() >= meta_bcast_every {
             last_meta_bcast = std::time::Instant::now();
             let snap = meta.lock().unwrap().clone();
-            if !snap.name.is_empty() || !snap.topic.is_empty() || !snap.avatar_url.is_empty() {
+            if !snap.name.is_empty() || !snap.topic.is_empty() || !snap.avatar_url.is_empty() || !snap.cover_url.is_empty() {
                 let env = ChannelGram { kind: Some(Kind::Meta(snap)) };
                 publish_channel_gram(&ctx, &topic, &env).await;
             }
@@ -372,6 +372,7 @@ fn merge_channel_meta(ctx: &Ctx, meta: &std::sync::Mutex<Channel>, incoming: &Ch
         if !incoming.name.is_empty() { m.name = incoming.name.clone(); }
         if !incoming.topic.is_empty() { m.topic = incoming.topic.clone(); }
         if !incoming.avatar_url.is_empty() { m.avatar_url = incoming.avatar_url.clone(); }
+        if !incoming.cover_url.is_empty() { m.cover_url = incoming.cover_url.clone(); }
         if !incoming.owner.is_empty() { m.owner = incoming.owner.clone(); }
         if !incoming.home_node.is_empty() { m.home_node = incoming.home_node.clone(); }
         if incoming.created_at != 0 { m.created_at = incoming.created_at; }
@@ -696,6 +697,7 @@ pub(crate) async fn channel_create(ctx: &Ctx, caller: &[u8], _rid: &[u8], cmd: &
                 created_at: now_ms() as i64,
                 topic: op.topic,
                 avatar_url: op.avatar_url,
+                cover_url: op.cover_url,
                 home_node: ctx.node_id.to_vec(),
                 // 广播/公告定位：keyed 频道默认 owner_only；legacy（无 secret）保持 open（旧行为）。
                 pub_policy: if keyed { nm_proto::PubPolicy::OwnerOnly as i32 } else { nm_proto::PubPolicy::Open as i32 },
@@ -838,6 +840,7 @@ pub(crate) fn channel_set_meta(ctx: &Ctx, caller: &[u8], cmd: &Command) -> (bool
                         if !op.name.is_empty() { m.name = op.name; }
                         m.topic = op.topic;
                         m.avatar_url = op.avatar_url;
+                        m.cover_url = op.cover_url;
                         if m.home_node.is_empty() { m.home_node = ctx.node_id.to_vec(); }
                         m.clone()
                     };

@@ -10,6 +10,8 @@ function renderConversation() {
   }
   const grp = window.Groups ? Groups.byId(ACTIVE) : null;
   const chn = (!grp && window.Channels) ? Channels.byId(ACTIVE) : null;
+  // 频道：独立 Hero/Feed/Dock 视图，不再复用群聊气泡。
+  if (chn && window.ChannelView) { ChannelView.render(); return; }
   const showSender = !!grp || !!chn;
   const c = grp ? { id: ACTIVE, name: grp.name || "群", kind: "group", avatar: grp.avatar }
     : chn ? { id: ACTIVE, name: chn.name || "频道", kind: "channel", avatar: chn.avatar }
@@ -218,6 +220,13 @@ async function revealMsg(id) {
 function paintVirtual(stick) {
   const log = document.getElementById("conv-log");
   if (!log || VIEW.id !== ACTIVE) return;
+  if (window.ChannelView && ChannelView.isActive && ChannelView.isActive()) {
+    const painting = viewPainting;
+    viewPainting = true;
+    ChannelView.paint(stick);
+    viewPainting = painting;
+    return;
+  }
   const keepBottom = stick || log.scrollHeight - log.scrollTop - log.clientHeight < 80;
   if (!VIEW.rows.length) {
     const ico = VIEW.sender ? "groups" : "chat";
@@ -249,6 +258,7 @@ async function sendMsg(text) {
   try {
     if (isChannel) {
       await NM.inv("channel_publish", { channelId: ACTIVE, body: text }); // 节点会回投给本地订阅者(含自己)，不做乐观插入以免重复
+      try { localStorage.removeItem("nm.chn.draft." + ACTIVE); } catch (_) {}
     } else if (isGroup) {
       // 乐观插入(status=0 发送中)；send_group 返回原 gram_id → 升单勾✓(消息已达 home node)。
       // 群聊只到单勾(无逐成员已读聚合)；接收方不对群消息回 client-receipt，故不会升双勾。
@@ -285,6 +295,7 @@ async function sendRich(media) {
   try {
     if (isChannel) {
       await NM.inv("channel_publish", { channelId: ACTIVE, body: Composer.channelBody(media) });
+      try { localStorage.removeItem("nm.chn.draft." + ACTIVE); } catch (_) {}
     } else {
       // 与文本一致：乐观插入(status=0 发送中)；send_rich 返回原 gram_id → 升单勾✓(私聊/群聊同处理)。
       localId = "l" + Date.now();

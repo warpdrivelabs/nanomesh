@@ -1,5 +1,5 @@
 // ── 频道 / 主题（P4）：iroh-gossip 上的开放 pub/sub。活动栏「📡 频道」面板 + 订阅/发布 + 历史回填。
-//    频道消息经核心事件(channel=true, to=频道id)进入会话缓存，复用会话视图展示为「订阅流」。
+//    频道消息经核心事件(channel=true, to=频道id)进入会话缓存；主区由 channel_view.js 以 Hero/Feed/Dock 展示。
 (function () {
   let CHANNELS = [];
   let MYID = "";
@@ -9,7 +9,15 @@
   function slimChannel(c) {
     const o = Object.assign({}, c);
     if (typeof o.avatar === "string" && o.avatar.indexOf("data:") === 0) delete o.avatar;
+    if (typeof o.cover === "string" && o.cover.indexOf("data:") === 0) delete o.cover;
     return o;
+  }
+  // 当前账号是否可向该频道发布（owner，或 pubPolicy=OPEN）。
+  function canPublish(id) {
+    const c = byId(id);
+    if (!c || !MYID) return false;
+    if (c.owner === MYID) return true;
+    return Number(c.pubPolicy) !== 1; // 1 = OWNER_ONLY
   }
   function hydrate(list) { CHANNELS = Array.isArray(list) ? list.slice() : []; paintChannelsList(); }
   async function refresh() {
@@ -30,10 +38,24 @@
     return `<span class="av" style="width:${s}px;height:${s}px;background:${avatarColor(c.id)}">${nmIcon("channels")}</span>`;
   }
 
+  async function resolveChannelAssets(onDone) {
+    if (!window.Profile) { if (onDone) onDone(); return; }
+    const pend = CHANNELS.filter((c) => c && (Profile.isRef(c.avatar) || Profile.isRef(c.cover)));
+    if (!pend.length) { if (onDone) onDone(); return; }
+    await Promise.all(pend.map(async (c) => {
+      if (Profile.isRef(c.avatar)) { const uri = await Profile.resolveAvatar(c.avatar, c.homeNode); if (uri) c.avatar = uri; }
+      if (Profile.isRef(c.cover)) { const uri = await Profile.resolveAvatar(c.cover, c.homeNode); if (uri) c.cover = uri; }
+    }));
+    if (onDone) onDone();
+  }
+
   async function renderChannelsList() {
     await refresh();
     paintChannelsList();
-    if (window.Profile) Profile.resolveList(CHANNELS, paintChannelsList); // 解析 b3: 频道头像后重绘
+    await resolveChannelAssets(() => {
+      paintChannelsList();
+      if (typeof ACTIVE !== "undefined" && byId(ACTIVE) && typeof renderConversation === "function") renderConversation();
+    });
   }
   function paintChannelsList() {
     const box = document.getElementById("channels-list");
@@ -71,10 +93,15 @@
   async function createChannel() {
     if (!window.Profile || !Profile.metaEditor) return;
     Profile.metaEditor({
-      title: "新建频道", name: "", bio: "", avatar: "",
+      title: "新建频道", name: "", bio: "", avatar: "", cover: "", withCover: true,
       namePh: "频道名称", bioLabel: "频道简介", bioPh: "一句话简介（可选）",
-      onSave: async ({ name, bio, avatar }) => {
+      onSave: async ({ name, bio, avatar, cover }) => {
         const cid = await NM.inv("channel_create", { name: name || "新频道", topic: bio || "", avatar });
+        // 封面经 set_meta 写入（create 命令暂未透传 cover，避免改动 create 签名）
+        if (cover) {
+          try { await NM.inv("channel_set_meta", { channelId: cid, name: name || "新频道", topic: bio || "", avatar: avatar || "", cover }); }
+          catch (_) {}
+        }
         await renderChannelsList();
         if (window.openChannel) openChannel(cid);
         if (window.toast) toast("频道已创建");
@@ -83,15 +110,18 @@
     });
   }
 
-  // 编辑频道信息（owner）：名称 + 简介 + 头像 → channel_set_meta（经 gossip 广播给订阅者）。
+  // 编辑频道信息（owner）：名称 + 简介 + 头像 + 封面 → channel_set_meta（经 gossip 广播给订阅者）。
   async function editChannel(cid) {
     const c = byId(cid);
     if (!c || !window.Profile || !Profile.metaEditor) return;
     Profile.metaEditor({
-      title: "编辑频道信息", name: c.name || "", bio: c.topic || "", avatar: c.avatar || "", homeNode: c.homeNode || "",
+      title: "编辑频道信息", name: c.name || "", bio: c.topic || "", avatar: c.avatar || "", cover: c.cover || "",
+      homeNode: c.homeNode || "", withCover: true,
       namePh: "频道名称", bioLabel: "频道简介", bioPh: "一句话简介",
-      onSave: async ({ name, bio, avatar }) => {
-        await NM.inv("channel_set_meta", { channelId: cid, name: name || (c.name || ""), topic: bio, avatar });
+      onSave: async ({ name, bio, avatar, cover }) => {
+        await NM.inv("channel_set_meta", {
+          channelId: cid, name: name || (c.name || ""), topic: bio, avatar, cover: cover || "",
+        });
         await renderChannelsList();
         if (window.Tabs) Tabs.retitle("c:" + cid, name || c.name || "频道", "channels");
         if (typeof renderConversation === "function") renderConversation(); // 频道流头部在看 → 重绘
@@ -201,6 +231,6 @@
     const se = document.getElementById("chn-search"); if (se) se.addEventListener("input", paintChannelsList);
   })();
 
-  window.Channels = { refresh, hydrate, byId, isOwner, editChannel, list: () => CHANNELS, primeChannels, syncSelection, copyInvite, buildInvite, shareChannel };
+  window.Channels = { refresh, hydrate, byId, isOwner, canPublish, editChannel, list: () => CHANNELS, primeChannels, syncSelection, copyInvite, buildInvite, shareChannel };
   window.renderChannelsList = renderChannelsList;
 })();

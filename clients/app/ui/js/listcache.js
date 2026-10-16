@@ -9,6 +9,7 @@
     return (list || []).map((item) => {
       const o = Object.assign({}, item);
       if (typeof o.avatar === "string" && o.avatar.indexOf("data:") === 0) delete o.avatar;
+      if (typeof o.cover === "string" && o.cover.indexOf("data:") === 0) delete o.cover;
       return o;
     });
   }

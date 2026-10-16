@@ -144,16 +144,52 @@
     } catch (e) { if (window.toast) toast("资料发布失败：" + (e && e.message ? e.message : e)); return false; }
   }
 
-  // ── 通用「名称 + 简介 + 头像」编辑器（群 / 频道复用）。保存时上传头像 blob 后回调 onSave({name,bio,avatar})。
+  // 横幅封面：宽幅裁剪 JPEG（频道 Hero 用）。
+  function fileToCover(file, w, h, quality) {
+    w = w || 960; h = h || 320; quality = quality || 0.82;
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        const c = document.createElement("canvas"); c.width = w; c.height = h;
+        const ctx = c.getContext("2d");
+        const scale = Math.max(w / img.width, h / img.height);
+        const sw = w / scale, sh = h / scale;
+        ctx.drawImage(img, (img.width - sw) / 2, (img.height - sh) / 2, sw, sh, 0, 0, w, h);
+        resolve(c.toDataURL("image/jpeg", quality));
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("图片加载失败")); };
+      img.src = url;
+    });
+  }
+
+  // ── 通用「名称 + 简介 + 头像[+封面]」编辑器（群 / 频道复用）。
+  //    opts.withCover=true 时多封面行；onSave({name,bio,avatar,cover})。
   async function metaEditor(opts) {
     opts = opts || {};
     const cur = opts.avatar || "";
+    const curCover = opts.cover || "";
+    const withCover = !!opts.withCover;
     let pending = null; // null=未改动 / ""=移除 / data:URI=新图
+    let pendingCover = null;
     const m = document.createElement("div");
     m.className = "sec-overlay on";
+    const coverBlock = withCover ? `
+          <div class="sec-row me-cover-row"><label>封面</label>
+            <div style="flex:1;min-width:0">
+              <div class="me-cover-prev"></div>
+              <div style="display:flex;align-items:center;gap:10px">
+                <button class="ns-btn me-cover-pick">选择封面</button>
+                <button class="ns-btn me-cover-clear">移除</button>
+                <input type="file" class="me-cover-file" accept="image/*" style="display:none">
+              </div>
+              <div class="sec-hint" style="margin-top:6px">建议宽幅图（约 3:1），用于频道顶部横幅；未设置时用品牌色块。</div>
+            </div></div>` : "";
     m.innerHTML = `
       <div class="sec-box"><div class="sec-head">${escapeHtml(opts.title || "编辑信息")}<button class="sec-x">${nmIcon("close")}</button></div>
         <div class="sec-body"><div class="sec-sec">
+          ${coverBlock}
           <div class="sec-row" style="align-items:center"><label>头像</label>
             <div style="display:flex;align-items:center;gap:10px">
               <span class="me-prev"></span>
@@ -167,7 +203,14 @@
         </div></div></div>`;
     document.body.appendChild(m);
     let previewData = isImg(cur) ? cur : (isRef(cur) ? await resolveAvatar(cur, opts.homeNode) : "");
-    const paint = () => { m.querySelector(".me-prev").innerHTML = avatarHtml(pending === "" ? "" : (pending || previewData), (opts.name || "?").slice(0, 1), 48); };
+    let coverPreview = isImg(curCover) ? curCover : (isRef(curCover) ? await resolveAvatar(curCover, opts.homeNode) : "");
+    const paint = () => {
+      m.querySelector(".me-prev").innerHTML = avatarHtml(pending === "" ? "" : (pending || previewData), (opts.name || "?").slice(0, 1), 48);
+      const cp = m.querySelector(".me-cover-prev");
+      if (!cp) return;
+      const src = pendingCover === "" ? "" : (pendingCover || coverPreview);
+      cp.innerHTML = isImg(src) ? `<img src="${src}" alt="">` : "未设置封面（将显示品牌色块）";
+    };
     m.querySelector(".me-name").value = opts.name || "";
     m.querySelector(".me-bio").value = opts.bio || "";
     paint();
@@ -187,14 +230,33 @@
         pending = data; paint();
       } catch (err) { if (window.toast) toast("处理图片失败：" + (err && err.message ? err.message : err)); }
     };
+    if (withCover) {
+      m.querySelector(".me-cover-pick").onclick = () => m.querySelector(".me-cover-file").click();
+      m.querySelector(".me-cover-clear").onclick = () => { pendingCover = ""; paint(); };
+      m.querySelector(".me-cover-file").onchange = async (e) => {
+        const f = e.target.files && e.target.files[0]; e.target.value = "";
+        if (!f) return;
+        try {
+          let data = await fileToCover(f, 960, 320, 0.82);
+          if (data.length > 280 * 1024) data = await fileToCover(f, 800, 268, 0.72);
+          if (data.length > 280 * 1024) { if (window.toast) toast("封面太大，请换更简单的图"); return; }
+          pendingCover = data; paint();
+        } catch (err) { if (window.toast) toast("处理封面失败：" + (err && err.message ? err.message : err)); }
+      };
+    }
     m.querySelector(".me-save").onclick = async () => {
       let avatar = (isRef(cur) || isImg(cur)) ? cur : "";
       if (pending === "") avatar = "";
       else if (pending) { const ref = await putBlob(pending); if (ref) { avatar = ref; avCache.set(ref, pending); } else avatar = pending; }
+      let cover = (isRef(curCover) || isImg(curCover)) ? curCover : "";
+      if (withCover) {
+        if (pendingCover === "") cover = "";
+        else if (pendingCover) { const ref = await putBlob(pendingCover); if (ref) { cover = ref; avCache.set(ref, pendingCover); } else cover = pendingCover; }
+      }
       const name = m.querySelector(".me-name").value.trim();
       const bio = m.querySelector(".me-bio").value.trim();
       close();
-      try { if (opts.onSave) await opts.onSave({ name, bio, avatar }); }
+      try { if (opts.onSave) await opts.onSave({ name, bio, avatar, cover }); }
       catch (e) { if (window.toast) toast("保存失败：" + (e && e.message ? e.message : e)); }
     };
   }

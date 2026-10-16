@@ -297,13 +297,14 @@ pub(crate) async fn channel_list(state: State<'_, AppState>) -> Result<Vec<Value
         .map(|c| {
             json!({
                 "id": hex(&c.channel_id), "name": c.name, "owner": hex(&c.owner), "topic": c.topic,
-                "avatar": c.avatar_url, "homeNode": hex(&c.home_node),
+                "avatar": c.avatar_url, "cover": c.cover_url, "homeNode": hex(&c.home_node),
+                "pubPolicy": c.pub_policy, "keyed": c.keyed,
             })
         })
         .collect())
 }
 
-/// owner 设置频道信息（名称/简介/头像）→ gossip 广播给订阅者。
+/// owner 设置频道信息（名称/简介/头像/封面）→ gossip 广播给订阅者。
 #[tauri::command]
 pub(crate) async fn channel_set_meta(
     state: State<'_, AppState>,
@@ -311,9 +312,14 @@ pub(crate) async fn channel_set_meta(
     name: String,
     topic: String,
     avatar: String,
+    cover: Option<String>,
 ) -> Result<(), String> {
     if avatar.len() > 128 * 1024 {
         return Err("头像过大（请用更小的图）".into());
+    }
+    let cover = cover.unwrap_or_default();
+    if cover.len() > 256 * 1024 {
+        return Err("封面过大（请用更小的图）".into());
     }
     let session = session_of(&state).await?;
     session
@@ -322,6 +328,7 @@ pub(crate) async fn channel_set_meta(
             name.trim(),
             topic.trim(),
             avatar.trim(),
+            cover.trim(),
         )
         .await
         .map_err(|e| e.to_string())

@@ -18,6 +18,7 @@ const EMOJI = {
 const drafts = new Map();
 let viewId = "";
 let viewRoom = false;
+let viewChannel = false;
 let api = null;
 let popKind = "";
 let emojiTab = "最近";
@@ -37,17 +38,22 @@ function snapshot() {
   draft().text = input.value;
 }
 
-function prepare(id, room) {
+function prepare(id, room, channel) {
   snapshot();
   viewId = id || "";
   viewRoom = !!room;
+  viewChannel = !!channel;
 }
 
 function markup() {
   const d = viewId ? draft() : { text: "", pending: [] };
   const tr = (key, fallback) => (window.t ? t(key) : fallback);
   const who = viewRoom ? tr("conv.mention", "提及成员") : tr("conv.card", "发送名片");
-  return `<div class="im-composer">
+  const ph = viewChannel
+    ? "写一篇帖子… 完整 Markdown/GFM；Enter 发布，Shift+Enter 换行"
+    : tr("conv.placeholder", "Enter 发送，Shift+Enter 换行");
+  const sendTitle = viewChannel ? "发布到频道" : tr("conv.send", "发送");
+  return `<div class="im-composer${viewChannel ? " im-composer--channel" : ""}">
     <div class="im-history" id="conv-history">
       <input id="conv-history-q" type="text" placeholder="${tr("conv.historyPh", "搜索当前会话")}" autocomplete="off" />
       <div class="im-history-list" id="conv-history-list"></div>
@@ -66,16 +72,16 @@ function markup() {
       <button type="button" class="im-tool" data-act="video" title="${tr("conv.video", "视频")}">${nmIcon("video")}</button>
       <button type="button" class="im-tool" data-act="file" title="${tr("conv.file", "文件")}">${nmIcon("file")}</button>
       <button type="button" class="im-tool" id="conv-mic" data-act="mic" title="${tr("conv.voice", "语音")}">${nmIcon("mic")}</button>
-      <span class="im-split">
+      ${viewChannel ? "" : `<span class="im-split">
         <button type="button" class="im-tool" data-act="people" title="${who}">${nmIcon("at")}</button>
         <button type="button" class="im-caret" data-menu="people" title="${who}">${nmIcon("chevron")}</button>
-      </span>
+      </span>`}
       <button type="button" class="im-tool im-tool--end" data-act="history" title="${tr("conv.history", "会话记录")}">${nmIcon("clock")}</button>
     </div>
     <div class="im-pending${d.pending.length ? " is-on" : ""}" id="conv-pending">${pendingHtml(d.pending)}</div>
     <div class="im-write">
-      <textarea id="conv-input" rows="3" aria-label="${tr("conv.send", "发送")}" placeholder="${tr("conv.placeholder", "Enter 发送，Shift+Enter 换行")}">${escapeHtml(d.text || "")}</textarea>
-      <button type="button" class="im-send" id="conv-send" data-act="send" title="${tr("conv.send", "发送")}">${nmIcon("send")}</button>
+      <textarea id="conv-input" rows="3" aria-label="${sendTitle}" placeholder="${ph}">${escapeHtml(d.text || "")}</textarea>
+      <button type="button" class="im-send" id="conv-send" data-act="send" title="${sendTitle}">${nmIcon("send")}</button>
     </div>
     <div class="im-pop" id="conv-pop" hidden></div>
     <input type="file" id="conv-pick-image" accept="image/*" multiple hidden />
@@ -843,7 +849,7 @@ function closeLight() {
 
 document.addEventListener("click", (e) => {
   if (e.target.closest && e.target.closest(".im-composer")) onComposerClick(e);
-  else if (e.target.closest && (e.target.closest(".im-media") || e.target.closest(".im-file") || e.target.closest(".im-card") || e.target.closest(".im-lightbox"))) onMediaClick(e);
+  else if (e.target.closest && (e.target.closest(".im-media") || e.target.closest(".im-file") || e.target.closest(".im-card") || e.target.closest(".im-lightbox") || e.target.closest(".chn-md-img"))) onMediaClick(e);
 });
 
 window.Composer = { prepare, markup, attach, snapshot, absorb, preview, bubble, hydrate, encode, channelBody, toggleHistory };

@@ -22,6 +22,19 @@ impl Session {
         avatar_url: &str,
         secret: &[u8],
     ) -> Result<(), ClientError> {
+        self.channel_create_ex(channel_id, name, topic, avatar_url, "", secret)
+            .await
+    }
+
+    pub async fn channel_create_ex(
+        &self,
+        channel_id: [u8; 32],
+        name: &str,
+        topic: &str,
+        avatar_url: &str,
+        cover_url: &str,
+        secret: &[u8],
+    ) -> Result<(), ClientError> {
         self.channel_op(
             "channel.create",
             ChannelOp {
@@ -29,19 +42,21 @@ impl Session {
                 name: name.to_string(),
                 topic: topic.to_string(),
                 avatar_url: avatar_url.to_string(),
+                cover_url: cover_url.to_string(),
                 secret: secret.to_vec(),
             },
         )
         .await
     }
 
-    /// owner 设置频道信息（名称/简介/头像）→ gossip 广播给订阅者。
+    /// owner 设置频道信息（名称/简介/头像/封面）→ gossip 广播给订阅者。
     pub async fn channel_set_meta(
         &self,
         channel_id: [u8; 32],
         name: &str,
         topic: &str,
         avatar_url: &str,
+        cover_url: &str,
     ) -> Result<(), ClientError> {
         self.channel_op(
             "channel.set_meta",
@@ -50,6 +65,7 @@ impl Session {
                 name: name.to_string(),
                 topic: topic.to_string(),
                 avatar_url: avatar_url.to_string(),
+                cover_url: cover_url.to_string(),
                 ..Default::default()
             },
         )

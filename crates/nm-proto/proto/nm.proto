@@ -260,6 +260,7 @@ message Channel {
   PubPolicy pub_policy = 8;           // 发布策略（默认 OPEN=0 保向后兼容；新建频道设 OWNER_ONLY）
   bool keyed = 9;                     // true=channel_id 为真实公钥、home 签名可验；false=legacy 随机 id（降级信任）
   uint64 earliest_seq = 10;           // home 日志裁剪后仍保有的最小 seq（晚加入者据此 clamp，低于此的历史不可得）
+  string cover_url = 11;              // 频道封面："b3:<hash>" 或内联 data:URI（Hero 横幅；缺省用品牌色块）
 }
 // 频道消息（home 定序后的权威广播 + 转发给订阅者）。seq 为频道级全局单调；home_sig 由 home 签。
 message ChannelMsg {
@@ -308,7 +309,7 @@ message ChannelGram {
     ChannelLive live = 7;             // home 存活/水位心跳
   }
 }
-message ChannelOp   { bytes channel_id = 1; string name = 2; string topic = 3; string avatar_url = 4; bytes secret = 5; } // create/sub/set_meta 参数；create 时 secret=频道私钥(32)，home 存 CHANNEL_SECRETS 供定序器签名，channel_id 须=其公钥
+message ChannelOp   { bytes channel_id = 1; string name = 2; string topic = 3; string avatar_url = 4; bytes secret = 5; string cover_url = 6; } // create/sub/set_meta；create 时 secret=频道私钥(32)；cover_url 为封面
 message ChannelPub  { bytes channel_id = 1; string body = 2; }                    // publish 参数
 message ChannelList { repeated Channel channels = 1; }
 message ChannelBackfillReq { bytes channel_id = 1; uint64 since_seq = 2; uint32 limit = 3; } // limit=0 用服务端默认
