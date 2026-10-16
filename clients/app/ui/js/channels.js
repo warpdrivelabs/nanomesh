@@ -193,17 +193,26 @@
     await refresh();
     for (const c of CHANNELS) await primeOne(c.id, c.name || "");
   }
+  const pulling = new Set();
   async function primeOne(cid, name) {
+    if (!cid || pulling.has(cid)) return;
+    pulling.add(cid);
     try {
-      await NM.inv("channel_sub", { channelId: cid, name });
-      // 回填游标 = 本地已存最大 seq（live 事件现在带 seq 并持久化，故可续拉而非每次从 0 全量）。
-      const last = window.ChatLog ? ChatLog.meta(cid).last : null;
-      const since = last && last.seq ? last.seq : 0;
-      const msgs = await NM.inv("channel_backfill", { channelId: cid, sinceSeq: since });
-      // id 与 live 事件一致用 "<cid>:<seq>"（修「同一条消息 live/backfill 两套 id → 重复显示」），
-      // 并带 seq → 持久化后下次回填游标生效 + 按 seq 排序。
-      if (window.imBackfill) window.imBackfill(cid, (msgs || []).map((m) => ({ id: cid + ":" + m.seq, from: m.from, body: m.body, ts: m.ts, seq: m.seq, channel: true, to: cid })));
+      await NM.inv("channel_sub", { channelId: cid, name: name || "" });
+      // 本机日志往往是空的（home 在别的节点）。先拉一次，再隔几秒重试，等 home 把历史推回来。
+      for (let i = 0; i < 6; i++) {
+        const last = window.ChatLog ? ChatLog.meta(cid).last : null;
+        const since = last && last.seq ? last.seq : 0;
+        const msgs = await NM.inv("channel_backfill", { channelId: cid, sinceSeq: since });
+        if (window.imBackfill && msgs && msgs.length) {
+          window.imBackfill(cid, msgs.map((m) => ({ id: cid + ":" + m.seq, from: m.from, body: m.body, ts: m.ts, seq: m.seq, channel: true, to: cid })));
+        }
+        if (msgs && msgs.length && msgs.length < 500 && i >= 1) break;
+        if (i >= 5) break;
+        await new Promise((r) => setTimeout(r, 1500));
+      }
     } catch (_) {}
+    finally { pulling.delete(cid); }
   }
 
   // 轻量文本输入弹窗（复用 sec-overlay 样式，自包含）。
@@ -231,6 +240,6 @@
     const se = document.getElementById("chn-search"); if (se) se.addEventListener("input", paintChannelsList);
   })();
 
-  window.Channels = { refresh, hydrate, byId, isOwner, canPublish, editChannel, list: () => CHANNELS, primeChannels, syncSelection, copyInvite, buildInvite, shareChannel };
+  window.Channels = { refresh, hydrate, byId, isOwner, canPublish, editChannel, list: () => CHANNELS, primeChannels, pullHistory: (cid) => { const c = byId(cid); return primeOne(cid, (c && c.name) || ""); }, syncSelection, copyInvite, buildInvite, shareChannel };
   window.renderChannelsList = renderChannelsList;
 })();

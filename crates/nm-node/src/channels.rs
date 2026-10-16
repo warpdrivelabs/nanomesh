@@ -128,6 +128,7 @@ enum ChannelOut {
     Sequenced(ChannelMsg), // 已定序消息（home 本地产出）：本地投递 + 广播 Msg
     Req(ChannelPubReq),    // 发布意图（远端 home）：广播 PubReq 到频道主题
     Meta(Channel),         // 元信息广播
+    Backfill(ChannelBackfillReq), // 订阅者立刻向 home 要历史（不等水位心跳）
 }
 
 pub(crate) type Channels = DashMap<Vec<u8>, ChannelEntry>;
@@ -272,6 +273,10 @@ async fn run_channel(
                         let env = ChannelGram { kind: Some(Kind::Meta(c)) };
                         publish_channel_gram(&ctx, &topic, &env).await;
                         last_meta_bcast = std::time::Instant::now();
+                    }
+                    Some(ChannelOut::Backfill(req)) => {
+                        let env = ChannelGram { kind: Some(Kind::BackfillReq(req)) };
+                        publish_channel_gram(&ctx, &topic, &env).await;
                     }
                     None => break, // 所有 pub_tx 已 drop（entry 移除）→ 收摊
                 }
@@ -658,6 +663,38 @@ fn broadcast_channel_firehose(ctx: &Ctx, env: &ChannelGram) {
     let _ = ctx.group_pub.send(gg.encode_to_vec());
 }
 
+/// 非 home 订阅者立刻向 home 要历史（频道主题 + 火管），不等水位心跳。
+fn kick_remote_backfill(ctx: &Ctx, channel_id: &[u8]) {
+    if is_channel_home(ctx, channel_id) {
+        return;
+    }
+    use std::sync::OnceLock;
+    static KICKS: OnceLock<DashMap<Vec<u8>, u64>> = OnceLock::new();
+    let kicks = KICKS.get_or_init(DashMap::new);
+    let now = now_ms();
+    if let Some(prev) = kicks.get(channel_id) {
+        if now.saturating_sub(*prev) < 3_000 {
+            return;
+        }
+    }
+    kicks.insert(channel_id.to_vec(), now);
+    let since = ctx.store.as_ref()
+        .and_then(|s| s.channel_log_contiguous_upto(channel_id, 0).ok())
+        .unwrap_or(0);
+    let req = ChannelBackfillReq {
+        channel_id: channel_id.to_vec(),
+        since_seq: since,
+        limit: CHANNEL_BACKFILL_LIMIT as u32,
+    };
+    tracing::info!(since, "channel backfill kick");
+    broadcast_channel_firehose(ctx, &ChannelGram {
+        kind: Some(nm_proto::pb::channel_gram::Kind::BackfillReq(req.clone())),
+    });
+    if let Some(e) = ctx.channels.get(channel_id) {
+        let _ = e.pub_tx.send(ChannelOut::Backfill(req));
+    }
+}
+
 /// 火管版回填触发：订阅者据 home 水位心跳判断落后 → 经火管广播 BackfillReq（home 经火管应答 Log）。
 async fn maybe_backfill_firehose(ctx: &Ctx, channel_id: &[u8], live: &nm_proto::ChannelLive) {
     let Some(s) = &ctx.store else { return };
@@ -736,6 +773,7 @@ pub(crate) async fn channel_sub(ctx: &Ctx, caller: &[u8], cmd: &Command) -> (boo
                         let _ = s.put_channel(&meta);
                     }
                 }
+                kick_remote_backfill(ctx, &op.channel_id);
                 (true, None, String::new())
             } else {
                 (false, None, "channel join failed".into())
@@ -810,6 +848,9 @@ pub(crate) fn channel_backfill(ctx: &Ctx, cmd: &Command) -> (bool, Option<Any>, 
             };
             let limit = if req.limit == 0 { CHANNEL_BACKFILL_LIMIT } else { (req.limit as usize).min(CHANNEL_BACKFILL_LIMIT) };
             let msgs = s.channel_log_since(&req.channel_id, req.since_seq, limit).unwrap_or_default();
+            if msgs.is_empty() {
+                kick_remote_backfill(ctx, &req.channel_id);
+            }
             // earliest_seq=日志下限（client clamp，低于此的历史已裁剪、不可得，防无限回填）。
             let (earliest, _latest) = s.channel_log_bounds(&req.channel_id).ok().flatten().unwrap_or((0, 0));
             let next_seq = msgs.last().map(|m| m.seq).unwrap_or(req.since_seq);

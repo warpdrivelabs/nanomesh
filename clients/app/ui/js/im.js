@@ -55,6 +55,7 @@ window.openChannel = function (cid) {
   const c = window.Channels && Channels.byId(cid);
   const title = c ? (c.name || "频道") : shortId(cid);
   const draw = () => { ACTIVE = cid; DETAIL_ID = null; UNREAD[cid] = 0; scheduleUnread(); renderPanels(); renderConversation(); };
+  if (window.Channels && Channels.pullHistory) Channels.pullHistory(cid);
   if (window.Tabs) Tabs.open({ key: "c:" + cid, kind: "chat", title, ico: "channels", render: draw });
   else draw();
 };
