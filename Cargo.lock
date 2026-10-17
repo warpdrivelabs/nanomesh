@@ -2547,6 +2547,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nm-send"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "nm-client",
+ "nm-entity",
+ "nm-proto",
+ "nm-transport",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "nm-store"
 version = "0.1.0"
 dependencies = [
