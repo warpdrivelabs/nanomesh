@@ -2,6 +2,22 @@
 (function () {
   const KEYS = "nmspace-account-keys";
   const LAST = "nmspace-account-last";
+  // 自建 relay/pkarr —— 可配置：存 localStorage（nm- 前缀自动持久化到后端，跨源/重装不丢）。
+  // 为空则回退到默认（后端也有同样默认兜底）。换 relay 域名改这两个键即可，无需重编 app。
+  const DEFAULT_RELAY = "https://relay.robot.link:8443";
+  const DEFAULT_PKARR = "https://relay.robot.link:8444/pkarr";
+  // 读配置的自建基础设施：{relayUrls:[], pkarrUrl, dnsOrigin}（空值回退默认）。
+  function infra() {
+    let relays = [], pkarr = "", dns = "";
+    try {
+      relays = (localStorage.getItem("nm-relay-urls") || "").split(",").map((s) => s.trim()).filter(Boolean);
+      pkarr = (localStorage.getItem("nm-pkarr-url") || "").trim();
+      dns = (localStorage.getItem("nm-dns-origin") || "").trim();
+    } catch (_) {}
+    if (!relays.length) relays = [DEFAULT_RELAY];
+    if (!pkarr) pkarr = DEFAULT_PKARR;
+    return { relayUrls: relays, pkarrUrl: pkarr, dnsOrigin: dns || null };
+  }
   let mode = "login";
   let suggestTimer = null;
 
@@ -266,9 +282,10 @@
     Identity.setCurrent(r.user);
     if (nickname) Identity.setName(r.user, nickname);
     else if (!Identity.nameOf(r.user)) Identity.setName(r.user, r.name);
+    const inf = infra();
     window.CURRENT_SVC = {
-      id: "account", mode: "nat", node: r.node, name: r.name,
-      relayUrls: [], pkarrUrl: "", dnsOrigin: "",
+      id: "account", mode: "selfhost", node: r.node, name: r.name,
+      relayUrls: inf.relayUrls, pkarrUrl: inf.pkarrUrl, dnsOrigin: inf.dnsOrigin || "",
     };
     showMainView();
     if (typeof updateUserChip === "function") updateUserChip();
@@ -295,9 +312,11 @@
     btn.disabled = true;
     btn.textContent = mode === "register" ? "注册中…" : mode === "reset" ? "设置中…" : "登录中…";
     try {
+      const inf = infra();
+      const sh = { relayUrls: inf.relayUrls, pkarrUrl: inf.pkarrUrl, dnsOrigin: inf.dnsOrigin };
       if (mode === "reset") {
         const user = map()[fullName()] || "";
-        const owner = await NM.inv("account_reset", { local, domain, password, user, registry: "" });
+        const owner = await NM.inv("account_reset", { local, domain, password, user, registry: "", ...sh });
         if (owner) saveKey(fullName(), owner);
         document.getElementById("acct-password").value = "";
         document.getElementById("acct-pass2").value = "";
@@ -307,10 +326,10 @@
       }
       let r;
       if (mode === "register") {
-        r = await NM.inv("account_register", { local, domain, nickname, password, registry: "" });
+        r = await NM.inv("account_register", { local, domain, nickname, password, registry: "", ...sh });
       } else {
         const user = map()[fullName()] || "";
-        r = await NM.inv("account_login", { local, domain, password, user, nickname, registry: "" });
+        r = await NM.inv("account_login", { local, domain, password, user, nickname, registry: "", ...sh });
       }
       saveKey(r.name, r.user);
       remember(local.toLowerCase(), domain.toLowerCase());

@@ -42,6 +42,15 @@ struct Args {
     /// 展示名。
     #[arg(long, default_value = "模型算力")]
     name: String,
+    /// 自建中继 URL（可多次）。配了 --relay 或 --pkarr 即走 selfhost（自建relay+dns），否则默认 N0。
+    #[arg(long)]
+    relay: Vec<String>,
+    /// 自建 iroh-dns-server 的 pkarr 端点（如 https://relay.example.com:8444/pkarr）。按公钥发现 home node。
+    #[arg(long)]
+    pkarr: Option<String>,
+    /// 可选：额外走 DNS 查询解析的源域。
+    #[arg(long)]
+    dns_origin: Option<String>,
 }
 
 fn hex(b: &[u8]) -> String {
@@ -64,9 +73,18 @@ async fn main() -> anyhow::Result<()> {
     // 换网自愈：按 home node 的**公钥 id** 重连（而非缓存的完整地址）——换网后发现服务会重解析
     // 其当前地址。见 docs/NETWORK_ROAMING_RECOVERY_DESIGN.md §5.3/§5.4。
     let home_id: [u8; 32] = *addr.id.as_bytes();
-    // N0 预设（n0 公共中继 + DNS/pkarr 发现）：按公钥发现远程 home node、穿透 NAT。
-    // （原 bind_local=Infra::Local/Minimal，无中继无发现，仅同网直连——连不上远程服务器。）
-    let client = nm_client::Client::bind([args.seed; 32]).await?;
+    // 配了自建 relay/pkarr → selfhost（Minimal 基座 + 自建中继/发现）；否则 N0 公共基础设施。
+    // 自建 home node 只把地址发布到自建 pkarr，故 compute 也须用同一套 pkarr 才能按公钥发现它。
+    let client = if !args.relay.is_empty() || args.pkarr.is_some() {
+        let pkarr = args.pkarr.clone().ok_or_else(|| {
+            anyhow::anyhow!("--relay 需配合 --pkarr（自建 home node 经 pkarr 发现）")
+        })?;
+        eprintln!("[nm-compute] selfhost: relays={:?} pkarr={}", args.relay, pkarr);
+        nm_client::Client::bind_selfhosted([args.seed; 32], args.relay.clone(), pkarr, args.dns_origin.clone(), 0).await?
+    } else {
+        // N0 预设（n0 公共中继 + DNS/pkarr 发现）：按公钥发现远程 home node、穿透 NAT。
+        nm_client::Client::bind([args.seed; 32]).await?
+    };
     // 本端点地址变化（换网）结构化日志，便于定位恢复耗时。
     client.watch_addr_log("nm-compute");
 
