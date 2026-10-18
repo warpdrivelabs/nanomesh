@@ -520,6 +520,7 @@ async fn async_main() -> anyhow::Result<()> {
         node.set_per_topic(cfg.federation.per_topic); // F1–F5：[federation] per_topic（缺省开）启停每主题；火管仍双写兜底、存活后退火管
         node.set_pkarr(cfg.dns.url.clone()); // F2：群发现 pkarr relay（配置了 [dns] url 即启用；否则仅火管/home 锚点发现）
         node.clone().spawn_group_sync(m.federation.clone()); // 群联邦：发现 + 消息扇出走 gossip（免 s2s 中继）
+        node.clone().spawn_group_ack_batcher(); // 群 ack 聚合：成员节点按 250ms 窗口合并 GroupAck→GroupAckBatch（仅火管），降低高并发群 ack 数量级
         node.clone().spawn_channel_restore(); // P4：从持久化恢复本节点订阅的频道（重 join 主题 + 回填 subs）
         node.clone().spawn_channel_pkarr(); // P4：频道发现——home 发布 pkarr 记录 / 订阅者解析 seed（需 [dns] url）
         // F6/M1：成员发现 relay 索引（灰度，需 [dns] url）。锚点发布、所有节点解析配置的锚点公钥做冷启动 bootstrap。

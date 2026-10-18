@@ -397,6 +397,15 @@ impl RedbStore {
     /// 返回 (found=条目存在, cleared=移除后已全清并删除)。幂等（node 不在集中也不报错）。
     pub fn group_outbox_ack_node(&self, gid: &[u8], sender: &[u8], gram_id: u64, node: &[u8]) -> Result<(bool, bool)> {
         let key = Self::group_outbox_key(gid, sender, gram_id);
+        // 读预检：ack 经火管到达全联邦，绝大多数节点本地无此条目（非发送方）。先只读点查，
+        // 未命中直接返回——省掉一个写事务 fsync（高并发群 ack 风暴的主要写放大来源）。
+        {
+            let rtx = self.db.begin_read().map_err(db_err)?;
+            let tb = rtx.open_table(GROUP_OUTBOX).map_err(db_err)?;
+            if tb.get(key.as_slice()).map_err(db_err)?.is_none() {
+                return Ok((false, false));
+            }
+        }
         let wtx = self.db.begin_write().map_err(db_err)?;
         let mut found = false;
         let mut cleared = false;
@@ -421,6 +430,56 @@ impl RedbStore {
         }
         wtx.commit().map_err(db_err)?;
         Ok((found, cleared))
+    }
+
+    /// 批量销账：一个成员 home（`node`）在一窗口内确认的多条群消息 `entries=(gid,sender,gram_id)`。
+    /// 两阶段：(1) 只读点查收集本节点确有的候选键——全未命中则零写事务返回（非发送方快路径）；
+    /// (2) 一个写事务内对每个候选**重新 get+decode**（读新值，防并发）→ 从待 ack 集移除 `node`，空则删条目。
+    /// 返回 (acked=真的移除了 node 的条目数, cleared=因此清空删除的条目数)。幂等；node 不在集中不计 acked。
+    pub fn group_outbox_ack_batch(&self, node: &[u8], entries: &[(Vec<u8>, Vec<u8>, u64)]) -> Result<(usize, usize)> {
+        // 候选键去重（防御：累加器已按 (gid,sender,gram_id) 去重，这里再兜一层）。
+        let mut keys: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
+        for (gid, sender, gram_id) in entries {
+            let k = Self::group_outbox_key(gid, sender, *gram_id);
+            if !keys.iter().any(|e| e == &k) { keys.push(k); }
+        }
+        if keys.is_empty() { return Ok((0, 0)); }
+        // 读阶段：筛出本地确有的键。全无 → 零写事务返回。
+        let mut candidates: Vec<Vec<u8>> = Vec::new();
+        {
+            let rtx = self.db.begin_read().map_err(db_err)?;
+            let tb = rtx.open_table(GROUP_OUTBOX).map_err(db_err)?;
+            for k in &keys {
+                if tb.get(k.as_slice()).map_err(db_err)?.is_some() { candidates.push(k.clone()); }
+            }
+        }
+        if candidates.is_empty() { return Ok((0, 0)); }
+        // 写阶段：仅处理候选，事务内重新读值再改。
+        let mut acked = 0usize;
+        let mut cleared = 0usize;
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        {
+            let mut tb = wtx.open_table(GROUP_OUTBOX).map_err(db_err)?;
+            for k in &candidates {
+                let existing = tb.get(k.as_slice()).map_err(db_err)?.map(|g| g.value().to_vec());
+                let Some(bytes) = existing else { continue }; // 并发删 → 跳过
+                let Some((first_ms, retries, next_due_ms, mut pending, gram_bytes)) =
+                    Self::group_outbox_decode(&bytes) else { continue };
+                let before = pending.len();
+                pending.retain(|n| n.as_slice() != node);
+                if pending.len() == before { continue; } // node 不在集中 → 不计 acked（幂等）
+                acked += 1;
+                if pending.is_empty() {
+                    tb.remove(k.as_slice()).map_err(db_err)?;
+                    cleared += 1;
+                } else {
+                    let val = Self::group_outbox_encode(first_ms, retries, next_due_ms, &pending, &gram_bytes);
+                    tb.insert(k.as_slice(), val.as_slice()).map_err(db_err)?;
+                }
+            }
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok((acked, cleared))
     }
 
     /// 删一条群待确认条目（达期限放弃）。幂等。

@@ -91,6 +91,11 @@ const OUTBOX_BACKOFF_MS: [u64; 8] = [2_000, 5_000, 15_000, 30_000, 60_000, 120_0
 const OUTBOX_MAX_HORIZON_MS: u64 = 24 * 3600 * 1000; // 24h 上限，对标 IM「离线最终送达」；超期放弃+告警
 const LEGACY_MAX_RETRIES: u32 = 5;   // 对端 home 不支持 DirectAck 时的有界重传次数（防无限打爆老节点）
 
+// 群 ack 聚合：成员节点把一窗口内的多条 GroupAck 合并为一个 GroupAckBatch（仅走火管），
+// 降低高并发群的 ack 数量级与写放大。窗口 ≪ 首退避 2s → 不触发误重传。
+const GROUP_ACK_BATCH_MS: u64 = 250;     // 批量合并窗口（累加器 flush 周期）
+const GROUP_ACK_BATCH_MAX: usize = 128;  // 单个批量 gram 最多条目数（超则分块，界定 gram 大小）
+
 // 连接限流（P0 DoS 防护）：
 const DEFAULT_MAX_CONNECTIONS: usize = 10_000; // 全局并发连接上限（超则拒绝新连接，防 FD/内存耗尽）
 // 单公钥重连速率门：滑动计数窗口（而非「最小间隔」——那会误杀 app 重启/切后台/断线等 1s 内的正常重连）。
@@ -201,6 +206,10 @@ pub struct Node {
     conn_gate: Arc<ConnGate>,
     // 跨节点可靠投递：已广告支持 DirectAck 的节点 id（能力协商）。
     ack_nodes: Arc<DashSet<Vec<u8>>>,
+    // 群 ack 聚合：已广告支持 GroupAckBatch 的发送方 home 节点 id（能力协商，镜像 ack_nodes/per_topic_nodes）。
+    ack_batch_nodes: Arc<DashSet<Vec<u8>>>,
+    // 群 ack 聚合累加器：成员节点收到跨节点群 Msg 后攒下的待回执条目，由 spawn_group_ack_batcher 周期 flush。
+    ack_accum: Arc<std::sync::Mutex<Vec<AckItem>>>,
     // 群消息可靠扇出观测（供 admin 看板）。
     group_metrics: Arc<GroupMetrics>,
 }
@@ -226,6 +235,19 @@ pub struct GroupMetrics {
     pub retransmits: std::sync::atomic::AtomicU64,
     /// 达 24h 期限仍未全 ack 而放弃的群消息条数。
     pub giveups: std::sync::atomic::AtomicU64,
+    /// 本节点作为成员发出的 GroupAckBatch gram 块数（聚合效果：块数 ≪ 被确认消息数）。
+    pub ack_batches_sent: std::sync::atomic::AtomicU64,
+}
+
+/// 群 ack 聚合累加器项：成员节点收到一条跨节点群 Msg 后攒下的待回执条目。
+/// `sender_home` = 该 Msg 的 `GroupGossip.origin`（= 建 group_outbox 的发送方 home，protocol.rs 构造），
+/// 用于按能力分流（该 home 是否支持批量）；必须在收到 Msg 时捕获（flush 时 Msg 已不在）。
+#[derive(Clone)]
+pub(crate) struct AckItem {
+    pub gid: Vec<u8>,
+    pub sender: Vec<u8>,
+    pub gram_id: u64,
+    pub sender_home: Vec<u8>,
 }
 
 impl RoamStat {

@@ -48,6 +48,9 @@ async fn cross_group_ack_clears_outbox() {
     // 重传 + outbox 扫描 + GroupAck 销账任务(被测主体)。
     a.clone().spawn_pending_flush();
     b.clone().spawn_pending_flush();
+    // ack 聚合：成员节点把 GroupAck 攒窗口后合并为 GroupAckBatch 发出(新码默认走批量)。
+    a.clone().spawn_group_ack_batcher();
+    b.clone().spawn_group_ack_batcher();
 
     let (_oc, owner) = online([83u8; 32], &a_addr).await;
     owner.register_as::<kinds::Person>(&PersonProfile::default(), "Owner", HashMap::new()).await.unwrap();
@@ -97,4 +100,9 @@ async fn cross_group_ack_clears_outbox() {
     .await
     .unwrap_or(false);
     assert!(cleared, "A 的 group_outbox 未清零 → 未收到成员节点的 GroupAck(ack 闭环断裂)");
+
+    // ④ 证清零是走「批量」路径而非 legacy：B 作为成员节点应至少发过一个 GroupAckBatch。
+    //    (两端新码 → A announce 广告 supports_ack_batch → B 学到后对 A-origin 消息走批量。)
+    let batches = b.group_metrics_snapshot().4;
+    assert!(batches > 0, "B 从未发出 GroupAckBatch → 走的是 legacy 逐条路径,批量未生效");
 }

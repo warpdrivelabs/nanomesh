@@ -17,7 +17,7 @@ async fn online(seed: [u8; 32], addr: &nm_transport::Addr) -> (nm_client::Client
         .expect("online timed out")
         .expect("online failed");
     (c, s)
-}
+} 
 
 async fn reg(s: &nm_client::Session, name: &str) {
     s.register_as::<kinds::Person>(&PersonProfile::default(), name, HashMap::new())

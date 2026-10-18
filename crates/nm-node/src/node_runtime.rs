@@ -230,6 +230,8 @@ impl Node {
             max_connections: crate::DEFAULT_MAX_CONNECTIONS,
             conn_gate: Arc::new(DashMap::new()),
             ack_nodes: Arc::new(DashSet::new()),
+            ack_batch_nodes: Arc::new(DashSet::new()),
+            ack_accum: Arc::new(std::sync::Mutex::new(Vec::new())),
             group_metrics: Arc::new(crate::GroupMetrics::default()),
         })
     }

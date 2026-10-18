@@ -191,8 +191,8 @@ impl Node {
             .unwrap_or(0)
     }
 
-    /// 群消息可靠扇出观测快照：(扇出跟踪数, 收到 ack 数, 重传次数, 超期放弃数)。供 admin /system 展示到达率。
-    pub fn group_metrics_snapshot(&self) -> (u64, u64, u64, u64) {
+    /// 群消息可靠扇出观测快照：(扇出跟踪数, 收到 ack 数, 重传次数, 超期放弃数, 发出批量 ack 块数)。供 admin /system 展示到达率。
+    pub fn group_metrics_snapshot(&self) -> (u64, u64, u64, u64, u64) {
         use std::sync::atomic::Ordering::Relaxed;
         let m = &self.group_metrics;
         (
@@ -200,6 +200,7 @@ impl Node {
             m.acks.load(Relaxed),
             m.retransmits.load(Relaxed),
             m.giveups.load(Relaxed),
+            m.ack_batches_sent.load(Relaxed),
         )
     }
 

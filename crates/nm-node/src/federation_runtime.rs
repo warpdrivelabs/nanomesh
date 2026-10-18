@@ -160,11 +160,19 @@ impl Node {
             Some(nm_proto::pb::group_gossip::Body::Announce(mut g)) => {
                 // F1 协商：home 节点在 announce 里广告自身 per_topic 能力；据 origin 跟踪可 per_topic 节点。
                 if g.supports_per_topic {
-                    self.per_topic_nodes.insert(origin);
+                    self.per_topic_nodes.insert(origin.clone());
                 } else {
                     self.per_topic_nodes.remove(&origin);
                 }
+                // ack 聚合能力协商（镜像 per_topic）：据 origin 跟踪支持 GroupAckBatch 的发送方 home。
+                // else 分支的 remove 必需——发送方 home 回滚到老版本后能自愈（成员改回逐条 GroupAck）。
+                if g.supports_ack_batch {
+                    self.ack_batch_nodes.insert(origin.clone());
+                } else {
+                    self.ack_batch_nodes.remove(&origin);
+                }
                 g.supports_per_topic = false; // 节点能力不写进群状态（保持群状态纯净）
+                g.supports_ack_batch = false; // 同上：能力位是 announce 瞬态，不写进持久群状态
                 self.merge_group_lww(g);
             }
             Some(nm_proto::pb::group_gossip::Body::Msg(gram)) => {
@@ -192,23 +200,17 @@ impl Node {
                         let _ = s.dedup_mark(&gram.sender, gram.gram_id, &gram.crc, now_ms());
                     }
                 }
-                // 回 GroupAck（跨节点可靠扇出）：仅当本节点确有该群本地成员才回（= 发送方期望 ack 的节点）。
-                // 首见/重复都回——重复多因 ack 丢失、发送方在重传。经群主题（发送方 home 本就订阅）+ 火管兜底。
+                // ack 聚合（跨节点可靠扇出）：仅当本节点确有该群本地成员才回（= 发送方期望 ack 的节点）。
+                // 不再逐条即时回 GroupAck，而是攒进累加器，由 spawn_group_ack_batcher 按窗口去重 + 按能力分流
+                // （支持批量的发送方 home → GroupAckBatch 仅火管一次；否则回退逐条 GroupAck 双写）。
+                // 首见/重复都攒（去重在 flush 做）；sender_home=origin 须此刻捕获（flush 时 Msg 已不在）。
                 if have_local {
-                    let ack = GroupGossip {
-                        origin: self.ep.id_bytes().to_vec(),
-                        body: Some(nm_proto::pb::group_gossip::Body::GroupAck(nm_proto::pb::GroupAck {
-                            gid: gram.receiver.clone(),
-                            sender: gram.sender.clone(),
-                            gram_id: gram.gram_id,
-                            crc: gram.crc.clone(),
-                            node: self.ep.id_bytes().to_vec(),
-                        })),
-                    };
-                    let ab = ack.encode_to_vec();
-                    let _ = self.fed.join_group(&gram.receiver, group_bootstrap(&group, &ctx)).await;
-                    let _ = self.fed.publish(&gram.receiver, ab.clone()).await;
-                    let _ = self.group_pub.send(ab); // 火管兜底（发送方 home 必在火管上）
+                    self.ack_accum.lock().unwrap().push(crate::AckItem {
+                        gid: gram.receiver.clone(),
+                        sender: gram.sender.clone(),
+                        gram_id: gram.gram_id,
+                        sender_home: origin.clone(),
+                    });
                 }
             }
             Some(nm_proto::pb::group_gossip::Body::Direct(gram)) => {
@@ -276,6 +278,31 @@ impl Node {
                         }
                         Ok((false, _)) => {} // 非本节点跟踪的条目
                         Err(e) => tracing::warn!("group_outbox_ack_node failed: {e}"),
+                    }
+                }
+            }
+            Some(nm_proto::pb::group_gossip::Body::GroupAckBatch(batch)) => {
+                // 聚合销账：本节点可能是其中部分条目的发送方 home（持 group_outbox）。一次读预检 +（有命中才）
+                // 一个写事务处理整批 —— 非发送方零写事务。别的 home 的条目在本地无匹配，自动跳过。
+                // 保留 legacy GroupAck 臂不动：老发送方 home 仍收逐条 ack（向后兼容）。
+                if let Some(s) = &ctx.store {
+                    let entries: Vec<(Vec<u8>, Vec<u8>, u64)> = batch
+                        .acks
+                        .iter()
+                        .map(|e| (e.gid.clone(), e.sender.clone(), e.gram_id))
+                        .collect();
+                    match s.group_outbox_ack_batch(&batch.node, &entries) {
+                        Ok((acked, cleared)) => {
+                            if acked > 0 {
+                                ctx.group_metrics
+                                    .acks
+                                    .fetch_add(acked as u64, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            if cleared > 0 {
+                                tracing::debug!(cleared, "group outbox entries cleared by GroupAckBatch");
+                            }
+                        }
+                        Err(e) => tracing::warn!("group_outbox_ack_batch failed: {e}"),
                     }
                 }
             }
@@ -669,12 +696,91 @@ impl Node {
             }
         })
     }
+
+    /// 群 ack 聚合 flush 任务（~250ms 窗口）：把累加器里的待回执按 (gid,sender,gram_id) 去重后，
+    /// 按发送方 home 能力分流——支持 GroupAckBatch 的 → 合并为批量 gram 仅发火管一次；不支持的（老节点/
+    /// 能力未知）→ 回退逐条 GroupAck 双写（每群主题 + 火管），完全复刻旧行为 → 混版零丢失。
+    /// 窗口 ≪ 首退避 2s → 不触发误重传。镜像 spawn_pending_flush 的 select 循环。
+    pub fn spawn_group_ack_batcher(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let me = self.ep.id_bytes().to_vec();
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = self.shutdown.cancelled() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(crate::GROUP_ACK_BATCH_MS)) => {}
+                }
+                // drain：取出累加器（guard 不跨 await；空窗直接下一轮）。
+                let items = {
+                    let mut g = self.ack_accum.lock().unwrap();
+                    if g.is_empty() { continue; }
+                    std::mem::take(&mut *g)
+                };
+                // 去重：(gid,sender,gram_id) → sender_home（保留最新）。
+                let mut uniq: std::collections::HashMap<(Vec<u8>, Vec<u8>, u64), Vec<u8>> =
+                    std::collections::HashMap::with_capacity(items.len());
+                for it in items {
+                    uniq.insert((it.gid, it.sender, it.gram_id), it.sender_home);
+                }
+                // 分流：支持批量的发送方 home → 批量桶；否则（老节点/能力未知）→ legacy 桶。
+                let mut batch: Vec<nm_proto::pb::GroupAckEntry> = Vec::new();
+                let mut legacy: Vec<(Vec<u8>, Vec<u8>, u64)> = Vec::new();
+                for ((gid, sender, gram_id), home) in uniq {
+                    if self.ack_batch_nodes.contains(&home) {
+                        batch.push(nm_proto::pb::GroupAckEntry { gid, sender, gram_id });
+                    } else {
+                        legacy.push((gid, sender, gram_id));
+                    }
+                }
+                // legacy 桶：逐条重建 GroupAck → 每群主题（若知群）+ 火管双写（复刻旧行为）。
+                if !legacy.is_empty() {
+                    let ctx = self.ctx();
+                    for (gid, sender, gram_id) in legacy {
+                        let ack = GroupGossip {
+                            origin: me.clone(),
+                            body: Some(nm_proto::pb::group_gossip::Body::GroupAck(nm_proto::pb::GroupAck {
+                                gid: gid.clone(),
+                                sender,
+                                gram_id,
+                                crc: Vec::new(), // 销账键不含 crc；消费端忽略，留空
+                                node: me.clone(),
+                            })),
+                        };
+                        let ab = ack.encode_to_vec();
+                        if let Some(g) = self.groups.get(&gid).map(|g| g.clone()) {
+                            let _ = self.fed.join_group(&gid, group_bootstrap(&g, &ctx)).await;
+                            let _ = self.fed.publish(&gid, ab.clone()).await;
+                        }
+                        let _ = self.group_pub.send(ab); // 火管兜底（发送方 home 必在火管上）
+                    }
+                }
+                // 批量桶：按 GROUP_ACK_BATCH_MAX 分块 → GroupAckBatch 仅火管一次。
+                if !batch.is_empty() {
+                    let mut sent = 0u64;
+                    for chunk in batch.chunks(crate::GROUP_ACK_BATCH_MAX) {
+                        let bb = GroupGossip {
+                            origin: me.clone(),
+                            body: Some(nm_proto::pb::group_gossip::Body::GroupAckBatch(
+                                nm_proto::pb::GroupAckBatch { node: me.clone(), acks: chunk.to_vec() },
+                            )),
+                        };
+                        let _ = self.group_pub.send(bb.encode_to_vec());
+                        sent += 1;
+                    }
+                    self.group_metrics
+                        .ack_batches_sent
+                        .fetch_add(sent, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        })
+    }
 }
 
 /// 构造群 Announce 的 gossip 字节：origin=本节点；`supports_per_topic`=本节点能力广告（F1 协商）。
 /// 该标志是「节点能力」不是「群状态」——仅在 announce 瞬间按本节点 per_topic 置位，收端据 origin 跟踪。
 pub(crate) fn encode_announce(origin: &[u8], per_topic: bool, mut g: Group) -> Vec<u8> {
     g.supports_per_topic = per_topic;
+    g.supports_ack_batch = true; // 编译期能力：本版本成员/发送方均支持 GroupAckBatch（announce 恒 origin=self）
     GroupGossip {
         origin: origin.to_vec(),
         body: Some(nm_proto::pb::group_gossip::Body::Announce(g)),

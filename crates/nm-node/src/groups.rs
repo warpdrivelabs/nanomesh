@@ -70,6 +70,7 @@ pub(crate) fn group_create(
         avatar_url: op.avatar_url.clone(),
         home_node: node_id.to_vec(),
         supports_per_topic: false,
+        supports_ack_batch: false, // 能力位仅 announce 瞬态广告，非持久群状态（见 encode_announce）
     };
     persist_group(store, &group);
     groups.insert(group.group_id.clone(), group);

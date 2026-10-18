@@ -104,3 +104,70 @@ fn group_persist_reload_resumes() {
         assert_eq!(rows[0].gram_bytes, b"survive".to_vec());
     }
 }
+
+// ── ack 聚合（批量销账 group_outbox_ack_batch）──
+
+/// 一个批量覆盖多条条目：各自从待 ack 集移除同一 node（部分销账，未清空）。
+#[test]
+fn group_ack_batch_shrinks_multiple_entries() {
+    let (_d, s) = open();
+    let (gid, snd) = ([9u8; 32], [1u8; 32]);
+    let (n1, n2) = (vec![0xA1u8; 32], vec![0xB2u8; 32]);
+    for g in [10u64, 11, 12] {
+        s.group_outbox_put(&gid, &snd, g, 1000, 0, 1002, &[n1.clone(), n2.clone()], b"grp").unwrap();
+    }
+    let entries: Vec<(Vec<u8>, Vec<u8>, u64)> =
+        [10u64, 11, 12].iter().map(|g| (gid.to_vec(), snd.to_vec(), *g)).collect();
+    let (acked, cleared) = s.group_outbox_ack_batch(&n1, &entries).unwrap();
+    assert_eq!((acked, cleared), (3, 0), "三条各移除 n1,均剩 n2,无清空");
+    for row in s.group_outbox_all().unwrap() {
+        assert_eq!(row.pending_nodes, vec![n2.clone()]);
+    }
+}
+
+/// 待 ack 集只剩该 node 时，批量 ack 全清删除条目。
+#[test]
+fn group_ack_batch_clears_singleton_pending() {
+    let (_d, s) = open();
+    let (gid, snd) = ([9u8; 32], [1u8; 32]);
+    let n = vec![0xA1u8; 32];
+    s.group_outbox_put(&gid, &snd, 5, 1000, 0, 1002, &[n.clone()], b"x").unwrap();
+    let (acked, cleared) = s.group_outbox_ack_batch(&n, &[(gid.to_vec(), snd.to_vec(), 5)]).unwrap();
+    assert_eq!((acked, cleared), (1, 1));
+    assert!(s.group_outbox_all().unwrap().is_empty());
+}
+
+/// 批量里无一命中本地（非发送方节点快路径）→ 返回 (0,0) 且不触碰任何条目（只读，不开写事务）。
+#[test]
+fn group_ack_batch_no_match_leaves_state() {
+    let (_d, s) = open();
+    let (gid, snd) = ([9u8; 32], [1u8; 32]);
+    let x = vec![0x11u8; 32];
+    s.group_outbox_put(&gid, &snd, 5, 1000, 0, 1002, &[x.clone()], b"keep").unwrap(); // 哨兵
+    let entries = vec![
+        (gid.to_vec(), snd.to_vec(), 999u64), // 同群不同 gram_id
+        (vec![0xEE; 32], snd.to_vec(), 5u64), // 不同 gid
+    ];
+    let (acked, cleared) = s.group_outbox_ack_batch(&x, &entries).unwrap();
+    assert_eq!((acked, cleared), (0, 0), "无命中 → 零销账(只读快路径)");
+    let rows = s.group_outbox_all().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].pending_nodes, vec![x], "哨兵条目未被触碰");
+    assert_eq!(rows[0].gram_bytes, b"keep".to_vec());
+}
+
+/// 批内重复键去重 + 跨批量重复 ack 同节点幂等（不虚增 acked、不误清）。
+#[test]
+fn group_ack_batch_idempotent_and_dedup() {
+    let (_d, s) = open();
+    let (gid, snd) = ([9u8; 32], [1u8; 32]);
+    let (n1, n2) = (vec![0xA1u8; 32], vec![0xB2u8; 32]);
+    s.group_outbox_put(&gid, &snd, 5, 1000, 0, 1002, &[n1.clone(), n2.clone()], b"x").unwrap();
+    let dup = vec![(gid.to_vec(), snd.to_vec(), 5u64), (gid.to_vec(), snd.to_vec(), 5u64)];
+    let (acked, cleared) = s.group_outbox_ack_batch(&n1, &dup).unwrap();
+    assert_eq!((acked, cleared), (1, 0), "批内重复键去重 → 只移除一次");
+    assert_eq!(s.group_outbox_all().unwrap()[0].pending_nodes, vec![n2.clone()]);
+    let (acked2, _) = s.group_outbox_ack_batch(&n1, &[(gid.to_vec(), snd.to_vec(), 5)]).unwrap();
+    assert_eq!(acked2, 0, "重复 ack 同节点幂等,不计 acked");
+    assert_eq!(s.group_outbox_all().unwrap()[0].pending_nodes, vec![n2]);
+}

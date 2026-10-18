@@ -278,7 +278,7 @@ async fn system(State(st): State<AppState>) -> Json<Value> {
     let pm = *st.proc.lock().unwrap();
     let addr = st.node.addr();
     let (roam_changes, roam_last_ms) = st.node.roam_snapshot();
-    let (grp_fanouts, grp_acks, grp_retx, grp_giveups) = st.node.group_metrics_snapshot();
+    let (grp_fanouts, grp_acks, grp_retx, grp_giveups, grp_ack_batches) = st.node.group_metrics_snapshot();
     let tables: serde_json::Map<String, Value> = st
         .node
         .table_sizes()
@@ -304,6 +304,8 @@ async fn system(State(st): State<AppState>) -> Json<Value> {
         "group_acks": grp_acks,
         "group_retransmits": grp_retx,
         "group_giveups": grp_giveups,
+        // 群 ack 聚合：本节点作为成员发出的 GroupAckBatch 块数（块数 ≪ 被确认消息数 = 聚合生效）。
+        "group_ack_batches": grp_ack_batches,
     }))
 }
 
