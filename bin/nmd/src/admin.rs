@@ -99,6 +99,7 @@ pub async fn serve(
         .route("/storage", get(storage))
         .route("/traffic", get(traffic))
         .route("/system", get(system))
+        .route("/presence_dump", get(presence_dump))
         .route("/identity", get(identity))
         .route("/peers", get(peers))
         .route("/ban", post(ban))
@@ -272,6 +273,19 @@ fn traffic_json(t: &nm_transport::TrafficStat) -> Value {
         "grams_in": t.grams_in, "grams_out": t.grams_out,
         "bytes_in": t.bytes_in, "bytes_out": t.bytes_out,
     })
+}
+
+async fn presence_dump(State(st): State<AppState>) -> Json<Value> {
+    let me = hex(st.node.addr().id.as_bytes());
+    let rows: Vec<Value> = st
+        .node
+        .presence_dump()
+        .into_iter()
+        .map(|(entity, home, status, age)| {
+            json!({ "entity": entity, "home": home, "remote": home != me, "status": status, "age_s": age })
+        })
+        .collect();
+    Json(json!({ "me": me, "count": rows.len(), "presence": rows }))
 }
 
 async fn system(State(st): State<AppState>) -> Json<Value> {
