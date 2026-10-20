@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use nm_client::{Client, Session};
+use prost::Message;
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager, State, async_runtime};
 
@@ -84,6 +85,20 @@ pub(crate) async fn finish_session(
                 let s = recv_session.clone();
                 let g = gram.clone();
                 async_runtime::spawn(async move { let _ = s.send_receipt(&g).await; });
+            }
+            // P1-6 多设备已读：StateSync 的"已读标记"gram（payload 是 protobuf，非 UTF-8）。须在通用消息分支前拦截，
+            // 否则会被当普通消息乱显示。解出会话+已读位，发独立 read 事件给前端推进未读。
+            if let Some(p) = gram
+                .payload
+                .as_ref()
+                .filter(|p| p.type_url == "nmspace.v1/read.marker")
+            {
+                if let Ok(m) = nm_proto::ReadMarker::decode(p.value.as_slice()) {
+                    let _ = apph.emit("core://event", json!({
+                        "type": "read", "conversation": hex(&m.conversation), "readUpToMs": m.read_up_to_ms
+                    }));
+                }
+                continue;
             }
             let (type_url, body) = match gram.payload.as_ref() {
                 Some(p) => (

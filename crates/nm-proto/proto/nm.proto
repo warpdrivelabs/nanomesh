@@ -107,6 +107,11 @@ message Gram {
 message Command { string method = 1; Any params = 2; uint64 correlation_id = 3; uint32 timeout_ms = 4; Grant grant = 5; }
 message CommandResult { uint64 correlation_id = 1; bool ok = 2; Any result = 3; string error = 4; uint32 seq = 5; bool done = 6; }
 
+// P1-6 多设备已读同步：某账号在某会话(conversation = 对端 EntityId / group_id，32 字节)已读到 read_up_to_ms。
+// read.mark 命令写入(单调推进)并扇到账号其它在线设备；read.list 返回全部(客户端登录追平)。
+message ReadMarker { bytes conversation = 1; uint64 read_up_to_ms = 2; }
+message ReadMarkerList { repeated ReadMarker markers = 1; }
+
 // 目录（Directory）查询与结果（E1：实体注册 + 发现）。
 message DirectoryQuery {
   string kind_prefix = 1;                       // 如 "compute." 命中训练+推理；"" 匹配全部

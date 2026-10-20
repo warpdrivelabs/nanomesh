@@ -9,6 +9,7 @@ let CONVOS = {};                // 当前身份的会话：id -> [{id,from,body,
 let ACTIVE = null;              // 当前打开的聊天对端 id（与主区聊天框一致；关闭 tab 后清空）
 let DETAIL_ID = null;          // 当前查看详情的实体 id（实体目录高亮）
 let UNREAD = {};                // 当前身份的未读：id -> 数
+let READ_UPTO = {};             // P1-6：各会话已读到的时间戳 ms（多设备同步；用于清零未读/抑制已读消息重计）
 /** 主区当前正在显示的聊天对端：以 tab 为准，不用列表选中残留。 */
 function viewingPeer() {
   if (window.Tabs) {
@@ -46,7 +47,7 @@ window.entityName = function (id) { if (id === MY_ID) return "我"; const c = en
 window.openGroupChat = function (gid) {
   const g = window.Groups && Groups.byId(gid);
   const title = g ? (g.name || "群") : shortId(gid);
-  const draw = () => { ACTIVE = gid; DETAIL_ID = null; UNREAD[gid] = 0; scheduleUnread(); renderPanels(); renderConversation(); };
+  const draw = () => { ACTIVE = gid; DETAIL_ID = null; UNREAD[gid] = 0; syncRead(gid); scheduleUnread(); renderPanels(); renderConversation(); };
   if (window.Tabs) Tabs.open({ key: "c:" + gid, kind: "chat", title, ico: "groups", render: draw });
   else draw();
 };
@@ -54,7 +55,7 @@ window.openGroupChat = function (gid) {
 window.openChannel = function (cid) {
   const c = window.Channels && Channels.byId(cid);
   const title = c ? (c.name || "频道") : shortId(cid);
-  const draw = () => { ACTIVE = cid; DETAIL_ID = null; UNREAD[cid] = 0; scheduleUnread(); renderPanels(); renderConversation(); };
+  const draw = () => { ACTIVE = cid; DETAIL_ID = null; UNREAD[cid] = 0; syncRead(cid); scheduleUnread(); renderPanels(); renderConversation(); };
   if (window.Channels && Channels.pullHistory) Channels.pullHistory(cid);
   if (window.Tabs) Tabs.open({ key: "c:" + cid, kind: "chat", title, ico: "channels", render: draw });
   else draw();
@@ -115,13 +116,54 @@ function scheduleUnread() {
 }
 window.addEventListener("pagehide", () => { if (window.ChatLog) ChatLog.setUnread(UNREAD); });
 
+// ── P1-6 多设备已读同步 ──
+// 某会话本地最新消息时间戳（无消息返回 0）。
+function convLastTs(id) {
+  const m = (window.ChatLog && ChatLog.meta) ? ChatLog.meta(id) : null;
+  return (m && m.last && m.last.ts) ? m.last.ts : 0;
+}
+// 本端读某会话 → 推进本地已读位（立即）并上报节点（去抖 400ms 合并连读；节点单调写入+扇到本账号其它在线设备）。
+let _readSyncTimers = {};
+function syncRead(id) {
+  if (!id) return;
+  const ts = convLastTs(id) || Date.now();
+  READ_UPTO[id] = Math.max(READ_UPTO[id] || 0, ts);
+  clearTimeout(_readSyncTimers[id]);
+  _readSyncTimers[id] = setTimeout(() => {
+    if (window.NM) NM.inv("read_mark", { conv: id, readUpToMs: convLastTs(id) || ts }).catch(() => {});
+  }, 400);
+}
+window.syncRead = syncRead;
+// 收到本账号其它设备（实时 read 事件）的已读位 → 推进本地；若已追平该会话最新消息则清未读。
+function applyReadMarker(conv, ts) {
+  if (!conv) return;
+  ts = Number(ts) || 0;
+  if (ts <= (READ_UPTO[conv] || 0)) return;
+  READ_UPTO[conv] = ts;
+  if (ts >= convLastTs(conv) && UNREAD[conv]) { UNREAD[conv] = 0; scheduleUnread(); renderPanels(); }
+}
+window.applyReadMarker = applyReadMarker;
+
 async function imStart(myId) {
   MY_ID = myId || "";
   CONVOS = CONVOS_BY_USER[MY_ID] = {};
   UNREAD = UNREAD_BY_USER[MY_ID] = {};
+  READ_UPTO = {}; // P1-6：每次（切身份）连接重置已读位，随后经 read_list 追平
   if (window.ChatLog) await ChatLog.open(MY_ID);
   if (MY_ID !== (myId || "")) return;
   UNREAD = Object.assign(UNREAD, window.ChatLog ? ChatLog.unread() : {});
+  // P1-6：从节点拉取各会话已读位，追平离线期间别设备产生的已读（在线变化经 read 事件实时到）。
+  try {
+    const marks = await NM.inv("read_list", {});
+    if (Array.isArray(marks)) {
+      for (const [conv, ts] of marks) {
+        const t = Number(ts) || 0;
+        READ_UPTO[conv] = Math.max(READ_UPTO[conv] || 0, t);
+        if (t >= convLastTs(conv)) UNREAD[conv] = 0;
+      }
+      scheduleUnread();
+    }
+  } catch (_) { /* 节点不可达：用本地未读 */ }
   ACTIVE = null; DETAIL_ID = null;
   if (window.ListCache) await ListCache.bind(MY_ID);
   const snap = window.ListCache ? ListCache.snapshot() : {};

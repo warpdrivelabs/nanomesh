@@ -71,6 +71,9 @@ const BLOB_META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("blob_meta
 /// P0-3 死信：投递达期限放弃时落档，key = sender(32)++receiver(32)++gram_id(8BE)++first_ms(8BE)，value = gram_bytes。
 /// 供诊断/人工补投；按 first_ms 龄裁剪，不无界增长。
 const DEAD_LETTER: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dead_letter");
+/// P1-6 多设备已读：key = account(32)++conversation(32)，value = last_read_ms(8BE，单调不减)。
+/// conversation = 对端 EntityId(单聊) / group_id(群)，由客户端定义；本层只做按账号的单调 KV + 前缀扫。
+const READ_STATE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("read_state");
 
 /// 当前存储模式版本。每次对**手工字节键/值布局**或表语义做破坏性变更即 +1，并补一条迁移。
 const SCHEMA_VERSION: u32 = 1;
@@ -165,6 +168,7 @@ impl RedbStore {
             wtx.open_table(META).map_err(db_err)?;
             wtx.open_table(BLOB_META).map_err(db_err)?;
             wtx.open_table(DEAD_LETTER).map_err(db_err)?;
+            wtx.open_table(READ_STATE).map_err(db_err)?;
         }
         wtx.commit().map_err(db_err)?;
         let store = Self { db, path };
@@ -1494,6 +1498,54 @@ impl RedbStore {
         }
         Ok(out)
     }
+
+    // ── P1-6 多设备已读状态（key = account(32)++conversation(32)，value = last_read_ms(8BE)，单调）──
+
+    fn read_state_key(account: &[u8], conv: &[u8]) -> Vec<u8> {
+        let mut k = Vec::with_capacity(account.len() + conv.len());
+        k.extend_from_slice(account);
+        k.extend_from_slice(conv);
+        k
+    }
+
+    /// 单调推进某会话已读位（单事务 RMW）：仅当 `ms` > 现值才写。返回是否确有推进（上层据此决定是否扇出同步）。
+    pub fn read_state_set(&self, account: &[u8], conv: &[u8], ms: u64) -> Result<bool> {
+        let key = Self::read_state_key(account, conv);
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        let advanced;
+        {
+            let mut t = wtx.open_table(READ_STATE).map_err(db_err)?;
+            let cur = t.get(key.as_slice()).map_err(db_err)?
+                .and_then(|v| v.value().get(..8).and_then(|s| s.try_into().ok()).map(u64::from_be_bytes))
+                .unwrap_or(0);
+            if ms > cur {
+                t.insert(key.as_slice(), ms.to_be_bytes().as_slice()).map_err(db_err)?;
+                advanced = true;
+            } else {
+                advanced = false;
+            }
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(advanced)
+    }
+
+    /// 某账号全部已读位（前缀扫）：返回 (conversation(32), last_read_ms)。供客户端登录追平。
+    pub fn read_state_all(&self, account: &[u8]) -> Result<Vec<(Vec<u8>, u64)>> {
+        let (lo, hi) = prefix_range(account);
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(READ_STATE).map_err(db_err)?;
+        let mut out = Vec::new();
+        for item in t.range(lo.as_slice()..hi.as_slice()).map_err(db_err)? {
+            let (k, v) = item.map_err(db_err)?;
+            let k = k.value();
+            if k.len() == account.len() + 32 {
+                let conv = k[account.len()..].to_vec();
+                let ms = u64::from_be_bytes(v.value().get(..8).and_then(|s| s.try_into().ok()).unwrap_or([0u8; 8]));
+                out.push((conv, ms));
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// INBOX value 编解码（P0-1 入库时间前缀）：`recv_ms(8BE) ++ prost(Gram)`。
@@ -1674,6 +1726,24 @@ mod tests {
         // 迁移后版本已戳为当前，二次打开不再迁移。
         drop(s);
         let _ = RedbStore::open(&path).unwrap();
+    }
+
+    #[test]
+    fn read_state_monotonic_and_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = RedbStore::open(dir.path().join("t.redb")).unwrap();
+        let acct = [1u8; 32];
+        let conv_a = [2u8; 32];
+        let conv_b = [3u8; 32];
+        assert!(s.read_state_set(&acct, &conv_a, 100).unwrap(), "首写推进");
+        assert!(!s.read_state_set(&acct, &conv_a, 50).unwrap(), "更小值不推进(单调)");
+        assert!(s.read_state_set(&acct, &conv_a, 200).unwrap(), "更大值推进");
+        assert!(s.read_state_set(&acct, &conv_b, 77).unwrap());
+        let m: std::collections::HashMap<Vec<u8>, u64> = s.read_state_all(&acct).unwrap().into_iter().collect();
+        assert_eq!(m.len(), 2);
+        assert_eq!(m[&conv_a.to_vec()], 200);
+        assert_eq!(m[&conv_b.to_vec()], 77);
+        assert!(s.read_state_all(&[9u8; 32]).unwrap().is_empty(), "别的账号不串");
     }
 
     #[test]

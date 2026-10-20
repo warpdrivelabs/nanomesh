@@ -31,6 +31,32 @@ pub(crate) async fn roster_list(
         .map_err(|e| e.to_string())
 }
 
+/// P1-6 多设备已读：把某会话（`conv` = 对端 id / 群 id，64 hex）的已读位推进到 `read_up_to_ms`。
+/// 节点单调写入（只进不退）并扇到本账号其它在线设备；离线设备下次登录经 `read_list` 追平。
+#[tauri::command]
+pub(crate) async fn read_mark(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    conv: String,
+    read_up_to_ms: u64,
+) -> Result<(), String> {
+    let id = parse_id(&conv)?;
+    send_with_retry(&app, &state, move |s| async move { s.read_mark(id, read_up_to_ms).await }).await
+}
+
+/// P1-6：拉取本账号全部会话的已读位 `(conv_hex, read_up_to_ms)`，登录后调用以追平离线期间别设备的已读。
+#[tauri::command]
+pub(crate) async fn read_list(
+    state: State<'_, AppState>,
+) -> Result<Vec<(String, u64)>, String> {
+    let session = session_of(&state).await?;
+    session
+        .read_list()
+        .await
+        .map(|v| v.into_iter().map(|(id, ms)| (hex(&id), ms)).collect())
+        .map_err(|e| e.to_string())
+}
+
 /// Roster — add or update one contact.
 #[tauri::command]
 pub(crate) async fn roster_add(

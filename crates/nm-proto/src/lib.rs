@@ -18,6 +18,7 @@ pub use pb::{
     ChannelPubReq, Command, CommandResult,
     DeviceCert, DeviceInfo, DeviceList, DeviceRevoke, DirectoryQuery, Entity, EntityList, Grant, Gram, FedSyncReq, FedSyncResp, GramKind, Group,
     GroupAck, GroupAckBatch, GroupAckEntry, GroupGossip, GroupList, GroupOp, JobSpec, NameList, NameOp, NameQuery, NameRecord, PubPolicy,
+    ReadMarker, ReadMarkerList,
 };
 
 /// 协议主版本；握手时协商，拒绝不兼容主版本。

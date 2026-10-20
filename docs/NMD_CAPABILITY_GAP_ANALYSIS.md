@@ -234,3 +234,33 @@ E2E（P1-5）与账号密钥恢复/轮换（P1-7）按用户要求暂缓；本�
 **改动文件**：`crates/nm-node/src/{lib,node_runtime,federation_runtime,protocol,admin_api}.rs`、`crates/nm-store/src/lib.rs`、`bin/nmd/src/{admin,main}.rs`、`bin/nm-admind/src/{auth,main}.rs`。
 
 **待验证（部署后）**：`curl http://127.0.0.1:9611/metrics` 看 OpenMetrics 输出；`curl -XPOST .../reload` + `kill -HUP <nmd>` 看热加载审计日志；连错密码 5 次看 nm-admind 登录锁定。
+
+---
+
+## 附录 D：P1-6 多设备已读状态同步实施记录（2026-10-20，已落地）
+
+后端机制完成；客户端 UI（未读角标归并）为消费方后续接入。`cargo check --workspace` 通过；nm-store 新增 `read_state_monotonic_and_scan` 测试通过（nm-store 共 9 项）。
+
+**模型**：后端只做「账号→会话→已读时刻」的**单调 KV + 自有设备扇出**，对 `conversation` 视作 32 字节不透明键，语义由客户端定义（单聊=对端 EntityId，群=group_id）。未读数由客户端据已读位派生。
+
+- **proto**（`crates/nm-proto/proto/nm.proto` + `src/lib.rs` 导出）：`ReadMarker{conversation, read_up_to_ms}`、`ReadMarkerList{repeated markers}`。
+- **store**（`crates/nm-store/src/lib.rs`）：新表 `READ_STATE`（key=account(32)++conversation(32)，value=last_read_ms(8BE)）；`read_state_set`（单事务 RMW，**仅当新值>旧值才写**，返回是否推进）；`read_state_all`（按账号前缀扫）。
+- **node**（新模块 `crates/nm-node/src/read_sync.rs` + `protocol.rs` 两个 dispatch 臂）：
+  - `read.mark`：持久化（单调）→ 若推进则构造 `kind=StateSync`（=41，复用既有空枚举值）、`payload.type_url="nmspace.v1/read.marker"` 的系统 gram，经 `deliver_account(caller, …, store_offline=false, skip=本设备)` 扇到账号**其它在线设备**（离线不入库，避免信箱膨胀）。
+  - `read.list`：返回账号全部已读位，供客户端登录后追平离线期间别设备的已读变化。
+- **nm-client**（新 `crates/nm-client/src/session_read.rs`）：`Session::read_mark(conversation, read_up_to_ms)` / `Session::read_list() -> Vec<([u8;32], u64)>`，使协议可被客户端调用。
+
+**安全**：`caller` 为已鉴权账号（device.hello 后 principal=账号），只能改自己的已读态、只扇给自己的设备；跨账号不可达。
+
+**消费方待接入（Tauri app / clients）**：① 用户读某会话时调 `read.mark`；② 处理入站 `StateSync` gram（`type_url=nmspace.v1/read.marker`）→ 推进本地未读；③ 登录后调 `read.list` 追平；④ 由已读位派生未读角标（替换现有纯本机 per-device `unread`）。
+
+**改动文件**：`crates/nm-proto/proto/nm.proto`、`crates/nm-proto/src/lib.rs`、`crates/nm-store/src/lib.rs`、`crates/nm-node/src/{read_sync.rs(新),lib.rs,protocol.rs}`、`crates/nm-client/src/{session_read.rs(新),lib.rs}`。
+
+### 附录 D 续：桌面 app 消费端已接入（2026-10-20）
+
+P1-6 后端机制的桌面消费端（`clients/app`）已接上，已读状态真正跨设备可见。`cargo check`(nmspace-app) 通过；4 个 UI js `node --check` 通过。
+
+- **src-tauri**：`social.rs` 加 `read_mark(conv, read_up_to_ms)` / `read_list()` 两个 tauri 命令（调 `Session::read_mark/read_list`，`send_with_retry`/`session_of`）；`runtime.rs` 注册；`connection.rs` 入站 gram 泵在通用消息分支**之前**加 `type_url=="nmspace.v1/read.marker"` 分支 → `ReadMarker::decode` → emit `core://event {type:"read", conversation, readUpToMs}`（需 `use prost::Message;`）。
+- **ui/js**：`im.js` 加 `READ_UPTO` map + `convLastTs`/`syncRead`(去抖 400ms)/`applyReadMarker` helpers；`imStart` 重置 READ_UPTO + 登录后 `read_list` 追平；开会话三处(selectContact/openGroupChat/openChannel)调 `syncRead`；`im_events.js` onCoreEvent 加 `read` 事件分支→applyReadMarker，并把未读自增改为「正在看→syncRead；没看且 `m.ts>READ_UPTO` 才++」；`im_tray_bridge.js` imMarkRead/imMarkAllRead 调 syncRead。
+- **链路**：开会话→syncRead→read_mark→节点单调写+扇 StateSync 给在线他设备→他设备 pump emit read 事件→applyReadMarker 清角标；离线设备登录 read_list 追平。
+- **未做**：`clients/mobile`（镜像结构，独立项目，另行接入）；端到端双设备实测需手动 QA（编译+语法+逻辑已校验）。

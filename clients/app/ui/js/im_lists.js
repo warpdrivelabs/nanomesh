@@ -253,7 +253,7 @@ function selectContact(id) {
   if (window.Channels && Channels.byId && Channels.byId(id)) { openChannel(id); return; }
   const c = entityById(id) || { id, name: "" };
   const title = c.name || shortId(id);
-  const draw = () => { ACTIVE = id; DETAIL_ID = null; UNREAD[id] = 0; scheduleUnread(); renderPanels(); renderConversation(); };
+  const draw = () => { ACTIVE = id; DETAIL_ID = null; UNREAD[id] = 0; syncRead(id); scheduleUnread(); renderPanels(); renderConversation(); };
   if (window.Tabs) Tabs.open({ key: "c:" + id, kind: "chat", title, ico: "chat", render: draw });
   else draw();
 }

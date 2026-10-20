@@ -128,6 +128,7 @@ function onCoreEvent(ev) {
     return;
   }
   if (ev.type === "receipt") { handleReceipt(ev); return; }
+  if (ev.type === "read") { if (window.applyReadMarker) applyReadMarker(ev.conversation, ev.readUpToMs); return; } // P1-6 本账号其它设备已读同步
   if (ev.type !== "message" || !ev.msg) return;
   const m = ev.msg;
   if (m.typeUrl === AGENT_DELTA_TYPE) { handleAgentDelta(m); return; }
@@ -136,7 +137,11 @@ function onCoreEvent(ev) {
   pushMsg(key, m).then((fresh) => {
     // 「已读」只看主区是否正在显示该聊天框，不看消息列表残留选中。
     const seen = isChatOpen(key) && (!window.Tray || Tray.focused());
-    if (fresh && !mine && !seen) {
+    if (seen) {
+      // 正在看该会话 → 视为已读：推进已读位并（去抖）同步本账号其它设备。
+      if (window.syncRead) syncRead(key);
+    } else if (fresh && !mine && m.ts > (READ_UPTO[key] || 0)) {
+      // 未在看、他人新消息、且比已读位新（排除别设备已读过的）→ 计未读。
       UNREAD[key] = (UNREAD[key] || 0) + 1;
       scheduleUnread();
     }

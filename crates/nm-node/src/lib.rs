@@ -36,6 +36,7 @@ mod protocol;
 mod records;
 mod retire;
 mod roster;
+mod read_sync;
 mod s2s;
 use channels::Channels;
 use dedup::SeenGrams;

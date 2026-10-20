@@ -38,6 +38,7 @@ use crate::presence::{presence_status, PresenceRec};
 use crate::records::hex_decode_n;
 use crate::retire::group_topic_retireable;
 use crate::roster::{roster_add, roster_list, roster_remove, roster_update};
+use crate::read_sync::{read_list, read_mark};
 use crate::{now_secs, Ctx, SessionMeta, LIVE_TTL_MS};
 
 /// nmspace 单播/命令/联邦协议处理器：包住既有的每连接处理逻辑，注册到 `Router` 的 `nmspace/0`。
@@ -544,6 +545,8 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Op
         "roster.add" => roster_add(ctx, caller, &cmd),
         "roster.remove" => roster_remove(ctx, caller, &cmd),
         "roster.update" => roster_update(ctx, caller, &cmd),
+        "read.mark" => read_mark(ctx, caller, rid, &cmd).await, // P1-6 多设备已读：写入并扇到在线设备
+        "read.list" => read_list(ctx, caller),                  // P1-6 登录追平：拉取账号全部已读位
         "blob.put" => blob_put(ctx, &cmd),
         "blob.get" => blob_get(ctx, &cmd).await,
         "group.create" => group_create(&cmd, groups, store, caller, ctx.node_id.as_slice()),

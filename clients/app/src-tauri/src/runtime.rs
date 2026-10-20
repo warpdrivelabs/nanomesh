@@ -75,6 +75,8 @@ pub(crate) fn run() {
             social::roster_add,
             social::roster_remove,
             social::roster_update,
+            social::read_mark,
+            social::read_list,
             social::group_create,
             social::group_list,
             social::group_add,
