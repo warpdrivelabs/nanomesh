@@ -204,20 +204,6 @@ impl Node {
         )
     }
 
-    /// 临时诊断：presence 表快照。每条 (entity, home_node, status, age_secs)——
-    /// home_node != 本节点 = 收到的远端 gossip 卡片；全是本节点 = 没收到任何远端 presence。
-    pub fn presence_dump(&self) -> Vec<(String, String, String, u64)> {
-        fn hx(b: &[u8]) -> String { b.iter().map(|x| format!("{x:02x}")).collect() }
-        let now = crate::now_secs();
-        self.presence
-            .iter()
-            .map(|e| {
-                let r = e.value();
-                (hx(e.key()), hx(&r.home_node), r.status.clone(), now.saturating_sub(r.last_seen))
-            })
-            .collect()
-    }
-
     /// 全部已登记设备快照（后端管理台「域内命名登记」下展开某账号的设备列表用）。
     pub fn devices_snapshot(&self) -> Vec<nm_proto::DeviceInfo> {
         self.devices

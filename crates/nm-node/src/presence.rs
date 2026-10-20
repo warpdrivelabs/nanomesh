@@ -97,35 +97,42 @@ impl Node {
     fn on_presence_msg(&self, content: &[u8]) {
         let ann: PresenceAnnounce = match serde_json::from_slice(content) {
             Ok(a) => a,
-            Err(_) => return,
+            Err(_) => { tracing::debug!("PRESDBG recv: json decode fail"); return; }
         };
+        tracing::debug!(entity=%ann.entity.chars().take(12).collect::<String>(), home=%ann.home_node.chars().take(12).collect::<String>(), status=%ann.status, ts=ann.ts, "PRESDBG recv card");
         let (home, entity) = match (hex_decode_n::<32>(&ann.home_node), hex_decode_n::<32>(&ann.entity)) {
             (Some(h), Some(e)) => (h, e),
-            _ => return,
+            _ => { tracing::debug!("PRESDBG drop: hex decode fail"); return; }
         };
         if self.blacklist.contains(&entity) || self.blacklist.contains(&home) {
+            tracing::debug!("PRESDBG drop: blacklist");
             return;
         }
         let sig = match hex_decode_n::<64>(&ann.sig) {
             Some(s) => s,
-            None => return,
+            None => { tracing::debug!("PRESDBG drop: sig hex fail"); return; }
         };
         let signing = Self::presence_signing_bytes(&home, &entity, ann.ts, &ann.status);
         if nm_crypto::verify_bytes(&home, &signing, &sig).is_err() {
+            tracing::debug!("PRESDBG drop: SIG VERIFY FAIL");
             return;
         }
         let now = now_secs();
         if ann.ts + 300 < now || ann.ts > now + 300 {
+            tracing::debug!(ts=ann.ts, now=now, "PRESDBG drop: stale/future");
             return; // 反陈旧/未来
         }
         if account_online(&self.sessions, &self.principals, &self.devices, &entity) {
+            tracing::debug!("PRESDBG drop: account_online local override");
             return; // 本地在线会话权威，不被远端覆盖
         }
         if let Some(cur) = self.presence.get(&entity[..]) {
             if cur.last_seen >= ann.ts {
+                tracing::debug!("PRESDBG drop: LWW older");
                 return; // LWW：仅接受更新的
             }
         }
+        tracing::debug!(entity=%ann.entity.chars().take(12).collect::<String>(), "PRESDBG ACCEPT card");
         self.presence.insert(
             entity.to_vec(),
             PresenceRec { status: ann.status, last_seen: ann.ts, home_node: home.to_vec() },
@@ -145,6 +152,8 @@ impl Node {
             tracing::info!(%federation, "presence gossip joined");
             let interval = std::time::Duration::from_secs(PRESENCE_INTERVAL_SECS);
             let mut last_bcast = tokio::time::Instant::now() - interval;
+            // 换网/休眠唤醒自愈：0 邻居时 nudge iroh 重探测的冷却计时（避免每秒狂触发）。
+            let mut last_net_nudge: Option<tokio::time::Instant> = None;
             loop {
                 if last_bcast.elapsed() >= interval {
                     let home = self.ep.id_bytes();
@@ -195,7 +204,20 @@ impl Node {
                             Ok(t) => topic = t,
                             Err(_) => tokio::time::sleep(std::time::Duration::from_secs(2)).await,
                         },
-                        Err(_) => {}
+                        // 超时(1s 无消息)：若悄悄掉到 0 邻居(连接 churn 但流未结束,直连/换网易触发)
+                        // → 重新注入 bootstrap 自愈。否则 presence 无 outbox/重传冗余会永久失联(对端看不到在线态)。
+                        Err(_) => {
+                            if topic.neighbor_count() == 0 {
+                                // 同 IP 唤醒不触发换网回调 → iroh 可能还抱着死的 relay 连接。
+                                // 带冷却地 nudge 它重探测/重 home relay,让 rejoin 真能连上。
+                                let now = tokio::time::Instant::now();
+                                if last_net_nudge.map_or(true, |t| now.duration_since(t).as_secs() >= 30) {
+                                    self.notify_network_change().await;
+                                    last_net_nudge = Some(now);
+                                }
+                                let _ = topic.rejoin(self.peers_list()).await;
+                            }
+                        }
                     }
                 }
             }

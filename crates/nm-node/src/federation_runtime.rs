@@ -533,7 +533,12 @@ impl Node {
                             Ok(t) => topic = t,
                             Err(_) => tokio::time::sleep(std::time::Duration::from_secs(2)).await,
                         },
-                        Err(_) => {}
+                        // 超时:火管主题悄悄掉到 0 邻居 → 重注入 bootstrap 自愈(直连/换网 churn 下必需)。
+                        Err(_) => {
+                            if topic.neighbor_count() == 0 {
+                                let _ = topic.rejoin(self.peers_list()).await;
+                            }
+                        }
                     }
                 }
             }

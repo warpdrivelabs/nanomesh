@@ -262,8 +262,9 @@ async function sendMsg(text) {
     } else if (isGroup) {
       // 乐观插入(status=0 发送中)；send_group 返回原 gram_id → 升单勾✓(消息已达 home node)。
       // 群聊只到单勾(无逐成员已读聚合)；接收方不对群消息回 client-receipt，故不会升双勾。
+      // 必须 await pushMsg：否则 agent 首包 delta 会同步抢先插入 VIEW/SQLite，气泡跑到用户消息上方。
       localId = "l" + Date.now();
-      pushMsg(ACTIVE, { id: localId, from: MY_ID, body: text, ts: Date.now(), group: true, to: ACTIVE, status: 0 });
+      await pushMsg(ACTIVE, { id: localId, from: MY_ID, body: text, ts: Date.now(), group: true, to: ACTIVE, status: 0 });
       const g = await NM.inv("send_group", { groupId: ACTIVE, text });
       if (g) {
         const row = (VIEW.id === ACTIVE) && VIEW.rows.find((r) => r.id === localId);
@@ -272,8 +273,9 @@ async function sendMsg(text) {
       }
     } else {
       // 乐观插入(status=0 发送中)；send_to 返回原 gram_id → 升单勾✓并写 gramId(后续双勾按它匹配)。
+      // 必须 await pushMsg：agent 流式首包很快时，未入库的用户气泡会被回复抢跑到前面。
       localId = "l" + Date.now();
-      pushMsg(ACTIVE, { id: localId, from: MY_ID, body: text, ts: Date.now(), to: ACTIVE, status: 0 });
+      await pushMsg(ACTIVE, { id: localId, from: MY_ID, body: text, ts: Date.now(), to: ACTIVE, status: 0 });
       const g = await NM.inv("send_to", { target: ACTIVE, text });
       if (g) {
         const row = (VIEW.id === ACTIVE) && VIEW.rows.find((r) => r.id === localId);
@@ -298,9 +300,10 @@ async function sendRich(media) {
       try { localStorage.removeItem("nm.chn.draft." + ACTIVE); } catch (_) {}
     } else {
       // 与文本一致：乐观插入(status=0 发送中)；send_rich 返回原 gram_id → 升单勾✓(私聊/群聊同处理)。
+      // await 乐观入库，避免快速回包（如 agent）抢先占 VIEW/ord。
       localId = "l" + Date.now();
       const encoded = Composer.encode(media);
-      pushMsg(ACTIVE, {
+      await pushMsg(ACTIVE, {
         id: localId, from: MY_ID, to: ACTIVE, ts: Date.now(), group: isGroup,
         typeUrl: "nmspace.v1/chat", body: encoded, status: 0,
       });

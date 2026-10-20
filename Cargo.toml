@@ -20,6 +20,7 @@ members = [
     "bin/nm-compute",
     "bin/nm-admind",
     "bin/nm-domain",
+    "bin/nm-relay-admin",
     "xtask",
 ]
 exclude = ["old_space", "clients", "crates/nm-agent-bridge"]

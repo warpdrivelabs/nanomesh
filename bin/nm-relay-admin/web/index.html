@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>nm-relay-admin · Relay / Pkarr</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <section id="login-view" class="card login">
+        <h1>Relay 管理台</h1>
+        <p class="muted">监控 iroh-relay / pkarr，管理对等节点拉黑</p>
+        <label>用户名<input id="user" value="admin" autocomplete="username" /></label>
+        <label>密码<input id="pass" type="password" autocomplete="current-password" /></label>
+        <button id="btn-login">登录</button>
+        <p id="login-err" class="err"></p>
+      </section>
+
+      <section id="main-view" class="hidden">
+        <header class="top">
+          <div>
+            <h1>Relay / Pkarr 监控</h1>
+            <p class="muted" id="health-line">—</p>
+          </div>
+          <div class="top-actions">
+            <button id="btn-refresh" class="ghost">刷新</button>
+            <button id="btn-logout" class="ghost">退出</button>
+          </div>
+        </header>
+
+        <nav class="tabs">
+          <button data-tab="overview" class="on">总览</button>
+          <button data-tab="peers">对等节点</button>
+          <button data-tab="blacklist">黑名单</button>
+          <button data-tab="pkarr">Pkarr</button>
+        </nav>
+
+        <div id="tab-overview" class="tab">
+          <div class="grid" id="overview-cards"></div>
+          <pre id="overview-raw" class="raw"></pre>
+        </div>
+
+        <div id="tab-peers" class="tab hidden">
+          <div class="toolbar">
+            <input id="peer-filter" placeholder="过滤 endpoint id…" />
+            <span class="muted" id="peer-count"></span>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Endpoint</th>
+                <th>状态</th>
+                <th>连接次数</th>
+                <th>最近见到</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="peers-body"></tbody>
+          </table>
+        </div>
+
+        <div id="tab-blacklist" class="tab hidden">
+          <div class="toolbar">
+            <input id="ban-id" placeholder="要拉黑的 endpoint id（z32 或 64 hex）" />
+            <input id="ban-note" placeholder="备注（可选）" />
+            <button id="btn-ban">拉黑</button>
+          </div>
+          <ul id="bl-list" class="list"></ul>
+        </div>
+
+        <div id="tab-pkarr" class="tab hidden">
+          <div class="grid" id="pkarr-cards"></div>
+          <div class="toolbar">
+            <input id="pkarr-key" placeholder="z-base-32 public key…" style="min-width:28rem" />
+            <button id="btn-pkarr">查询</button>
+          </div>
+          <pre id="pkarr-result" class="raw"></pre>
+        </div>
+      </section>
+
+      <dialog id="chg-dlg">
+        <form method="dialog" id="chg-form">
+          <h3>首次登录请修改密码</h3>
+          <label>原密码<input id="chg-old" type="password" required /></label>
+          <label>新密码<input id="chg-new" type="password" required minlength="6" /></label>
+          <menu>
+            <button value="ok" id="chg-ok">保存</button>
+          </menu>
+          <p id="chg-err" class="err"></p>
+        </form>
+      </dialog>
+    </div>
+    <script src="/app.js"></script>
+  </body>
+</html>

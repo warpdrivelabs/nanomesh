@@ -1,12 +1,14 @@
 // ── 🤖 agent 流式回复（打字机）：delta 帧按 streamId 增量长出**同一个**气泡 ──
 const AGENT_DELTA_TYPE = "nmspace.agent.delta.v1";
-const STREAMS = {}; // streamId -> { peer, text, maxSeq }
+// wire streamId → { peer, text, maxSeq, localId }
+// localId：落库/气泡 id；若 wire streamId 撞上历史消息则改用新 id，避免改旧气泡时间与位置。
+const STREAMS = {};
 
-function growStreamBubble(sid, peer, text) {
+function growStreamBubble(localId, peer, text, ts) {
   if (VIEW.id !== peer) return;                       // 该会话未在前台
-  let row = VIEW.rows.find((r) => r.id === sid);
+  let row = VIEW.rows.find((r) => r.id === localId);
   if (!row) {
-    const raw = { id: sid, from: peer, to: MY_ID, body: text, ts: Date.now(), typeUrl: "" };
+    const raw = { id: localId, from: peer, to: MY_ID, body: text, ts: ts || Date.now(), typeUrl: "" };
     row = window.Composer ? Composer.absorb(raw) : raw;
     VIEW.rows.push(row);
     if (VIEW.rows.length > 400) { VIEW.rows.shift(); VIEW.start += 1; }
@@ -16,7 +18,7 @@ function growStreamBubble(sid, peer, text) {
     return;
   }
   row.body = text; row.text = text;
-  const sel = (window.CSS && CSS.escape) ? CSS.escape(sid) : sid;
+  const sel = (window.CSS && CSS.escape) ? CSS.escape(localId) : localId;
   const el = document.querySelector(`.im-msg[data-mid="${sel}"] .im-bubble`);
   if (el) {
     el.textContent = text;                            // O(1) 原地更新，自动转义
@@ -34,22 +36,57 @@ function handleAgentDelta(m) {
   const peer = m.from;
   const sid = d.streamId;
   const seq = typeof d.seq === "number" ? d.seq : 0;
-  const st = STREAMS[sid] || (STREAMS[sid] = { peer, text: "", maxSeq: -1 });
+  // 权威时间取 wire timestamp_ms（首帧）；勿在 done 时用 Date.now() 覆盖，否则时钟/会话排序漂移。
+  const wireTs = Number(m.ts) || 0;
+  let st = STREAMS[sid];
+  if (!st) {
+    // 首帧：wire id 已存在于当前视图 → 视为撞历史，换本地唯一 id。
+    let localId = sid;
+    if (isChatOpen(peer) && VIEW.rows.some((r) => r.id === sid)) {
+      localId = sid + "~" + Date.now();
+    }
+    st = STREAMS[sid] = { peer, text: "", maxSeq: -1, localId, ts: wireTs || Date.now() };
+  } else if (wireTs && !st.ts) {
+    st.ts = wireTs;
+  }
   if (seq < st.maxSeq) return;                         // 乱序旧帧丢弃（累计全文，大 seq 为准）
   st.maxSeq = seq;
   if (typeof d.text === "string") st.text = d.text;
-  if (isChatOpen(peer)) growStreamBubble(sid, peer, st.text);
+  if (isChatOpen(peer)) growStreamBubble(st.localId, peer, st.text, st.ts);
   if (!d.done) return;
+  const localId = st.localId;
+  const ts = st.ts || wireTs || Date.now();
   delete STREAMS[sid];
-  const full = { id: sid, from: peer, to: MY_ID, body: st.text, ts: Date.now(), typeUrl: "" };
+  const full = { id: localId, from: peer, to: MY_ID, body: st.text, ts, typeUrl: "" };
   if (isChatOpen(peer)) {
-    // 气泡已在视图里；落库一次（ChatLog 按 id 去重）+ 刷新会话列表预览。
-    if (window.ChatLog) ChatLog.append(peer, window.Composer ? Composer.absorb(full) : full);
-    renderPanels();
+    // 气泡已在视图里；同步气泡 ts 后落库 + 刷新会话列表预览。
+    const row = VIEW.rows.find((r) => r.id === localId);
+    if (row) row.ts = ts;
+    const packed = window.Composer ? Composer.absorb(full) : full;
+    if (window.ChatLog) {
+      ChatLog.append(peer, packed).then((ok) => {
+        if (ok) { renderPanels(); return; }
+        const retry = Object.assign({}, packed, { id: localId + "~" + Date.now() });
+        if (row) row.id = retry.id;
+        ChatLog.append(peer, retry).then(() => renderPanels());
+      });
+    } else {
+      renderPanels();
+    }
   } else {
     // 会话未打开：按普通消息入库 + 列表 + 未读 + 托盘。
     pushMsg(peer, full).then((fresh) => {
-      if (!fresh) return;
+      if (!fresh) {
+        // INSERT OR IGNORE 撞历史 id：换 id 再试，避免静默丢回复。
+        const retry = Object.assign({}, full, { id: localId + "~" + Date.now() });
+        return pushMsg(peer, retry).then((ok2) => {
+          if (!ok2) return;
+          UNREAD[peer] = (UNREAD[peer] || 0) + 1;
+          scheduleUnread();
+          renderPanels();
+          if (window.Tray) Tray.onMessage(peer, retry);
+        });
+      }
       UNREAD[peer] = (UNREAD[peer] || 0) + 1;
       scheduleUnread();
       renderPanels();

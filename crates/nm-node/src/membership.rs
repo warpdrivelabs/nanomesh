@@ -323,6 +323,8 @@ impl Node {
             let _ = topic.publish(self.membership_card(&cfg.card)).await;
             let mut last_announce = tokio::time::Instant::now();
             let mut last_sweep = tokio::time::Instant::now();
+            // 换网/休眠唤醒自愈：0 邻居时 nudge iroh 重探测的冷却计时（避免每秒狂触发 re-probe）。
+            let mut last_net_nudge: Option<tokio::time::Instant> = None;
             loop {
                 if last_announce.elapsed() >= announce_iv {
                     if let Err(e) = topic.publish(self.membership_card(&cfg.card)).await {
@@ -345,7 +347,21 @@ impl Node {
                                 }
                             }
                         }
-                        Err(_) => {} // 超时：正常，回到循环顶部。
+                        Err(_) => {
+                            // 超时(1s 无消息)：若悄悄掉到 0 邻居(休眠唤醒/换网后连接全死但订阅流未关闭,
+                            // 不会走 Ok(None) 重 join)→ 用【最新】peers_list 重连,否则动态发现永久失联,
+                            // 只剩手动种子,其他节点再也学不到。镜像 presence 的自愈。
+                            if topic.neighbor_count() == 0 {
+                                // 同 IP 唤醒不触发换网回调 → iroh 可能还抱着死的 relay 连接。
+                                // 带冷却地 nudge 它重探测/重 home relay,让后续 rejoin 真能连上。
+                                let now = tokio::time::Instant::now();
+                                if last_net_nudge.map_or(true, |t| now.duration_since(t).as_secs() >= 30) {
+                                    self.notify_network_change().await;
+                                    last_net_nudge = Some(now);
+                                }
+                                let _ = topic.rejoin(self.peers_list()).await;
+                            }
+                        }
                     }
                 }
                 if last_sweep.elapsed() >= announce_iv {

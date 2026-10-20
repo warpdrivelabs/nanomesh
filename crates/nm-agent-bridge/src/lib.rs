@@ -381,7 +381,16 @@ pub mod serve {
             };
 
             stream_ctr += 1;
-            let stream_id = format!("{my_tag}-{stream_ctr}");
+            // streamId 即客户端消息 id：必须跨进程重启仍全局唯一。
+            // 旧式 `{agent短前缀}-{计数}` 重启后从 1 重计 → 撞历史气泡 id →
+            // 客户端原地改旧消息（时间/位置错乱）且 SQLite INSERT OR IGNORE 丢弃新回复。
+            // 绑入站 (sender, gram_id) + 毫秒时间 + 计数，保证每次回复一条新 id。
+            let stream_id = format!(
+                "{my_tag}-{}-{}-{}-{stream_ctr}",
+                hex(&sender[..4]),
+                gram.gram_id,
+                nm_proto::now_ms()
+            );
             let agent = agent.clone();
             let ops_tx = ops_tx.clone();
             // 每条 DM 一个处理任务：不同对端并发；同一对端经 peer_convo 锁串行有序。

@@ -2547,6 +2547,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "nm-relay-admin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "axum",
+ "axum-server",
+ "clap",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "nm-send"
 version = "0.1.0"
 dependencies = [
