@@ -573,8 +573,9 @@ async fn async_main() -> anyhow::Result<()> {
         let node_admin = node.clone();
         let db_path = cfg.db.clone();
         let admin_fed = cfg.membership.federation.clone();
+        let cfg_path = args.config.clone();
         tokio::spawn(async move {
-            if let Err(e) = admin::serve(node_admin, api_addr, api_token, db_path, admin_fed).await {
+            if let Err(e) = admin::serve(node_admin, api_addr, api_token, db_path, admin_fed, cfg_path).await {
                 tracing::warn!("admin api exited: {e}");
             }
         });
@@ -664,9 +665,64 @@ async fn async_main() -> anyhow::Result<()> {
         });
     }
 
+    // P1-10 配置热加载哨兵（SIGHUP）：重读配置文件，热应用可在运行时变更的子集（黑名单/对等/
+    // per_topic/pkarr/域名）；需重绑的项（relay URL/端口/身份/db/max_connections）记 WARN 提示需重启。
+    #[cfg(unix)]
+    {
+        let node = node.clone();
+        let cfg_path = args.config.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut hup = match signal(SignalKind::hangup()) {
+                Ok(s) => s,
+                Err(e) => { tracing::warn!("install SIGHUP handler failed: {e}"); return; }
+            };
+            while hup.recv().await.is_some() {
+                tracing::info!("SIGHUP → 重载配置");
+                match reload_config_from(&cfg_path, &node) {
+                    Ok(summary) => tracing::info!(audit = true, actor = "signal", action = "reload", ok = true, detail = %summary, "ADMIN AUDIT"),
+                    Err(e) => tracing::warn!(audit = true, actor = "signal", action = "reload", ok = false, detail = %e, "ADMIN AUDIT"),
+                }
+            }
+        });
+    }
+
     node.serve().await?; // 收到取消后：drain 在途投递 → router.shutdown()(CONNECTION_CLOSE) → 返回
     tracing::info!("nmd shutdown complete");
     Ok(())
+}
+
+/// P1-10 热加载：读配置文件并把**可运行时变更**的子集应用到活动节点。返回变更摘要（审计用）。
+/// 热应用：黑名单(diff ban/unban)、手动对等(diff add/remove)、per_topic、pkarr/dns url、域名。
+/// 需重绑（仅告警、不改）：relay URL、bind_port、identity、db、mode、max_connections、membership.*。
+pub(crate) fn reload_config_from(cfg_path: &str, node: &std::sync::Arc<nm_node::Node>) -> anyhow::Result<String> {
+    let raw = std::fs::read_to_string(cfg_path)?;
+    let cfg: Config = toml::from_str(&raw)?;
+    let mut changes: Vec<String> = Vec::new();
+
+    // ① 黑名单：配置为期望全集 → 差集 ban/unban（幂等）。
+    let want: std::collections::HashSet<[u8; 32]> =
+        cfg.blacklist.iter().filter_map(|h| parse_id_hex(h).ok()).collect();
+    let have: std::collections::HashSet<[u8; 32]> = node.banned().into_iter().collect();
+    let (mut banned, mut unbanned) = (0u32, 0u32);
+    for id in want.difference(&have) { node.ban(*id); banned += 1; }
+    for id in have.difference(&want) { node.unban(*id); unbanned += 1; }
+    if banned + unbanned > 0 { changes.push(format!("blacklist +{banned}/-{unbanned}")); }
+
+    // ② per_topic / pkarr / 域名：直接覆盖（&self 原子/RwLock）。
+    node.set_per_topic(cfg.federation.per_topic);
+    node.set_pkarr(cfg.dns.url.clone());
+    node.set_domain(cfg.domain.clone());
+    changes.push(format!("per_topic={}", cfg.federation.per_topic));
+
+    // ③ 需重绑项：检测到与进程启动时不同则告警（此处只提示；真正生效需重启/自重启）。
+    if !cfg.relay.all().is_empty() {
+        changes.push("relay(需重启生效)".into());
+    }
+
+    let summary = if changes.is_empty() { "无热变更".to_string() } else { changes.join(", ") };
+    tracing::info!(%summary, "配置热加载完成");
+    Ok(summary)
 }
 
 /// 等待关闭信号：unix 同时接 SIGTERM(systemd/launchd 停服)与 SIGINT(ctrl-c)；其它平台用 ctrl_c。

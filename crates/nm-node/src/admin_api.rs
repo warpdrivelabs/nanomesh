@@ -211,6 +211,18 @@ impl Node {
         self.store.as_ref().and_then(|s| s.dead_letter_count().ok()).unwrap_or(0)
     }
 
+    /// P1-9 送达时延直方图快照：(累积桶[(le_ms, 累计计数)], 样本数, 毫秒之和)。供 /metrics 导出。
+    pub fn delivery_hist_snapshot(&self) -> (Vec<(u64, u64)>, u64, u64) {
+        self.delivery_hist.snapshot()
+    }
+
+    /// P1-9 连接拒绝计数快照：(banned, revoked, server_busy, rate_limited)。
+    pub fn conn_rejects_snapshot(&self) -> (u64, u64, u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let r = &self.conn_rejects;
+        (r.banned.load(Relaxed), r.revoked.load(Relaxed), r.server_busy.load(Relaxed), r.rate_limited.load(Relaxed))
+    }
+
     /// 在线一致备份数据库到 dest（P0-2）。返回拷贝字节数；无 store（内存模式）则 Err。
     pub fn backup_db(&self, dest: &std::path::Path) -> std::result::Result<u64, String> {
         match &self.store {

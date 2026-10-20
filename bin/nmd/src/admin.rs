@@ -31,6 +31,25 @@ fn parse_id(s: &str) -> Option<[u8; 32]> {
     Some(o)
 }
 
+// ── P1-8 审计：安全敏感的管理操作统一记一条结构化审计事件（target=audit，带 audit=true 字段）。
+// 走既有 tracing 订阅器(两个二进制都已初始化)，journald/文件按 target 或字段即可筛出审计流，无需新依赖。
+// actor = nm-admind 经 `X-Admin-Operator` 头转发的登录操作员名(nmd 的 token 本身匿名)；缺失则 "token-holder"。
+/// 从请求头取转发来的操作员身份（nm-admind 登录会话名）。
+fn operator(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get("x-admin-operator")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("token-holder")
+        .to_string()
+}
+
+/// 记一条管理审计事件：`action`=操作名，`target`=作用对象(id/域名等)，`ok`=是否成功，`detail`=补充。
+fn audit(actor: &str, action: &str, target: &str, ok: bool, detail: &str) {
+    tracing::info!(audit = true, actor, action, target, ok, detail, "ADMIN AUDIT");
+}
+
 /// 会话链路质量 JSON（连接监控 / 对等节点共用）。
 fn session_json(r: &nm_node::SessionRow) -> Value {
     json!({
@@ -69,6 +88,8 @@ struct AppState {
     proc: Arc<Mutex<ProcMetrics>>,
     /// 本节点所属联邦（成员频道名）。展示用：peers 面板与新增对等归属此联邦。
     federation: String,
+    /// P1-10：配置文件路径（供 POST /reload 重读并热应用可变更子集）。
+    config_path: String,
 }
 
 /// 启动控制 API。绑定 `addr`，所有请求需带 `X-Admin-Token: <token>`。
@@ -78,6 +99,7 @@ pub async fn serve(
     token: String,
     db_path: String,
     federation: String,
+    config_path: String,
 ) -> anyhow::Result<()> {
     let proc = Arc::new(Mutex::new(ProcMetrics::default()));
     spawn_proc_sampler(proc.clone());
@@ -89,6 +111,7 @@ pub async fn serve(
         start: Instant::now(),
         proc,
         federation,
+        config_path,
     };
 
     let app = Router::new()
@@ -107,6 +130,7 @@ pub async fn serve(
         .route("/add-peer", post(add_peer))
         .route("/remove-peer", post(remove_peer))
         .route("/backup", post(backup))
+        .route("/reload", post(reload))
         .route("/names/domains", get(names_domains))
         .route("/names/domain-add", post(names_domain_add))
         .route("/names/domain-decision", post(names_domain_decision))
@@ -115,12 +139,14 @@ pub async fn serve(
         .route("/names/set", post(names_set))
         .route("/names/del", post(names_del))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth))
-        // 健康探针：免鉴权（供 systemd/容器探针访问），merge 在 auth layer 之外。
-        // /healthz 存活（进程能响应即 200，不依赖后端，避免误杀）；/readyz 就绪（redb 可写 + endpoint 有地址，否则 503）。
+        // 健康探针 + 指标：免鉴权（供 systemd/容器探针、Prometheus 抓取），merge 在 auth layer 之外。
+        // /healthz 存活（进程能响应即 200，不依赖后端，避免误杀）；/readyz 就绪（redb 可写 + endpoint 有地址，否则 503）；
+        // /metrics OpenMetrics 文本（admin 口默认绑 127.0.0.1，抓取方无需 token）。
         .merge(
             Router::new()
                 .route("/healthz", get(healthz))
                 .route("/readyz", get(readyz))
+                .route("/metrics", get(metrics))
                 .with_state(state.clone()),
         )
         .with_state(state);
@@ -174,6 +200,72 @@ async fn readyz(State(st): State<AppState>) -> axum::response::Response {
         )
             .into_response(),
     }
+}
+
+/// P1-9 Prometheus/OpenMetrics 文本导出。免鉴权（admin 口默认 127.0.0.1）。涵盖：到达率计数器、
+/// 送达时延直方图(send→ack)、连接拒绝错误率、死信/限流、换网、流量、各表 gauge、进程/在线。
+async fn metrics(State(st): State<AppState>) -> axum::response::Response {
+    use std::fmt::Write;
+    let mut o = String::with_capacity(4096);
+    let pm = *st.proc.lock().unwrap();
+    let (roam_changes, roam_last_ms) = st.node.roam_snapshot();
+    let (f, acks, retx, giveups, batches, dead, ratelimited) = st.node.group_metrics_snapshot();
+    let (rj_ban, rj_rev, rj_busy, rj_rate) = st.node.conn_rejects_snapshot();
+    let (buckets, lat_count, lat_sum_ms) = st.node.delivery_hist_snapshot();
+    let tr = nm_transport::traffic_snapshot();
+
+    let c = |o: &mut String, name: &str, help: &str, v: u64| {
+        let _ = writeln!(o, "# HELP {name} {help}\n# TYPE {name} counter\n{name} {v}");
+    };
+    let g = |o: &mut String, name: &str, help: &str, v: f64| {
+        let _ = writeln!(o, "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {v}");
+    };
+    // 到达率/可靠性计数器
+    c(&mut o, "nmd_group_fanouts_total", "group messages fanned out & tracked", f);
+    c(&mut o, "nmd_group_acks_total", "group acks received", acks);
+    c(&mut o, "nmd_group_retransmits_total", "group retransmits", retx);
+    c(&mut o, "nmd_group_giveups_total", "group messages given up after horizon", giveups);
+    c(&mut o, "nmd_group_ack_batches_total", "GroupAckBatch grams emitted", batches);
+    c(&mut o, "nmd_dead_letters_total", "messages dead-lettered after horizon", dead);
+    c(&mut o, "nmd_msgs_rate_limited_total", "inbound messages dropped by rate limit", ratelimited);
+    // 连接拒绝错误率
+    c(&mut o, "nmd_conn_rejected_banned_total", "connections rejected: banned", rj_ban);
+    c(&mut o, "nmd_conn_rejected_revoked_total", "connections rejected: revoked device", rj_rev);
+    c(&mut o, "nmd_conn_rejected_server_busy_total", "connections rejected: conn cap", rj_busy);
+    c(&mut o, "nmd_conn_rejected_rate_limited_total", "connections rejected: reconnect storm", rj_rate);
+    // 流量
+    c(&mut o, "nmd_grams_in_total", "grams received", tr.grams_in);
+    c(&mut o, "nmd_grams_out_total", "grams sent", tr.grams_out);
+    c(&mut o, "nmd_bytes_in_total", "bytes received", tr.bytes_in);
+    c(&mut o, "nmd_bytes_out_total", "bytes sent", tr.bytes_out);
+    // 换网
+    c(&mut o, "nmd_roam_changes_total", "endpoint address changes (roam)", roam_changes);
+    g(&mut o, "nmd_roam_last_change_ms", "unix ms of last roam (0=none)", roam_last_ms as f64);
+    // 送达时延直方图（send→ack，毫秒）
+    let _ = writeln!(o, "# HELP nmd_delivery_latency_ms send→ack delivery latency (ms)\n# TYPE nmd_delivery_latency_ms histogram");
+    for (le, cum) in &buckets {
+        let _ = writeln!(o, "nmd_delivery_latency_ms_bucket{{le=\"{le}\"}} {cum}");
+    }
+    let _ = writeln!(o, "nmd_delivery_latency_ms_bucket{{le=\"+Inf\"}} {lat_count}");
+    let _ = writeln!(o, "nmd_delivery_latency_ms_sum {lat_sum_ms}");
+    let _ = writeln!(o, "nmd_delivery_latency_ms_count {lat_count}");
+    // 进程 / 在线 / 死信留存
+    g(&mut o, "nmd_online_sessions", "current online sessions", st.node.online_count() as f64);
+    g(&mut o, "nmd_peers", "known federation peers", st.node.peer_count() as f64);
+    g(&mut o, "nmd_rss_bytes", "process resident memory", pm.rss_bytes as f64);
+    g(&mut o, "nmd_cpu_pct", "process cpu percent", pm.cpu_pct as f64);
+    g(&mut o, "nmd_uptime_seconds", "process uptime", st.start.elapsed().as_secs() as f64);
+    g(&mut o, "nmd_dead_letter_pending", "dead letters currently retained", st.node.dead_letter_count() as f64);
+    // 各表 gauge（内存/存储增长观测）
+    for (name, v) in st.node.table_sizes() {
+        let _ = writeln!(o, "# TYPE nmd_table_size gauge\nnmd_table_size{{table=\"{name}\"}} {v}");
+    }
+    let _ = writeln!(o, "# EOF");
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/openmetrics-text; version=1.0.0; charset=utf-8")],
+        o,
+    )
+        .into_response()
 }
 
 async fn overview(State(st): State<AppState>) -> Json<Value> {
@@ -386,19 +478,25 @@ struct IdReq {
     id: String,
 }
 
-async fn ban(State(st): State<AppState>, Json(r): Json<IdReq>) -> Result<Json<Value>, StatusCode> {
-    let id = parse_id(&r.id).ok_or(StatusCode::BAD_REQUEST)?;
+async fn ban(State(st): State<AppState>, headers: axum::http::HeaderMap, Json(r): Json<IdReq>) -> Result<Json<Value>, StatusCode> {
+    let op = operator(&headers);
+    let id = parse_id(&r.id).ok_or_else(|| { audit(&op, "ban", &r.id, false, "bad id"); StatusCode::BAD_REQUEST })?;
     st.node.ban(id);
+    audit(&op, "ban", &r.id, true, "");
     Ok(Json(json!({ "ok": true })))
 }
-async fn unban(State(st): State<AppState>, Json(r): Json<IdReq>) -> Result<Json<Value>, StatusCode> {
-    let id = parse_id(&r.id).ok_or(StatusCode::BAD_REQUEST)?;
+async fn unban(State(st): State<AppState>, headers: axum::http::HeaderMap, Json(r): Json<IdReq>) -> Result<Json<Value>, StatusCode> {
+    let op = operator(&headers);
+    let id = parse_id(&r.id).ok_or_else(|| { audit(&op, "unban", &r.id, false, "bad id"); StatusCode::BAD_REQUEST })?;
     st.node.unban(id);
+    audit(&op, "unban", &r.id, true, "");
     Ok(Json(json!({ "ok": true })))
 }
-async fn kick(State(st): State<AppState>, Json(r): Json<IdReq>) -> Result<Json<Value>, StatusCode> {
-    let id = parse_id(&r.id).ok_or(StatusCode::BAD_REQUEST)?;
+async fn kick(State(st): State<AppState>, headers: axum::http::HeaderMap, Json(r): Json<IdReq>) -> Result<Json<Value>, StatusCode> {
+    let op = operator(&headers);
+    let id = parse_id(&r.id).ok_or_else(|| { audit(&op, "kick", &r.id, false, "bad id"); StatusCode::BAD_REQUEST })?;
     let cut = st.node.kick(id);
+    audit(&op, "kick", &r.id, true, if cut { "cut live session" } else { "no live session" });
     Ok(Json(json!({ "ok": true, "cut": cut })))
 }
 
@@ -406,11 +504,12 @@ async fn kick(State(st): State<AppState>, Json(r): Json<IdReq>) -> Result<Json<V
 #[derive(serde::Deserialize)]
 struct BackupReq { dest: String }
 
-async fn backup(State(st): State<AppState>, Json(r): Json<BackupReq>) -> Result<Json<Value>, StatusCode> {
+async fn backup(State(st): State<AppState>, headers: axum::http::HeaderMap, Json(r): Json<BackupReq>) -> Result<Json<Value>, StatusCode> {
+    let op = operator(&headers);
     let dest = std::path::PathBuf::from(&r.dest);
     match st.node.backup_db(&dest) {
-        Ok(n) => { tracing::info!(dest = %r.dest, bytes = n, "db backup written"); Ok(Json(json!({ "ok": true, "bytes": n, "dest": r.dest }))) }
-        Err(e) => { tracing::warn!("db backup failed: {e}"); Err(StatusCode::INTERNAL_SERVER_ERROR) }
+        Ok(n) => { audit(&op, "backup", &r.dest, true, &format!("{n} bytes")); Ok(Json(json!({ "ok": true, "bytes": n, "dest": r.dest }))) }
+        Err(e) => { audit(&op, "backup", &r.dest, false, &e); Err(StatusCode::INTERNAL_SERVER_ERROR) }
     }
 }
 
@@ -433,9 +532,11 @@ struct PeerReq {
 
 async fn add_peer(
     State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(r): Json<PeerReq>,
 ) -> Result<Json<Value>, StatusCode> {
-    let node_id = parse_id(&r.id).ok_or(StatusCode::BAD_REQUEST)?;
+    let op = operator(&headers);
+    let node_id = parse_id(&r.id).ok_or_else(|| { audit(&op, "add-peer", &r.id, false, "bad id"); StatusCode::BAD_REQUEST })?;
     let info = nm_node::PeerInfo {
         name: r.name,
         address: r.address,
@@ -448,17 +549,20 @@ async fn add_peer(
     };
     st.node
         .add_peer_full(node_id, info)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    tracing::info!("peer added/updated at runtime");
+        .map_err(|_| { audit(&op, "add-peer", &r.id, false, "add failed"); StatusCode::BAD_REQUEST })?;
+    audit(&op, "add-peer", &r.id, true, "");
     Ok(Json(json!({ "ok": true, "peers": st.node.peer_count() })))
 }
 
 async fn remove_peer(
     State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(r): Json<IdReq>,
 ) -> Result<Json<Value>, StatusCode> {
-    let id = parse_id(&r.id).ok_or(StatusCode::BAD_REQUEST)?;
+    let op = operator(&headers);
+    let id = parse_id(&r.id).ok_or_else(|| { audit(&op, "remove-peer", &r.id, false, "bad id"); StatusCode::BAD_REQUEST })?;
     let existed = st.node.remove_peer(id);
+    audit(&op, "remove-peer", &r.id, true, if existed { "removed" } else { "not present" });
     Ok(Json(json!({ "ok": true, "existed": existed, "peers": st.node.peer_count() })))
 }
 
@@ -477,11 +581,14 @@ struct DecisionReq {
     domain: String,
     approved: bool,
 }
-async fn names_domain_decision(State(st): State<AppState>, Json(r): Json<DecisionReq>) -> Json<Value> {
+async fn names_domain_decision(State(st): State<AppState>, headers: axum::http::HeaderMap, Json(r): Json<DecisionReq>) -> Json<Value> {
+    let op = operator(&headers);
     let Some(id) = parse_id(&r.node_id) else {
+        audit(&op, "domain-decision", &r.domain, false, "bad node id");
         return Json(json!({ "ok": false, "error": "node id 须为 64 位十六进制" }));
     };
     st.node.publish_domain_decision(id, &r.domain, r.approved);
+    audit(&op, "domain-decision", &r.domain, true, if r.approved { "approved" } else { "rejected" });
     Json(json!({ "ok": true }))
 }
 async fn names_domain_notices(State(st): State<AppState>) -> Json<Value> {
@@ -494,10 +601,11 @@ async fn names_domain_notices(State(st): State<AppState>) -> Json<Value> {
     notices.sort_by(|a, b| b["at_ms"].as_u64().cmp(&a["at_ms"].as_u64()));
     Json(json!({ "notices": notices }))
 }
-async fn names_domain_add(State(st): State<AppState>, Json(r): Json<DomainReq>) -> Json<Value> {
+async fn names_domain_add(State(st): State<AppState>, headers: axum::http::HeaderMap, Json(r): Json<DomainReq>) -> Json<Value> {
+    let op = operator(&headers);
     match st.node.add_domain(&r.domain) {
-        Ok(added) => Json(json!({ "ok": true, "added": added, "domains": st.node.owned_domains() })),
-        Err(e) => Json(json!({ "ok": false, "error": e })),
+        Ok(added) => { audit(&op, "domain-add", &r.domain, true, if added { "claimed" } else { "already owned" }); Json(json!({ "ok": true, "added": added, "domains": st.node.owned_domains() })) }
+        Err(e) => { audit(&op, "domain-add", &r.domain, false, &e); Json(json!({ "ok": false, "error": e })) }
     }
 }
 
@@ -526,14 +634,16 @@ struct NameSetReq {
     local_part: String,
     pubkey: String,
 }
-async fn names_set(State(st): State<AppState>, Json(r): Json<NameSetReq>) -> Json<Value> {
+async fn names_set(State(st): State<AppState>, headers: axum::http::HeaderMap, Json(r): Json<NameSetReq>) -> Json<Value> {
+    let op = operator(&headers);
+    let full = format!("{}@{}", r.local_part, r.domain);
     let pk = match parse_id(&r.pubkey) {
         Some(x) => x,
-        None => return Json(json!({ "ok": false, "error": "非法公钥（需 64 位 hex）" })),
+        None => { audit(&op, "name-set", &full, false, "bad pubkey"); return Json(json!({ "ok": false, "error": "非法公钥（需 64 位 hex）" })); }
     };
     match st.node.admin_set_name(&r.domain, &r.local_part, pk) {
-        Ok(rec) => Json(json!({ "ok": true, "name": format!("{}@{}", rec.local_part, rec.domain) })),
-        Err(e) => Json(json!({ "ok": false, "error": e })),
+        Ok(rec) => { audit(&op, "name-set", &full, true, ""); Json(json!({ "ok": true, "name": format!("{}@{}", rec.local_part, rec.domain) })) }
+        Err(e) => { audit(&op, "name-set", &full, false, &e); Json(json!({ "ok": false, "error": e })) }
     }
 }
 
@@ -546,6 +656,16 @@ async fn names_del(State(st): State<AppState>, Json(r): Json<NameDelReq>) -> Jso
     match st.node.admin_del_name(&r.domain, &r.local_part) {
         Ok(()) => Json(json!({ "ok": true })),
         Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+/// P1-10 配置热加载：重读配置文件，热应用可运行时变更的子集（黑名单/对等/per_topic/pkarr/域名）；
+/// 需重绑的项（relay URL/端口/身份/db/max_connections）在返回 detail 里提示需重启。
+async fn reload(State(st): State<AppState>, headers: axum::http::HeaderMap) -> Result<Json<Value>, StatusCode> {
+    let op = operator(&headers);
+    match crate::reload_config_from(&st.config_path, &st.node) {
+        Ok(summary) => { audit(&op, "reload", &st.config_path, true, &summary); Ok(Json(json!({ "ok": true, "summary": summary }))) }
+        Err(e) => { audit(&op, "reload", &st.config_path, false, &e.to_string()); Err(StatusCode::INTERNAL_SERVER_ERROR) }
     }
 }
 

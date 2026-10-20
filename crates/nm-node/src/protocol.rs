@@ -56,11 +56,13 @@ impl ProtocolHandler for ImspaceProto {
         let rid_arr = *conn.remote_id().as_bytes();
         // 黑名单闸门：被禁公钥的连接直接拒绝（无白名单——其余一律放行）。
         if self.ctx.blacklist.contains(&rid_arr) {
+            self.ctx.conn_rejects.banned.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tracing::info!(peer = %conn.remote_id().fmt_short(), "rejected banned peer");
             conn.close(0u32.into(), b"banned");
             return Ok(());
         }
         if is_revoked(&self.ctx, &rid_arr, None) {
+            self.ctx.conn_rejects.revoked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tracing::info!(peer = %conn.remote_id().fmt_short(), "rejected revoked device");
             conn.close(0u32.into(), b"device_revoked");
             return Ok(());
@@ -68,6 +70,7 @@ impl ProtocolHandler for ImspaceProto {
         // 限流闸①：全局并发连接上限。超则拒绝新连接，防 FD/内存耗尽（DoS 防护）。
         // 用 sessions.len() 作权威——它随连接关闭自动回落，无需额外计数器同步。
         if self.ctx.sessions.len() >= self.ctx.max_connections {
+            self.ctx.conn_rejects.server_busy.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tracing::warn!(online = self.ctx.sessions.len(), max = self.ctx.max_connections,
                 peer = %conn.remote_id().fmt_short(), "rejected: connection limit reached");
             conn.close(0u32.into(), b"server_busy");
@@ -96,6 +99,7 @@ impl ProtocolHandler for ImspaceProto {
                 })
                 .or_insert((now, 1));
             if rejected {
+                self.ctx.conn_rejects.rate_limited.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 tracing::warn!(peer = %conn.remote_id().fmt_short(),
                     "rejected: reconnect rate limited (storm)");
                 conn.close(0u32.into(), b"rate_limited");

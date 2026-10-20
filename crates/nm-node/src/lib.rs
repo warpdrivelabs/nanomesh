@@ -170,6 +170,9 @@ struct Ctx {
     group_metrics: Arc<GroupMetrics>,
     // 消息级限流（P0-4）：单发送方滑动计数窗口。入站消息热路径读。
     msg_gate: Arc<MsgGate>,
+    // P1-9：送达时延直方图 + 连接拒绝计数（与 Node 同一实例，记录点在 ctx 热路径）。
+    delivery_hist: Arc<LatencyHist>,
+    conn_rejects: Arc<ConnRejects>,
 }
 
 pub struct Node {
@@ -230,6 +233,9 @@ pub struct Node {
     group_metrics: Arc<GroupMetrics>,
     // 消息级限流（P0-4）：单发送方滑动计数窗口。
     msg_gate: Arc<MsgGate>,
+    // P1-9：送达时延直方图（send→ack）+ 连接拒绝计数。供 /metrics 导出。
+    delivery_hist: Arc<LatencyHist>,
+    conn_rejects: Arc<ConnRejects>,
 }
 
 /// 换网观测计数（供 admin 看板）：记录本节点端点地址变化次数与最近一次时间。
@@ -259,6 +265,69 @@ pub struct GroupMetrics {
     pub dead_letters: std::sync::atomic::AtomicU64,
     /// P0-4：被消息级限流丢弃的入站消息条数。持续攀升 = 有发送方在洪泛。
     pub msgs_rate_limited: std::sync::atomic::AtomicU64,
+}
+
+/// P1-9 送达时延直方图（send→ack，毫秒）：固定 le 桶 + sum + count，供 /metrics 导出 OpenMetrics histogram。
+/// DM 记 DirectAck 到达时延；群记末个 GroupAck 清条目的扇出 tail 时延。
+pub struct LatencyHist {
+    /// 各桶累计计数（≤ 对应 LAT_BUCKETS_MS 上界的样本数，**非**累积——快照时再前缀和）。
+    buckets: [std::sync::atomic::AtomicU64; LAT_BUCKETS_MS.len()],
+    /// 溢出桶（> 最大上界，即 +Inf 专属增量）。
+    overflow: std::sync::atomic::AtomicU64,
+    /// 样本总数。
+    count: std::sync::atomic::AtomicU64,
+    /// 样本毫秒之和（算均值用）。
+    sum_ms: std::sync::atomic::AtomicU64,
+}
+
+/// 时延桶上界（毫秒），OpenMetrics `le`。覆盖亚秒直连到多秒重传。
+pub(crate) const LAT_BUCKETS_MS: [u64; 11] =
+    [50, 100, 250, 500, 1_000, 2_000, 5_000, 10_000, 30_000, 60_000, 300_000];
+
+impl Default for LatencyHist {
+    fn default() -> Self {
+        Self {
+            buckets: std::array::from_fn(|_| std::sync::atomic::AtomicU64::new(0)),
+            overflow: std::sync::atomic::AtomicU64::new(0),
+            count: std::sync::atomic::AtomicU64::new(0),
+            sum_ms: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
+impl LatencyHist {
+    /// 记一个时延样本（毫秒）。落入第一个 `ms ≤ 上界` 的桶，超最大上界计 overflow。
+    pub fn record(&self, ms: u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut placed = false;
+        for (i, ub) in LAT_BUCKETS_MS.iter().enumerate() {
+            if ms <= *ub { self.buckets[i].fetch_add(1, Relaxed); placed = true; break; }
+        }
+        if !placed { self.overflow.fetch_add(1, Relaxed); }
+        self.count.fetch_add(1, Relaxed);
+        self.sum_ms.fetch_add(ms, Relaxed);
+    }
+    /// 快照：返回(累积桶[(le,累计计数)], count, sum_ms)。桶计数已前缀和为 OpenMetrics 累积语义。
+    pub fn snapshot(&self) -> (Vec<(u64, u64)>, u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut acc = 0u64;
+        let mut out = Vec::with_capacity(LAT_BUCKETS_MS.len());
+        for (i, ub) in LAT_BUCKETS_MS.iter().enumerate() {
+            acc += self.buckets[i].load(Relaxed);
+            out.push((*ub, acc));
+        }
+        let count = self.count.load(Relaxed);
+        (out, count, self.sum_ms.load(Relaxed))
+    }
+}
+
+/// P1-9 连接拒绝计数（accept 门）：banned/revoked/server_busy/rate_limited 各一个计数，供错误率观测。
+#[derive(Default)]
+pub struct ConnRejects {
+    pub banned: std::sync::atomic::AtomicU64,
+    pub revoked: std::sync::atomic::AtomicU64,
+    pub server_busy: std::sync::atomic::AtomicU64,
+    pub rate_limited: std::sync::atomic::AtomicU64,
 }
 
 /// 群 ack 聚合累加器项：成员节点收到一条跨节点群 Msg 后攒下的待回执条目。

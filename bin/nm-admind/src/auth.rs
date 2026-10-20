@@ -11,6 +11,9 @@ use argon2::Argon2;
 use serde::{Deserialize, Serialize};
 
 const SESSION_TTL: Duration = Duration::from_secs(8 * 3600);
+// P1-8 登录限流：滑动窗口内失败次数达上限则锁定该窗口，挡暴力破解。成功登录清零。
+const LOGIN_FAIL_WINDOW: Duration = Duration::from_secs(300); // 5 分钟窗口
+const LOGIN_MAX_FAILS: u32 = 5; // 窗口内最多 5 次失败，超出锁定至窗口结束
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Cred {
@@ -23,6 +26,8 @@ pub struct Auth {
     path: PathBuf,
     cred: Mutex<Cred>,
     sessions: Mutex<HashMap<String, Instant>>, // token -> 过期时刻
+    // P1-8 登录失败滑动窗口：(窗口起点, 窗口内失败数)。单用户 admin → 实际是全局暴力破解闸。
+    login_fails: Mutex<(Instant, u32)>,
 }
 
 impl Auth {
@@ -36,6 +41,7 @@ impl Auth {
                     path,
                     cred: Mutex::new(cred),
                     sessions: Mutex::new(HashMap::new()),
+                    login_fails: Mutex::new((Instant::now(), 0)),
                 },
                 None,
             ));
@@ -50,6 +56,7 @@ impl Auth {
             path,
             cred: Mutex::new(cred),
             sessions: Mutex::new(HashMap::new()),
+            login_fails: Mutex::new((Instant::now(), 0)),
         };
         auth.persist()?;
         Ok((auth, Some(initial_password)))
@@ -62,9 +69,28 @@ impl Auth {
     }
 
     /// 登录：校验通过则发一个会话 token，返回 (token, must_change)。
-    pub fn login(&self, username: &str, password: &str) -> Option<(String, bool)> {
+    /// P1-8：失败滑动窗口限流(挡暴力破解) + 成功/失败/锁定均记审计日志。`src` 为来源标识(IP/直连)。
+    pub fn login(&self, username: &str, password: &str, src: &str) -> Option<(String, bool)> {
+        // 限流闸：窗口内失败数达上限 → 直接拒绝（不验密码），记审计。
+        {
+            let mut lf = self.login_fails.lock().unwrap();
+            if lf.0.elapsed() >= LOGIN_FAIL_WINDOW {
+                *lf = (Instant::now(), 0); // 窗口过期重置
+            }
+            if lf.1 >= LOGIN_MAX_FAILS {
+                tracing::warn!(audit = true, event = "login", ok = false, reason = "rate_limited",
+                    user = %username, src = %src, "ADMIN LOGIN 限流锁定（疑似暴力破解）");
+                return None;
+            }
+        }
         let cred = self.cred.lock().unwrap().clone();
         if username != cred.username || !verify_password(&cred.phc, password) {
+            let mut lf = self.login_fails.lock().unwrap();
+            lf.1 += 1;
+            let fails = lf.1;
+            drop(lf);
+            tracing::warn!(audit = true, event = "login", ok = false, reason = "bad_credentials",
+                user = %username, src = %src, fails, "ADMIN LOGIN 失败");
             return None;
         }
         let token = gen_token();
@@ -72,6 +98,8 @@ impl Auth {
             .lock()
             .unwrap()
             .insert(token.clone(), Instant::now() + SESSION_TTL);
+        *self.login_fails.lock().unwrap() = (Instant::now(), 0); // 成功 → 清失败计数
+        tracing::info!(audit = true, event = "login", ok = true, user = %username, src = %src, "ADMIN LOGIN 成功");
         Some((token, cred.must_change))
     }
 
@@ -101,17 +129,21 @@ impl Auth {
         {
             let mut cred = self.cred.lock().unwrap();
             if !verify_password(&cred.phc, old) {
+                tracing::warn!(audit = true, event = "change_password", ok = false, reason = "bad_old_password", "ADMIN 改密失败");
                 anyhow::bail!("原密码不正确");
             }
             cred.phc = hash_password(new)?;
             cred.must_change = false;
         }
         self.persist()?;
+        tracing::info!(audit = true, event = "change_password", ok = true, "ADMIN 改密成功");
         Ok(())
     }
 
     pub fn logout(&self, token: &str) {
-        self.sessions.lock().unwrap().remove(token);
+        if self.sessions.lock().unwrap().remove(token).is_some() {
+            tracing::info!(audit = true, event = "logout", ok = true, "ADMIN 登出");
+        }
     }
 }
 

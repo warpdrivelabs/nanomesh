@@ -258,8 +258,15 @@ impl Node {
                 // 本节点是原 sender 的 home（订阅了 nmspace-inbox:<my account>）→ 删待确认条目、停重传。
                 // DirectAck 不再回 ack、不入 outbox —— 无回环。
                 if let Some(s) = &ctx.store {
+                    // P1-9：删前读 first_ms，Ok(true) 时记 send→ack 时延。
+                    let first_ms = s.outbox_first_ms(&ack.sender, &ack.receiver, ack.gram_id).ok().flatten();
                     match s.outbox_del(&ack.sender, &ack.receiver, ack.gram_id) {
-                        Ok(true) => tracing::debug!("outbox cleared by DirectAck"),
+                        Ok(true) => {
+                            if let Some(fm) = first_ms {
+                                ctx.delivery_hist.record(now_ms().saturating_sub(fm));
+                            }
+                            tracing::debug!("outbox cleared by DirectAck");
+                        }
                         Ok(false) => {}
                         Err(e) => tracing::warn!("outbox_del failed: {e}"),
                     }
@@ -269,10 +276,15 @@ impl Node {
                 // 本节点是原群消息 sender 的 home（持有 group_outbox 条目）→ 把回执节点从待 ack 集移除；
                 // 全清则停重传。GroupAck 不再回 ack、不入 outbox —— 无回环。别的 home 的 ack 在本地无匹配条目，忽略。
                 if let Some(s) = &ctx.store {
+                    // P1-9：清条目(末个成员 home ack)时记扇出 send→last-ack tail 时延——清前读 first_ms。
+                    let first_ms = s.group_outbox_first_ms(&ack.gid, &ack.sender, ack.gram_id).ok().flatten();
                     match s.group_outbox_ack_node(&ack.gid, &ack.sender, ack.gram_id, &ack.node) {
                         Ok((true, cleared)) => {
                             ctx.group_metrics.acks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             if cleared {
+                                if let Some(fm) = first_ms {
+                                    ctx.delivery_hist.record(now_ms().saturating_sub(fm));
+                                }
                                 tracing::debug!("group outbox cleared by GroupAck (all member nodes acked)");
                             }
                         }

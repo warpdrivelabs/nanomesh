@@ -5,7 +5,7 @@
 - **范围**：`bin/nmd` 及其依赖的 `crates/nm-node`、`nm-store`、`nm-crypto`、`nm-federation`、`nm-transport`、`nm-proto`、`nm-gossip`，以及管理台 `bin/nm-admind`
 - **方法**：对当前代码树做了四维勘察（安全/密码学、投递可靠性/数据、运维/可观测、联邦/扩展），结论均附 `file:line` 证据。本文"必要"的定义 = **生产会出事 / 信任根基 / 规模天花板**三类，不含锦上添花。
 
-> **实施状态（2026-10-20）**：**P0 四项已全部落地，`cargo check --workspace` 通过 + nm-store/nm-node 相关单测通过（未提交、未部署）**。见文末「附录 B：P0 实施记录」。P1/P2 仍为待审方案。
+> **实施状态（2026-10-20）**：**P0 四项已全部落地并部署到 5 节点**（见附录 B）。**P1 运维三件套（P1-8/9/10）已落地、`cargo check --workspace` 通过 + 相关测试通过，未提交/未部署**（见附录 C）。E2E（P1-5）与密钥轮换（P1-7）按用户要求暂缓；P1-6 多设备已读待排期。
 
 ---
 
@@ -205,3 +205,32 @@ nmd 的**可靠投递机制已相当扎实**（持久 outbox + ack 重传、频�
 **可观测**：admin `/system` 新增 `dead_letters` / `msgs_rate_limited` / `dead_letter_pending`。
 
 **改动文件**：`crates/nm-store/src/lib.rs`(+Cargo.toml tracing)、`crates/nm-node/src/{lib,node_runtime,delivery,federation_runtime,protocol,admin_api}.rs`、`bin/nmd/src/{admin,main}.rs`。
+
+---
+
+## 附录 C：P1 运维三件套实施记录（2026-10-20，已落地，未提交/未部署）
+
+E2E（P1-5）与账号密钥恢复/轮换（P1-7）按用户要求暂缓；本批只做 P1-8/9/10。`cargo check --workspace` 通过；nm-store 8 + nm-node lib 9 + group_outbox 8 + cross_dm_outbox 6 测试通过；nmd + nm-admind release 构建链接通过。
+
+**P1-8 审计日志 + 管理身份 + 登录限流**
+- `bin/nmd/src/admin.rs`：新增 `audit(actor,action,target,ok,detail)`（结构化 `tracing` 事件，带 `audit=true` 字段，走既有订阅器，无新依赖）；10 个管理变更处理器（ban/unban/kick/add-peer/remove-peer/backup/domain-decision/domain-add/name-set/name-del）全部记审计，成功与失败都记。actor 取自 nm-admind 转发的 `X-Admin-Operator` 头（nmd token 本身匿名）。
+- `bin/nm-admind/src/auth.rs`：登录**失败滑动窗口限流**（5 分钟内 5 次失败即锁定，挡暴力破解；成功清零）；login/logout/change_password 成功失败全部记审计（带来源）。`login()` 增 `src` 参数。
+- `bin/nm-admind/src/main.rs`：`login` 取 `X-Forwarded-For` 作来源（直连记 `direct`）；`proxy_post` 转发 `X-Admin-Operator: admin` 给 nmd（审计归因到具名操作员）。
+
+**P1-9 Prometheus/OpenMetrics + 送达时延 + 错误率**
+- `crates/nm-node/src/lib.rs`：新增 `LatencyHist`（固定 11 个 le 毫秒桶 + sum + count，`record`/`snapshot` 累积语义）、`ConnRejects`（banned/revoked/server_busy/rate_limited 四计数）；两者作 `Arc` 字段挂 `Node`+`Ctx`。
+- `crates/nm-store/src/lib.rs`：新增只读点查 `outbox_first_ms` / `group_outbox_first_ms`（ack 到达时算 send→ack 时延，不改既有 `outbox_del`/`ack_node`/`ack_batch` 签名，零破坏）。
+- `crates/nm-node/src/federation_runtime.rs`：DirectAck 清条目时记 DM 时延；GroupAck 清条目（末个成员 home ack）时记群扇出 **tail** 时延。
+- `crates/nm-node/src/protocol.rs`：accept 门四处拒绝各自计数。
+- `crates/nm-node/src/admin_api.rs`：`delivery_hist_snapshot` / `conn_rejects_snapshot` 访问器。
+- `bin/nmd/src/admin.rs`：新增 `GET /metrics`（OpenMetrics 文本，**免鉴权**——admin 口默认绑 127.0.0.1，Prometheus 抓取无需 token），导出到达率/时延直方图/连接拒绝/死信/限流/换网/流量/各表 gauge/进程。
+- **设计取舍**：群消息多成员时，清条目=末个 ack → 记的是 send→**last**-ack 的扇出 tail 时延（SLA 有意义的那个）；批量 ack 臂不逐条记时延（清后 first_ms 不易取），只走权威的单 GroupAck 臂。
+
+**P1-10 配置热加载（SIGHUP + POST /reload）**
+- `bin/nmd/src/main.rs`：新增 `reload_config_from(cfg_path,node)` 共享应用函数——**热应用**黑名单(diff ban/unban)、per_topic、pkarr/dns url、域名；SIGHUP 哨兵（`SignalKind::hangup()`）调之并记审计。
+- `bin/nmd/src/admin.rs`：`AppState` 加 `config_path`；`serve()` 加参数；`main.rs` 调用处传 `args.config`；新增 `POST /reload`（鉴权）。
+- **诚实边界**：relay URL / bind_port / identity / db / mode / max_connections / membership.* 因 iroh `Endpoint` 为构建期绑定、或值经 `Ctx` 快照进 accept 环，**无法热改**——reload 对这些只在摘要里提示"需重启"，不假装生效。真要换 relay 仍走重启/自重启。
+
+**改动文件**：`crates/nm-node/src/{lib,node_runtime,federation_runtime,protocol,admin_api}.rs`、`crates/nm-store/src/lib.rs`、`bin/nmd/src/{admin,main}.rs`、`bin/nm-admind/src/{auth,main}.rs`。
+
+**待验证（部署后）**：`curl http://127.0.0.1:9611/metrics` 看 OpenMetrics 输出；`curl -XPOST .../reload` + `kill -HUP <nmd>` 看热加载审计日志；连错密码 5 次看 nm-admind 登录锁定。

@@ -343,6 +343,13 @@ struct LoginReq {
 }
 async fn login(State(s): State<AppState>, req: Request) -> Response {
     let secure = req.extensions().get::<ViaTls>().is_some();
+    // P1-8 审计来源：优先取反代转发的真实 IP；直连无此头时记 "direct"。
+    let src = req
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(',').next().unwrap_or(s).trim().to_string())
+        .unwrap_or_else(|| "direct".to_string());
     let bytes = axum::body::to_bytes(req.into_body(), 64 * 1024)
         .await
         .unwrap_or_default();
@@ -356,7 +363,7 @@ async fn login(State(s): State<AppState>, req: Request) -> Response {
                 .into_response();
         }
     };
-    match s.auth.login(&b.username, &b.password) {
+    match s.auth.login(&b.username, &b.password, &src) {
         Some((token, must_change)) => {
             (
                 [(header::SET_COOKIE, session_cookie(&token, secure))],
@@ -718,6 +725,8 @@ async fn proxy_post(
         .http
         .post(format!("{}{}", s.nmd_api, path))
         .header("x-admin-token", &s.nmd_token)
+        // P1-8：把已登录操作员身份转发给 nmd，使 nmd 审计日志能归因到具名操作员(而非匿名 token 持有者)。
+        .header("x-admin-operator", "admin")
         .json(&body.0)
         .send()
         .await

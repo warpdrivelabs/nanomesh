@@ -430,6 +430,15 @@ impl RedbStore {
         Ok(existed)
     }
 
+    /// 读一条 DM 待确认条目的 first_ms（入发件箱时刻），用于 ack 到达时算 send→ack 时延（P1-9）。只读。
+    pub fn outbox_first_ms(&self, sender: &[u8], receiver: &[u8], gram_id: u64) -> Result<Option<u64>> {
+        let key = Self::outbox_key(sender, receiver, gram_id);
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let tb = rtx.open_table(OUTBOX).map_err(db_err)?;
+        Ok(tb.get(key.as_slice()).map_err(db_err)?
+            .and_then(|v| v.value().get(..8).and_then(|s| s.try_into().ok()).map(u64::from_be_bytes)))
+    }
+
     /// 全量加载待确认条目（重传任务每 tick 扫；稳态近空）。key 后 72 字节=sender32+recv32+gram8。
     pub fn outbox_all(&self) -> Result<Vec<OutboxRow>> {
         let rtx = self.db.begin_read().map_err(db_err)?;
@@ -663,6 +672,15 @@ impl RedbStore {
         }
         wtx.commit().map_err(db_err)?;
         Ok((acked, cleared))
+    }
+
+    /// 读一条群待确认条目的 first_ms（建发件箱时刻），用于末个 GroupAck 清条目时算扇出 send→last-ack 时延（P1-9）。只读。
+    pub fn group_outbox_first_ms(&self, gid: &[u8], sender: &[u8], gram_id: u64) -> Result<Option<u64>> {
+        let key = Self::group_outbox_key(gid, sender, gram_id);
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let tb = rtx.open_table(GROUP_OUTBOX).map_err(db_err)?;
+        Ok(tb.get(key.as_slice()).map_err(db_err)?
+            .and_then(|v| Self::group_outbox_decode(v.value()).map(|(first_ms, ..)| first_ms)))
     }
 
     /// 删一条群待确认条目（达期限放弃）。幂等。

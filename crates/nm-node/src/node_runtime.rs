@@ -241,6 +241,8 @@ impl Node {
             ack_accum: Arc::new(std::sync::Mutex::new(Vec::new())),
             group_metrics: Arc::new(crate::GroupMetrics::default()),
             msg_gate: Arc::new(DashMap::new()),
+            delivery_hist: Arc::new(crate::LatencyHist::default()),
+            conn_rejects: Arc::new(crate::ConnRejects::default()),
         })
     }
 
@@ -278,6 +280,8 @@ impl Node {
             ack_nodes: self.ack_nodes.clone(),
             group_metrics: self.group_metrics.clone(),
             msg_gate: self.msg_gate.clone(),
+            delivery_hist: self.delivery_hist.clone(),
+            conn_rejects: self.conn_rejects.clone(),
         }
     }
 
