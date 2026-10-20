@@ -2,7 +2,7 @@
 # start-all 首次运行会把本文件复制为 nmd.toml，并把 __ADMIN_TOKEN__ 替换为随机令牌。
 # 全部字段说明见源码 bin/nmd/src/main.rs 顶部文档。
 
-mode      = "nat"                # nat(公共中继+打洞,默认) | selfhost(自建relay+dns) | lan(仅同网直连)
+mode      = "selfhost"           # selfhost(自建relay+dns,默认,接入现网) | nat(N0公共中继+打洞) | lan(仅同网直连)
 identity  = "data/nmd.identity"  # 节点私钥（首启自动生成；每台一份，勿共用/入库）
 db        = "data/nmd.redb"      # 消息/目录存储
 bind_port = 9600                 # 固定 UDP 端口（同网直连+防火墙放行）；0=临时端口
@@ -12,13 +12,12 @@ bind_port = 9600                 # 固定 UDP 端口（同网直连+防火墙放
 [[peers]]
 id = "88ea3512ee2111b2bb4aff66e4dc80bb553b9889ac382d29eab87c80e810cee3"  # robot.link 公网种子
 
-# 注：现网节点已切自建设施(selfhost)。若新节点要经该种子真正加入现网联邦，需同为 selfhost 且指向
-# 同一 relay/pkarr —— nat 模式走 N0 公共发现，解析不到 selfhost 节点的地址。把顶部 mode 改为
-# "selfhost" 并取消下面两段注释即可：
-# [relay]
-# urls = ["https://relay.robot.link:8443"]
-# [dns]
-# url = "https://relay.robot.link:8444/pkarr"
+# 自建基础设施（selfhost 模式必需）：现网统一用 robot.link 的自建 relay + dns/pkarr。
+# relay 做 NAT 穿透/中继；dns(pkarr) 做按公钥发现地址。URL 必须带端口(8443/8444)。
+[relay]
+urls = ["https://relay.robot.link:8443"]
+[dns]
+url = "https://relay.robot.link:8444/pkarr"
 
 [admin]                          # 节点控制 API（nm-admind 管理台反代它；仅本机回环）
 api_addr  = "127.0.0.1:9611"
