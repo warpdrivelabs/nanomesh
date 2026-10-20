@@ -7,12 +7,18 @@ identity  = "data/nmd.identity"  # 节点私钥（首启自动生成；每台一
 db        = "data/nmd.redb"      # 消息/目录存储
 bind_port = 9600                 # 固定 UDP 端口（同网直连+防火墙放行）；0=临时端口
 
-# 对等节点（种子）：内置 nmspace 官方两个种子(cmxdev18 / cmxdev46)。
-# 新节点据此加入 nmspace 联邦，其余成员经 gossip 自动发现。nat 模式按公钥经发现拨号。
+# 对等节点（种子）：仅内置 robot.link（公网常在线，自建 relay/pkarr 宿主）——新节点据此加入 nmspace
+# 联邦，其余成员经 gossip 自动发现（按公钥经发现拨号）。部署新节点无需再手动添加种子。
 [[peers]]
-id = "018640c437531635a0aa3e33cb8af9c999139c77e182336d309d2229a2b37845"  # cmxdev18 种子
-[[peers]]
-id = "d19e49310cfac7a4b0cbad445a017e6911cb315f3929200a192b284a9ce84daa"  # cmxdev46 种子
+id = "88ea3512ee2111b2bb4aff66e4dc80bb553b9889ac382d29eab87c80e810cee3"  # robot.link 公网种子
+
+# 注：现网节点已切自建设施(selfhost)。若新节点要经该种子真正加入现网联邦，需同为 selfhost 且指向
+# 同一 relay/pkarr —— nat 模式走 N0 公共发现，解析不到 selfhost 节点的地址。把顶部 mode 改为
+# "selfhost" 并取消下面两段注释即可：
+# [relay]
+# urls = ["https://relay.robot.link:8443"]
+# [dns]
+# url = "https://relay.robot.link:8444/pkarr"
 
 [admin]                          # 节点控制 API（nm-admind 管理台反代它；仅本机回环）
 api_addr  = "127.0.0.1:9611"
