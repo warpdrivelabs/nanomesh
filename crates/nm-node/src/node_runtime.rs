@@ -141,6 +141,13 @@ impl Node {
         self.roam.snapshot()
     }
 
+    /// 换网 epoch：每次换网(spawn_addr_change→roam.record)+1。gossip 循环据此**无条件强制重 join**
+    /// ——换网后 iroh 端点换地址,旧 gossip 订阅失效,但 neighbor_count 常非 0(和种子还连着),
+    /// 仅靠 `==0` 自愈不触发;epoch 变化是"确实换过网"的权威信号,必须重建 mesh。
+    pub fn net_epoch(&self) -> u64 {
+        self.roam.changes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     fn from_ep(ep: NodeEndpoint, store: Option<Arc<RedbStore>>) -> Result<Self, NodeError> {
         let dir = Arc::new(MemDirectory::new());
         let groups: Arc<DashMap<Vec<u8>, Group>> = Arc::new(DashMap::new());
@@ -233,6 +240,7 @@ impl Node {
             ack_batch_nodes: Arc::new(DashSet::new()),
             ack_accum: Arc::new(std::sync::Mutex::new(Vec::new())),
             group_metrics: Arc::new(crate::GroupMetrics::default()),
+            msg_gate: Arc::new(DashMap::new()),
         })
     }
 
@@ -269,6 +277,7 @@ impl Node {
             conn_gate: self.conn_gate.clone(),
             ack_nodes: self.ack_nodes.clone(),
             group_metrics: self.group_metrics.clone(),
+            msg_gate: self.msg_gate.clone(),
         }
     }
 
@@ -309,16 +318,33 @@ impl Node {
             let shutdown = self.shutdown.clone();
             tokio::spawn(async move {
                 loop {
-                    match store.prune_inbox(now_ms().saturating_sub(INBOX_RETENTION_MS)) {
-                        Ok(n) if n > 0 => tracing::info!(count = n, "pruned expired inbox"),
+                    // P0-1 周期 GC：裁剪各无界/过期表，防磁盘无界增长。
+                    let now = now_ms();
+                    match store.prune_inbox(now.saturating_sub(INBOX_RETENTION_MS)) {
+                        Ok(n) if n > 0 => tracing::info!(count = n, "GC: pruned expired inbox"),
                         Ok(_) => {}
-                        Err(e) => tracing::warn!("prune inbox failed: {e}"),
+                        Err(e) => tracing::warn!("GC prune inbox failed: {e}"),
                     }
-                    // 可取消的节拍：关闭时立即退出，不悬空 6h。
+                    match store.channel_intake_prune(now.saturating_sub(crate::CHANNEL_INTAKE_RETENTION_MS)) {
+                        Ok(n) if n > 0 => tracing::info!(count = n, "GC: pruned channel intake"),
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!("GC prune channel_intake failed: {e}"),
+                    }
+                    match store.prune_blobs(now.saturating_sub(crate::BLOB_RETENTION_MS)) {
+                        Ok(n) if n > 0 => tracing::info!(count = n, "GC: pruned blobs"),
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!("GC prune blobs failed: {e}"),
+                    }
+                    match store.dead_letter_prune(now.saturating_sub(crate::DEAD_LETTER_RETENTION_MS)) {
+                        Ok(n) if n > 0 => tracing::info!(count = n, "GC: pruned dead letters"),
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!("GC prune dead_letter failed: {e}"),
+                    }
+                    // 可取消的节拍：关闭时立即退出，不悬空。
                     tokio::select! {
                         biased;
                         _ = shutdown.cancelled() => break,
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(6 * 3600)) => {}
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(crate::GC_INTERVAL_SECS)) => {}
                     }
                 }
             });

@@ -221,6 +221,23 @@ async fn handle_conn(conn: IrohConnection, ctx: Ctx, rid: Vec<u8>) {
 }
 
 /// `caller` 是账号身份（设备连接 hello 后为账号公钥，否则等于连接公钥）；`rid` 是连接公钥。
+/// P0-4 消息级限流：单发送方（设备连接 rid）滑动计数窗口。返回 true=放行，false=超限应丢弃。
+/// 镜像连接级 `conn_gate`：窗口内计数超 `MSG_RATE_MAX_IN_WINDOW` 即拒；表满清空防无界。
+fn msg_rate_ok(gate: &crate::MsgGate, rid: &[u8], now: u64) -> bool {
+    if gate.len() >= crate::MSG_GATE_CAP { gate.clear(); }
+    let mut e = gate.entry(rid.to_vec()).or_insert((now, 0));
+    let (start, count) = *e;
+    if now.saturating_sub(start) >= crate::MSG_RATE_WINDOW_SECS {
+        *e = (now, 1);
+        true
+    } else if count < crate::MSG_RATE_MAX_IN_WINDOW {
+        e.1 = count + 1;
+        true
+    } else {
+        false
+    }
+}
+
 async fn handle_gram(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Option<Gram> {
     // 黑名单：主拦截在 handle_conn（静默关流、不泄露拉黑）。此处为纵深防御冗余——
     // 正常走连接路径到不了（上游已拦），保留以防未来有其它调用方绕过 handle_conn。
@@ -245,6 +262,16 @@ async fn handle_gram(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Optio
                 .unwrap_or(false);
         if !sender_ok {
             tracing::warn!("message sender != connection principal/device-account; dropped");
+            return None;
+        }
+    }
+    // P0-4 消息级限流：对承载消息的 gram 按发送方设备(rid)滑动窗口限速，超限静默丢弃（防洪泛 DoS）。
+    // 连接级 conn_gate 只挡"狂建连接"，挡不住"一条连接上狂发消息"——此门补齐。阈值远超正常客户端。
+    if matches!(gram.kind(), GramKind::Message | GramKind::GroupMessage) {
+        if !msg_rate_ok(&ctx.msg_gate, rid, crate::now_secs()) {
+            ctx.group_metrics.msgs_rate_limited.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(peer = %crate::records::hex_encode(&rid[..rid.len().min(6)]),
+                "message rate-limited (flood); dropped");
             return None;
         }
     }

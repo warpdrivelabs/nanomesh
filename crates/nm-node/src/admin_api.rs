@@ -191,8 +191,8 @@ impl Node {
             .unwrap_or(0)
     }
 
-    /// 群消息可靠扇出观测快照：(扇出跟踪数, 收到 ack 数, 重传次数, 超期放弃数, 发出批量 ack 块数)。供 admin /system 展示到达率。
-    pub fn group_metrics_snapshot(&self) -> (u64, u64, u64, u64, u64) {
+    /// 群消息可靠扇出观测快照：(扇出, acks, 重传, 放弃, 批量块, 死信, 被限流)。供 admin /system 展示到达率。
+    pub fn group_metrics_snapshot(&self) -> (u64, u64, u64, u64, u64, u64, u64) {
         use std::sync::atomic::Ordering::Relaxed;
         let m = &self.group_metrics;
         (
@@ -201,7 +201,22 @@ impl Node {
             m.retransmits.load(Relaxed),
             m.giveups.load(Relaxed),
             m.ack_batches_sent.load(Relaxed),
+            m.dead_letters.load(Relaxed),
+            m.msgs_rate_limited.load(Relaxed),
         )
+    }
+
+    /// 死信当前留存条数（P0-3，供 admin 展示；无 store 则 0）。
+    pub fn dead_letter_count(&self) -> usize {
+        self.store.as_ref().and_then(|s| s.dead_letter_count().ok()).unwrap_or(0)
+    }
+
+    /// 在线一致备份数据库到 dest（P0-2）。返回拷贝字节数；无 store（内存模式）则 Err。
+    pub fn backup_db(&self, dest: &std::path::Path) -> std::result::Result<u64, String> {
+        match &self.store {
+            Some(s) => s.backup(dest).map_err(|e| e.to_string()),
+            None => Err("no store (in-memory mode)".into()),
+        }
     }
 
     /// 全部已登记设备快照（后端管理台「域内命名登记」下展开某账号的设备列表用）。

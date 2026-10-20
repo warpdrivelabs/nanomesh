@@ -396,7 +396,18 @@ impl Node {
             }
             let mut last_fed = tokio::time::Instant::now() - std::time::Duration::from_secs(10);
             let mut last_pkarr = tokio::time::Instant::now() - std::time::Duration::from_secs(120);
+            // 换网 epoch：变化即硬重 join 火管主题(neighbor_count 可能非0但订阅已失效),恢复群/频道/presence兜底扇出。
+            let mut seen_epoch = self.net_epoch();
             loop {
+                let ep = self.net_epoch();
+                if ep != seen_epoch {
+                    seen_epoch = ep;
+                    tracing::info!("group firehose 换网(epoch 变) → 强制重 join gossip");
+                    self.notify_network_change().await;
+                    if let Ok(t) = self.join_channel(channel, self.peers_list()).await {
+                        topic = t;
+                    }
+                }
                 // 发布 fanout 丢来的待广播项（群消息 / 变更即时公告）。
                 while let Ok(bytes) = pub_rx.try_recv() {
                     let _ = topic.publish(bytes).await;
@@ -629,11 +640,14 @@ impl Node {
                     let now_m = now_ms();
                     let rows = store.outbox_all().unwrap_or_default();
                     for row in rows {
-                        // 达 24h 期限 → 放弃 + 告警（对端 home 长期不可达）。
+                        // 达 24h 期限 → 放弃：落死信(诊断/补投) + 通知本地发送方(不再静默丢) + 告警。
                         if now_m.saturating_sub(row.first_ms) > crate::OUTBOX_MAX_HORIZON_MS {
                             tracing::warn!(gram_id = row.gram_id,
-                                "cross-node DM giving up after horizon (recipient home unreachable)");
+                                "cross-node DM giving up after horizon (recipient home unreachable); 落死信+通知发送方");
+                            let _ = store.dead_letter_put(&row.sender, &row.receiver, row.gram_id, row.first_ms, &row.gram_bytes);
                             let _ = store.outbox_del(&row.sender, &row.receiver, row.gram_id);
+                            ctx.group_metrics.dead_letters.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            crate::delivery::notify_delivery_failed(&ctx, &row.sender, &row.receiver, row.gram_id, "recipient home unreachable 24h").await;
                             continue;
                         }
                         if now_m < row.next_due_ms { continue; } // 未到重试点
@@ -667,12 +681,14 @@ impl Node {
                     let grows = store.group_outbox_all().unwrap_or_default();
                     for row in grows {
                         use std::sync::atomic::Ordering::Relaxed;
-                        // 达 24h 期限 → 放弃 + 告警（记尚未 ack 的成员节点数）。
+                        // 达 24h 期限 → 放弃：落死信 + 告警（记尚未 ack 的成员节点数）。
                         if now_m.saturating_sub(row.first_ms) > crate::OUTBOX_MAX_HORIZON_MS {
                             tracing::warn!(gram_id = row.gram_id, pending = row.pending_nodes.len(),
-                                "group message giving up after horizon (member node(s) unreachable)");
+                                "group message giving up after horizon (member node(s) unreachable); 落死信");
+                            let _ = store.dead_letter_put(&row.sender, &row.gid, row.gram_id, row.first_ms, &row.gram_bytes);
                             let _ = store.group_outbox_del(&row.gid, &row.sender, row.gram_id);
                             ctx.group_metrics.giveups.fetch_add(1, Relaxed);
+                            ctx.group_metrics.dead_letters.fetch_add(1, Relaxed);
                             continue;
                         }
                         if now_m < row.next_due_ms { continue; } // 未到重试点

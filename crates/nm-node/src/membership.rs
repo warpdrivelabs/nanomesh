@@ -325,7 +325,20 @@ impl Node {
             let mut last_sweep = tokio::time::Instant::now();
             // 换网/休眠唤醒自愈：0 邻居时 nudge iroh 重探测的冷却计时（避免每秒狂触发 re-probe）。
             let mut last_net_nudge: Option<tokio::time::Instant> = None;
+            // 换网 epoch：换网后 gossip 订阅可能失效但 neighbor_count 非 0(和种子还连着)→ ==0 自愈不触发。
+            // epoch 变化 = 确实换过网 → 无条件硬重 join(换新 topic),彻底重建 mesh、重新广播+收播发现。
+            let mut seen_epoch = self.net_epoch();
             loop {
+                let ep = self.net_epoch();
+                if ep != seen_epoch {
+                    seen_epoch = ep;
+                    tracing::info!("membership 换网(epoch 变) → 强制重 join gossip 以恢复动态发现");
+                    self.notify_network_change().await;
+                    if let Ok(t) = self.join_channel(channel, self.peers_list()).await {
+                        topic = t;
+                        let _ = topic.publish(self.membership_card(&cfg.card)).await; // 立即广播本节点,加速被重新发现
+                    }
+                }
                 if last_announce.elapsed() >= announce_iv {
                     if let Err(e) = topic.publish(self.membership_card(&cfg.card)).await {
                         tracing::debug!("membership publish failed: {e}");

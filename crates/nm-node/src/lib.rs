@@ -96,6 +96,20 @@ const LEGACY_MAX_RETRIES: u32 = 5;   // 对端 home 不支持 DirectAck 时的�
 const GROUP_ACK_BATCH_MS: u64 = 250;     // 批量合并窗口（累加器 flush 周期）
 const GROUP_ACK_BATCH_MAX: usize = 128;  // 单个批量 gram 最多条目数（超则分块，界定 gram 大小）
 
+// P0-1 存储 GC 保留期（周期裁剪无界表，防撑爆磁盘）：
+const CHANNEL_INTAKE_RETENTION_MS: u64 = 48 * 3600 * 1000;   // >发布者 outbox 24h horizon：避免裁掉仍会被重传命中的 nonce→seq
+const BLOB_RETENTION_MS: u64 = 180 * 24 * 3600 * 1000;       // 内容寻址媒体缓存（误删可按 hash 重新上传/拉取）
+const DEAD_LETTER_RETENTION_MS: u64 = 7 * 24 * 3600 * 1000;  // 死信留存期（诊断/人工补投）
+const GC_INTERVAL_SECS: u64 = 6 * 3600;                      // 周期 GC 节拍（与原 inbox 裁剪同频）
+const INBOX_MAX_PER_ENTITY: usize = 50_000;                  // 单设备离线信箱条数上限（配额）：超则丢新离线副本，防被灌爆
+
+// P0-4 消息级限流（应用层反滥用，补连接级 conn_gate 之不足）：单发送方滑动计数窗口，超出即丢弃入站消息。
+const MSG_RATE_WINDOW_SECS: u64 = 10;
+const MSG_RATE_MAX_IN_WINDOW: u32 = 300; // 10s 内单发送方至多 300 条（~30 msg/s 突发），远超正常客户端，仅掐洪泛
+const MSG_GATE_CAP: usize = 65_536;      // msg_gate 表容量上限（满则整表清空，防无界）
+// 发送方公钥 → (当前窗口起点 Unix 秒, 窗口内计数)。
+type MsgGate = DashMap<Vec<u8>, (u64, u32)>;
+
 // 连接限流（P0 DoS 防护）：
 const DEFAULT_MAX_CONNECTIONS: usize = 10_000; // 全局并发连接上限（超则拒绝新连接，防 FD/内存耗尽）
 // 单公钥重连速率门：滑动计数窗口（而非「最小间隔」——那会误杀 app 重启/切后台/断线等 1s 内的正常重连）。
@@ -154,6 +168,8 @@ struct Ctx {
     ack_nodes: Arc<DashSet<Vec<u8>>>,
     // 群消息可靠扇出观测（与 Node.group_metrics 同一实例）。
     group_metrics: Arc<GroupMetrics>,
+    // 消息级限流（P0-4）：单发送方滑动计数窗口。入站消息热路径读。
+    msg_gate: Arc<MsgGate>,
 }
 
 pub struct Node {
@@ -212,6 +228,8 @@ pub struct Node {
     ack_accum: Arc<std::sync::Mutex<Vec<AckItem>>>,
     // 群消息可靠扇出观测（供 admin 看板）。
     group_metrics: Arc<GroupMetrics>,
+    // 消息级限流（P0-4）：单发送方滑动计数窗口。
+    msg_gate: Arc<MsgGate>,
 }
 
 /// 换网观测计数（供 admin 看板）：记录本节点端点地址变化次数与最近一次时间。
@@ -237,6 +255,10 @@ pub struct GroupMetrics {
     pub giveups: std::sync::atomic::AtomicU64,
     /// 本节点作为成员发出的 GroupAckBatch gram 块数（聚合效果：块数 ≪ 被确认消息数）。
     pub ack_batches_sent: std::sync::atomic::AtomicU64,
+    /// P0-3：达期限放弃并落死信的消息条数（DM + 群）。持续 >0 = 有成员/对端 home 长期不可达。
+    pub dead_letters: std::sync::atomic::AtomicU64,
+    /// P0-4：被消息级限流丢弃的入站消息条数。持续攀升 = 有发送方在洪泛。
+    pub msgs_rate_limited: std::sync::atomic::AtomicU64,
 }
 
 /// 群 ack 聚合累加器项：成员节点收到一条跨节点群 Msg 后攒下的待回执条目。

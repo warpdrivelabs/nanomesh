@@ -10,6 +10,7 @@ nm-core = { workspace = true }
 redb = { workspace = true }
 prost = "0.14"
 thiserror = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

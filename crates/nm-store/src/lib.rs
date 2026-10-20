@@ -6,9 +6,9 @@
 //!   前缀 range 扫描即可取某实体的全部离线消息，`gram_id` 单调保证 FIFO。
 //! - `ENTITIES`：key = `entity_id(32)`，value = prost 编码的 `Entity`（目录持久化）。
 
-use nm_proto::{BlobData, Channel, ChannelMsg, DeviceInfo, DeviceRevoke, Entity, Gram, Group, NameRecord};
+use nm_proto::{now_ms, BlobData, Channel, ChannelMsg, DeviceInfo, DeviceRevoke, Entity, Gram, Group, NameRecord};
 use prost::Message;
-use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 
 const INBOX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("inbox");
 const ENTITIES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("entities");
@@ -63,6 +63,19 @@ const CHANNEL_INTAKE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("chan
 /// 频道发布待确认发件箱（publisher 侧）：key = channel_id(32)++sender(32)++nonce(≤32)，
 /// val = first_ms(8)++retries(4)++next_due_ms(8)++pubreq_bytes。看到自己的 sequenced 消息/收 PubReject 即删。
 const CHANNEL_OUTBOX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("channel_outbox");
+/// P0-2 模式元信息：key = "version"(u32 BE) / "magic"(DB_MAGIC) / "last_backup_ms"(u64 BE)。
+/// 打开时据此判定新库/旧库并跑迁移链；版本高于本二进制即拒绝启动（防降级静默丢数据）。
+const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
+/// P0-1 blob 入库时间旁表：key = blob hash(32)，value = put_ms(8BE)。供 blob 按龄 GC（主表 BLOBS 本身无时间）。
+const BLOB_META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("blob_meta");
+/// P0-3 死信：投递达期限放弃时落档，key = sender(32)++receiver(32)++gram_id(8BE)++first_ms(8BE)，value = gram_bytes。
+/// 供诊断/人工补投；按 first_ms 龄裁剪，不无界增长。
+const DEAD_LETTER: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dead_letter");
+
+/// 当前存储模式版本。每次对**手工字节键/值布局**或表语义做破坏性变更即 +1，并补一条迁移。
+const SCHEMA_VERSION: u32 = 1;
+/// 库身份魔数：防把别的 redb 文件误当 nmd 存储打开。
+const DB_MAGIC: &[u8] = b"nmspace-nmd-store";
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -115,12 +128,15 @@ fn db_err(e: impl std::fmt::Display) -> StoreError {
 /// redb 后端。
 pub struct RedbStore {
     db: Database,
+    /// 数据库文件路径（P0-2 在线备份 `backup()` 据此拷贝一致快照）。
+    path: std::path::PathBuf,
 }
 
 impl RedbStore {
-    /// 打开/创建数据库文件，并确保表存在。
+    /// 打开/创建数据库文件，并确保表存在。随后做 P0-2 模式版本校验/迁移。
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        let db = Database::create(path).map_err(db_err)?;
+        let path = path.as_ref().to_path_buf();
+        let db = Database::create(&path).map_err(db_err)?;
         // 初始化表（首次打开时创建）。
         let wtx = db.begin_write().map_err(db_err)?;
         {
@@ -146,9 +162,142 @@ impl RedbStore {
             wtx.open_table(CHANNEL_SECRETS).map_err(db_err)?;
             wtx.open_table(CHANNEL_INTAKE).map_err(db_err)?;
             wtx.open_table(CHANNEL_OUTBOX).map_err(db_err)?;
+            wtx.open_table(META).map_err(db_err)?;
+            wtx.open_table(BLOB_META).map_err(db_err)?;
+            wtx.open_table(DEAD_LETTER).map_err(db_err)?;
         }
         wtx.commit().map_err(db_err)?;
-        Ok(Self { db })
+        let store = Self { db, path };
+        store.ensure_schema()?;
+        Ok(store)
+    }
+
+    // ── P0-2：模式版本 / 迁移 / 在线备份 ──
+
+    /// 模式版本校验与迁移。META 无 version 时：代表性表全空→判为新库戳当前版本；否则判为旧库(v0)跑迁移链。
+    /// version 高于本二进制 → **拒绝启动**（防旧版 nmd 打开新库后按旧布局静默丢行）。
+    fn ensure_schema(&self) -> Result<()> {
+        match self.meta_get_u32("version")? {
+            Some(v) if v == SCHEMA_VERSION => self.verify_magic(),
+            Some(v) if v > SCHEMA_VERSION => Err(StoreError::Db(format!(
+                "db schema v{v} 比本 nmd(v{SCHEMA_VERSION})新：请升级 nmd 或恢复兼容备份，拒绝按旧布局打开"
+            ))),
+            Some(mut v) => {
+                self.verify_magic()?;
+                while v < SCHEMA_VERSION { self.migrate(v, v + 1)?; v += 1; }
+                self.stamp_schema()
+            }
+            None => {
+                let mut v = if self.looks_empty()? { SCHEMA_VERSION } else { 0 };
+                while v < SCHEMA_VERSION { self.migrate(v, v + 1)?; v += 1; }
+                self.stamp_schema()
+            }
+        }
+    }
+
+    fn meta_get_u32(&self, key: &str) -> Result<Option<u32>> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(META).map_err(db_err)?;
+        Ok(t.get(key).map_err(db_err)?.and_then(|v| v.value().try_into().ok().map(u32::from_be_bytes)))
+    }
+
+    fn verify_magic(&self) -> Result<()> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(META).map_err(db_err)?;
+        match t.get("magic").map_err(db_err)? {
+            Some(m) if m.value() == DB_MAGIC => Ok(()),
+            Some(_) => Err(StoreError::Db("db magic 不符：这不是 nmspace nmd 存储文件".into())),
+            None => Ok(()), // 迁移中途尚未写 magic，容忍
+        }
+    }
+
+    fn stamp_schema(&self) -> Result<()> {
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        {
+            let mut t = wtx.open_table(META).map_err(db_err)?;
+            t.insert("version", SCHEMA_VERSION.to_be_bytes().as_slice()).map_err(db_err)?;
+            t.insert("magic", DB_MAGIC).map_err(db_err)?;
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 代表性表全空 → 视为新库（无需迁移，直接戳当前版本）。
+    fn looks_empty(&self) -> Result<bool> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        for td in [ENTITIES, INBOX, DEVICES, CHANNELS, GROUPS, NAMES] {
+            if rtx.open_table(td).map_err(db_err)?.len().map_err(db_err)? > 0 { return Ok(false); }
+        }
+        Ok(true)
+    }
+
+    fn migrate(&self, from: u32, to: u32) -> Result<()> {
+        tracing::info!(from, to, "nm-store schema 迁移");
+        match (from, to) {
+            (0, 1) => self.migrate_v0_to_v1(),
+            _ => Err(StoreError::Db(format!("无迁移路径 v{from}→v{to}"))),
+        }
+    }
+
+    /// v0→v1：① INBOX value 由裸 Gram 改为 `recv_ms(8BE)++Gram`（按入库时间裁剪，不信发送方时钟）；
+    /// ② CHANNEL_INTAKE value 由 `seq(8)` 改为 `seq(8)++ts(8)`（支持按龄裁剪）。一次性重写旧行。
+    fn migrate_v0_to_v1(&self) -> Result<()> {
+        let now = now_ms();
+        // INBOX：裸 Gram → recv_ms ++ Gram。入库时间近似取发送时间(≤now)以保留原保留期意图。
+        let rows: Vec<(Vec<u8>, Vec<u8>)> = {
+            let rtx = self.db.begin_read().map_err(db_err)?;
+            let t = rtx.open_table(INBOX).map_err(db_err)?;
+            let mut v = Vec::new();
+            for it in t.iter().map_err(db_err)? { let (k, val) = it.map_err(db_err)?; v.push((k.value().to_vec(), val.value().to_vec())); }
+            v
+        };
+        if !rows.is_empty() {
+            let wtx = self.db.begin_write().map_err(db_err)?;
+            { let mut t = wtx.open_table(INBOX).map_err(db_err)?;
+              for (k, raw) in &rows {
+                  let recv = Gram::decode(raw.as_slice()).map(|g| g.timestamp_ms.min(now)).unwrap_or(now);
+                  let mut nv = Vec::with_capacity(8 + raw.len());
+                  nv.extend_from_slice(&recv.to_be_bytes());
+                  nv.extend_from_slice(raw);
+                  t.insert(k.as_slice(), nv.as_slice()).map_err(db_err)?;
+              } }
+            wtx.commit().map_err(db_err)?;
+        }
+        // CHANNEL_INTAKE：seq(8) → seq(8)++ts(8)（ts=now，自升级起计龄）。
+        let irows: Vec<(Vec<u8>, Vec<u8>)> = {
+            let rtx = self.db.begin_read().map_err(db_err)?;
+            let t = rtx.open_table(CHANNEL_INTAKE).map_err(db_err)?;
+            let mut v = Vec::new();
+            for it in t.iter().map_err(db_err)? { let (k, val) = it.map_err(db_err)?; v.push((k.value().to_vec(), val.value().to_vec())); }
+            v
+        };
+        if !irows.is_empty() {
+            let wtx = self.db.begin_write().map_err(db_err)?;
+            { let mut t = wtx.open_table(CHANNEL_INTAKE).map_err(db_err)?;
+              for (k, val) in &irows {
+                  if val.len() >= 16 { continue; }
+                  let seq = u64::from_be_bytes(val.get(..8).and_then(|s| s.try_into().ok()).unwrap_or([0u8; 8]));
+                  let mut nv = Vec::with_capacity(16);
+                  nv.extend_from_slice(&seq.to_be_bytes());
+                  nv.extend_from_slice(&now.to_be_bytes());
+                  t.insert(k.as_slice(), nv.as_slice()).map_err(db_err)?;
+              } }
+            wtx.commit().map_err(db_err)?;
+        }
+        Ok(())
+    }
+
+    /// 在线一致备份（P0-2）：先 Immediate 提交一次把 `Durability::None` 的批量写落盘，
+    /// 再持写锁拷贝整个 db 文件 → 已提交态的一致快照（redb 崩溃安全，拷贝可直接打开）。返回拷贝字节数。
+    pub fn backup(&self, dest: impl AsRef<std::path::Path>) -> Result<u64> {
+        { let wtx = self.db.begin_write().map_err(db_err)?;
+          { let mut t = wtx.open_table(META).map_err(db_err)?;
+            t.insert("last_backup_ms", now_ms().to_be_bytes().as_slice()).map_err(db_err)?; }
+          wtx.commit().map_err(db_err)?; }
+        let guard = self.db.begin_write().map_err(db_err)?; // 持写锁防拷贝期间并发提交
+        let n = std::fs::copy(&self.path, dest.as_ref()).map_err(db_err)?;
+        drop(guard); // 未 commit → abort，不改动数据
+        Ok(n)
     }
 
     // ---- 离线队列 ----
@@ -162,9 +311,10 @@ impl RedbStore {
     }
 
     /// 把一条消息存入收件人的离线队列。单条路径保持默认 Immediate 持久（崩溃不丢）。
+    /// value = `recv_ms(8BE)++Gram`：按**入库时间**裁剪，不信发送方可伪造的 `timestamp_ms`（P0-1）。
     pub fn push_inbox(&self, receiver: &[u8], gram: &Gram) -> Result<()> {
         let key = inbox_key(receiver, gram.gram_id);
-        let val = gram.encode_to_vec();
+        let val = inbox_encode(now_ms(), gram);
         let wtx = self.db.begin_write().map_err(db_err)?;
         {
             let mut t = wtx.open_table(INBOX).map_err(db_err)?;
@@ -189,7 +339,7 @@ impl RedbStore {
             let mut t = wtx.open_table(INBOX).map_err(db_err)?;
             for (receiver, gram) in items {
                 let key = inbox_key(receiver, gram.gram_id);
-                let val = gram.encode_to_vec();
+                let val = inbox_encode(now_ms(), gram);
                 t.insert(key.as_slice(), val.as_slice()).map_err(db_err)?;
             }
         }
@@ -205,8 +355,7 @@ impl RedbStore {
         let mut out = Vec::new();
         for item in t.range(lo.as_slice()..hi.as_slice()).map_err(db_err)? {
             let (_k, v) = item.map_err(db_err)?;
-            let g = Gram::decode(v.value()).map_err(|e| StoreError::Decode(e.to_string()))?;
-            out.push(g);
+            if let Some((_recv, g)) = inbox_decode(v.value()) { out.push(g); }
         }
         Ok(out)
     }
@@ -223,8 +372,7 @@ impl RedbStore {
                 .map_err(db_err)?
             {
                 let (_k, v) = item.map_err(db_err)?;
-                let g = Gram::decode(v.value()).map_err(|e| StoreError::Decode(e.to_string()))?;
-                out.push(g);
+                if let Some((_recv, g)) = inbox_decode(v.value()) { out.push(g); }
             }
         }
         wtx.commit().map_err(db_err)?;
@@ -302,6 +450,41 @@ impl RedbStore {
             out.push(OutboxRow { sender, receiver, gram_id, first_ms, retries, next_due_ms, gram_bytes });
         }
         Ok(out)
+    }
+
+    // ── P0-3 死信：投递达期限放弃的消息落档（诊断/人工补投），按 first_ms 龄裁剪，不无界增长 ──
+
+    fn dead_key(sender: &[u8], receiver: &[u8], gram_id: u64, first_ms: u64) -> Vec<u8> {
+        let mut k = Vec::with_capacity(sender.len() + receiver.len() + 16);
+        k.extend_from_slice(sender);
+        k.extend_from_slice(receiver);
+        k.extend_from_slice(&gram_id.to_be_bytes());
+        k.extend_from_slice(&first_ms.to_be_bytes());
+        k
+    }
+    /// 落一条死信（放弃投递时）。
+    pub fn dead_letter_put(&self, sender: &[u8], receiver: &[u8], gram_id: u64, first_ms: u64, gram_bytes: &[u8]) -> Result<()> {
+        let key = Self::dead_key(sender, receiver, gram_id, first_ms);
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        { let mut t = wtx.open_table(DEAD_LETTER).map_err(db_err)?;
+          t.insert(key.as_slice(), gram_bytes).map_err(db_err)?; }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+    /// 死信当前条数（admin/指标）。
+    pub fn dead_letter_count(&self) -> Result<usize> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        Ok(rtx.open_table(DEAD_LETTER).map_err(db_err)?.len().map_err(db_err)? as usize)
+    }
+    /// 裁剪 first_ms < before_ms 的死信（key 尾 8 字节为 first_ms），返回删除条数。
+    pub fn dead_letter_prune(&self, before_ms: u64) -> Result<usize> {
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        let mut n = 0usize;
+        { let mut t = wtx.open_table(DEAD_LETTER).map_err(db_err)?;
+          for item in t.extract_if(|k, _| k.len() >= 80 && u64::from_be_bytes(k[72..80].try_into().unwrap()) < before_ms).map_err(db_err)? {
+              item.map_err(db_err)?; n += 1; } }
+        wtx.commit().map_err(db_err)?;
+        Ok(n)
     }
 
     // ── 跨节点 Direct 持久去重 DEDUP_DIRECT ──
@@ -738,11 +921,26 @@ impl RedbStore {
     /// 定序提交（home 专用，单事务三写之一不便合并时的独立入口；正常由 channel_sequence 原子完成）。
     pub fn channel_intake_put(&self, channel_id: &[u8], sender: &[u8], nonce: &[u8], seq: u64) -> Result<()> {
         let key = Self::chan_intake_key(channel_id, sender, nonce);
+        let mut iv = Vec::with_capacity(16);
+        iv.extend_from_slice(&seq.to_be_bytes());
+        iv.extend_from_slice(&now_ms().to_be_bytes());
         let wtx = self.db.begin_write().map_err(db_err)?;
         { let mut t = wtx.open_table(CHANNEL_INTAKE).map_err(db_err)?;
-          t.insert(key.as_slice(), seq.to_be_bytes().as_slice()).map_err(db_err)?; }
+          t.insert(key.as_slice(), iv.as_slice()).map_err(db_err)?; }
         wtx.commit().map_err(db_err)?;
         Ok(())
+    }
+
+    /// 裁剪定序幂等表（P0-1，防无界增长）：删 ts < before_ms 的行。返回删除条数。
+    /// `before_ms` 须 ≤ now − 发布者 outbox horizon(24h)，否则可能裁掉仍会被重传命中的 nonce→seq 映射 → 重复定序。
+    pub fn channel_intake_prune(&self, before_ms: u64) -> Result<usize> {
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        let mut n = 0usize;
+        { let mut t = wtx.open_table(CHANNEL_INTAKE).map_err(db_err)?;
+          for item in t.extract_if(|_, v| v.len() >= 16 && u64::from_be_bytes(v[8..16].try_into().unwrap()) < before_ms).map_err(db_err)? {
+              item.map_err(db_err)?; n += 1; } }
+        wtx.commit().map_err(db_err)?;
+        Ok(n)
     }
 
     /// home 定序核心：**单事务原子**完成「分配 seq + 写日志 + 记 intake」。崩溃安全的关键。
@@ -781,7 +979,10 @@ impl RedbStore {
                 let lk = Self::chan_log_key(channel_id, seq);
                 { let mut log = wtx.open_table(CHANNEL_LOG).map_err(db_err)?;
                   log.insert(lk.as_slice(), msg.encode_to_vec().as_slice()).map_err(db_err)?; }
-                intake.insert(ik.as_slice(), seq.to_be_bytes().as_slice()).map_err(db_err)?;
+                let mut iv = Vec::with_capacity(16); // seq(8)++ts(8)：ts 供 channel_intake_prune 按龄裁剪
+                iv.extend_from_slice(&seq.to_be_bytes());
+                iv.extend_from_slice(&now_ms().to_be_bytes());
+                intake.insert(ik.as_slice(), iv.as_slice()).map_err(db_err)?;
                 result = (seq, msg, true);
             }
         }
@@ -847,14 +1048,14 @@ impl RedbStore {
         Ok(t.range(lo.as_slice()..hi.as_slice()).map_err(db_err)?.count())
     }
 
-    /// 删除所有收件人中 `timestamp_ms` 早于 `before_ms` 的离线消息，返回删除条数。
+    /// 删除所有收件人中**入库时间**（recv_ms）早于 `before_ms` 的离线消息（P0-1：不信发送方可伪造的时钟），返回删除条数。
     pub fn prune_inbox(&self, before_ms: u64) -> Result<usize> {
         let wtx = self.db.begin_write().map_err(db_err)?;
         let mut n = 0usize;
         {
             let mut t = wtx.open_table(INBOX).map_err(db_err)?;
             for item in t
-                .extract_if(|_, v| Gram::decode(v).map(|g| g.timestamp_ms < before_ms).unwrap_or(true))
+                .extract_if(|_, v| inbox_decode(v).map(|(recv, _)| recv < before_ms).unwrap_or(true))
                 .map_err(db_err)?
             {
                 item.map_err(db_err)?;
@@ -955,12 +1156,17 @@ impl RedbStore {
     // ---- 内容寻址 blob（P1：头像等媒体）----
 
     /// 存一个 blob（key = blob.hash，应等于 blake3(blob.data)，由调用方保证/校验）。内容寻址=幂等去重。
+    /// 同时在 BLOB_META 记**首次**入库时间（内容寻址幂等，重复 put 不刷新龄）供按龄 GC。
     pub fn put_blob(&self, blob: &BlobData) -> Result<()> {
         let val = blob.encode_to_vec();
         let wtx = self.db.begin_write().map_err(db_err)?;
         {
             let mut t = wtx.open_table(BLOBS).map_err(db_err)?;
             t.insert(blob.hash.as_slice(), val.as_slice()).map_err(db_err)?;
+            let mut m = wtx.open_table(BLOB_META).map_err(db_err)?;
+            if m.get(blob.hash.as_slice()).map_err(db_err)?.is_none() {
+                m.insert(blob.hash.as_slice(), now_ms().to_be_bytes().as_slice()).map_err(db_err)?;
+            }
         }
         wtx.commit().map_err(db_err)?;
         Ok(())
@@ -978,6 +1184,29 @@ impl RedbStore {
         }
     }
 
+    /// 按入库龄裁剪内容寻址 blob（P0-1）：删 BLOB_META 中 put_ms < before_ms 的 hash 及其 BLOBS 主体。返回删除条数。
+    /// blob 为内容寻址媒体缓存，误删仍被引用者可按 hash 重新上传/拉取，故按龄 GC 安全。
+    pub fn prune_blobs(&self, before_ms: u64) -> Result<usize> {
+        let expired: Vec<Vec<u8>> = {
+            let rtx = self.db.begin_read().map_err(db_err)?;
+            let m = rtx.open_table(BLOB_META).map_err(db_err)?;
+            let mut v = Vec::new();
+            for it in m.iter().map_err(db_err)? {
+                let (k, val) = it.map_err(db_err)?;
+                let ts = u64::from_be_bytes(val.value().try_into().unwrap_or([0u8; 8]));
+                if ts < before_ms { v.push(k.value().to_vec()); }
+            }
+            v
+        };
+        if expired.is_empty() { return Ok(0); }
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        { let mut b = wtx.open_table(BLOBS).map_err(db_err)?;
+          let mut m = wtx.open_table(BLOB_META).map_err(db_err)?;
+          for h in &expired { b.remove(h.as_slice()).map_err(db_err)?; m.remove(h.as_slice()).map_err(db_err)?; } }
+        wtx.commit().map_err(db_err)?;
+        Ok(expired.len())
+    }
+
     // ---- 群组持久化 ----
 
     pub fn put_group(&self, g: &Group) -> Result<()> {
@@ -991,15 +1220,27 @@ impl RedbStore {
         Ok(())
     }
 
-    /// 删除一个群（解散）。
+    /// 删除一个群（解散）。同时清本节点为该群 home 时持有的签名私钥（P0-1：防 GROUP_SECRETS 泄漏）。
     pub fn del_group(&self, group_id: &[u8]) -> Result<()> {
         let wtx = self.db.begin_write().map_err(db_err)?;
         {
             let mut t = wtx.open_table(GROUPS).map_err(db_err)?;
             t.remove(group_id).map_err(db_err)?;
+            let mut gs = wtx.open_table(GROUP_SECRETS).map_err(db_err)?;
+            gs.remove(group_id).map_err(db_err)?;
         }
         wtx.commit().map_err(db_err)?;
         Ok(())
+    }
+
+    /// 单独删群签名私钥（幂等）。
+    pub fn del_group_secret(&self, group_id: &[u8]) -> Result<bool> {
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        let existed;
+        { let mut t = wtx.open_table(GROUP_SECRETS).map_err(db_err)?;
+          existed = t.remove(group_id).map_err(db_err)?.is_some(); }
+        wtx.commit().map_err(db_err)?;
+        Ok(existed)
     }
 
     pub fn get_group(&self, group_id: &[u8]) -> Result<Option<Group>> {
@@ -1237,6 +1478,23 @@ impl RedbStore {
     }
 }
 
+/// INBOX value 编解码（P0-1 入库时间前缀）：`recv_ms(8BE) ++ prost(Gram)`。
+fn inbox_encode(recv_ms: u64, gram: &Gram) -> Vec<u8> {
+    let raw = gram.encode_to_vec();
+    let mut v = Vec::with_capacity(8 + raw.len());
+    v.extend_from_slice(&recv_ms.to_be_bytes());
+    v.extend_from_slice(&raw);
+    v
+}
+
+/// 解 INBOX value → (入库时间 recv_ms, Gram)；长度不足/解码失败返回 None（损坏行按"可裁剪"处理）。
+fn inbox_decode(v: &[u8]) -> Option<(u64, Gram)> {
+    if v.len() < 8 { return None; }
+    let recv = u64::from_be_bytes(v[..8].try_into().ok()?);
+    let g = Gram::decode(&v[8..]).ok()?;
+    Some((recv, g))
+}
+
 fn inbox_key(receiver: &[u8], gram_id: u64) -> Vec<u8> {
     let mut k = Vec::with_capacity(receiver.len() + 8);
     k.extend_from_slice(receiver);
@@ -1326,18 +1584,78 @@ mod tests {
     }
 
     #[test]
-    fn inbox_prune_by_age() {
+    fn inbox_prune_by_recv_time() {
         let dir = tempfile::tempdir().unwrap();
         let s = RedbStore::open(dir.path().join("t.redb")).unwrap();
         let r = [7u8; 32];
-        let mut old = msg(r, 1, "old");
-        old.timestamp_ms = 1_000;
-        s.push_inbox(&r, &old).unwrap();
-        s.push_inbox(&r, &msg(r, 2, "new")).unwrap();
-        assert_eq!(s.prune_inbox(10_000).unwrap(), 1);
-        let left = s.peek_inbox(&r).unwrap();
-        assert_eq!(left.len(), 1);
-        assert_eq!(left[0].gram_id, 2);
+        // 两条正常消息，入库时间=当前。
+        s.push_inbox(&r, &msg(r, 1, "a")).unwrap();
+        s.push_inbox(&r, &msg(r, 2, "b")).unwrap();
+        // 一条伪造很旧 timestamp 的消息——按**入库时间**裁剪不应被提前删（P0-1）。
+        let mut forged = msg(r, 3, "forged-old");
+        forged.timestamp_ms = 1;
+        s.push_inbox(&r, &forged).unwrap();
+        // 阈值 0：无一早于 → 不删；伪造旧时间戳那条也安全。
+        assert_eq!(s.prune_inbox(0).unwrap(), 0);
+        assert_eq!(s.prune_inbox(10_000).unwrap(), 0, "按入库时间裁剪，不被伪造的旧 timestamp 提前删除");
+        // 未来阈值：三条入库时间均早于它 → 全删。
+        assert_eq!(s.prune_inbox(now_ms() + 60_000).unwrap(), 3);
+        assert_eq!(s.inbox_len(&r).unwrap(), 0);
+    }
+
+    #[test]
+    fn schema_version_stamped_and_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.redb");
+        {
+            let s = RedbStore::open(&path).unwrap();
+            s.push_inbox(&[1u8; 32], &msg([1u8; 32], 1, "x")).unwrap();
+            // 备份到另一个文件并能作为独立库打开。
+            let bak = dir.path().join("t.bak.redb");
+            let n = s.backup(&bak).unwrap();
+            assert!(n > 0);
+            let s2 = RedbStore::open(&bak).unwrap();
+            assert_eq!(s2.peek_inbox(&[1u8; 32]).unwrap().len(), 1);
+        }
+        // 重开既有库不报错（版本已戳为当前）。
+        let _ = RedbStore::open(&path).unwrap();
+    }
+
+    // P0-2：模拟"旧库"（裸 Gram 进 INBOX、8 字节 seq 进 CHANNEL_INTAKE、无 META version），
+    // 打开触发 v0→v1 迁移，验证旧数据被正确重写、可读、可按龄裁剪（对标生产既有库升级）。
+    #[test]
+    fn migrate_v0_legacy_rows() {
+        use redb::{Database, ReadableDatabase};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.redb");
+        let r = [3u8; 32];
+        let g = msg(r, 1, "legacy-mail");
+        let raw = g.encode_to_vec();
+        let ik = RedbStore::chan_intake_key(&[9u8; 32], &[8u8; 32], b"nonce");
+        {
+            let db = Database::create(&path).unwrap();
+            let wtx = db.begin_write().unwrap();
+            {
+                let mut t = wtx.open_table(INBOX).unwrap();
+                t.insert(inbox_key(&r, 1).as_slice(), raw.as_slice()).unwrap(); // 裸 Gram（旧格式）
+                let mut it = wtx.open_table(CHANNEL_INTAKE).unwrap();
+                it.insert(ik.as_slice(), 42u64.to_be_bytes().as_slice()).unwrap(); // 8 字节 seq（旧格式）
+            }
+            wtx.commit().unwrap();
+            let _ = db; // drop → 释放文件锁
+        }
+        // 打开 → ensure_schema 判为旧库(无 version + 非空) → 跑 v0→v1 迁移。
+        let s = RedbStore::open(&path).unwrap();
+        // INBOX 行被包成 recv_ms++Gram，peek 正确解出原消息（旧邮件不丢）。
+        let got = s.peek_inbox(&r).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].gram_id, 1);
+        // CHANNEL_INTAKE 行扩成 16 字节：get 仍返回 seq，且现在可按龄裁剪。
+        assert_eq!(s.channel_intake_get(&[9u8; 32], &[8u8; 32], b"nonce").unwrap(), Some(42));
+        assert_eq!(s.channel_intake_prune(now_ms() + 60_000).unwrap(), 1);
+        // 迁移后版本已戳为当前，二次打开不再迁移。
+        drop(s);
+        let _ = RedbStore::open(&path).unwrap();
     }
 
     #[test]

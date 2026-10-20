@@ -154,7 +154,19 @@ impl Node {
             let mut last_bcast = tokio::time::Instant::now() - interval;
             // 换网/休眠唤醒自愈：0 邻居时 nudge iroh 重探测的冷却计时（避免每秒狂触发）。
             let mut last_net_nudge: Option<tokio::time::Instant> = None;
+            // 换网 epoch：变化即硬重 join(不依赖 neighbor_count==0),恢复 presence 跨节点广播/收播。
+            let mut seen_epoch = self.net_epoch();
             loop {
+                let ep = self.net_epoch();
+                if ep != seen_epoch {
+                    seen_epoch = ep;
+                    tracing::info!("presence 换网(epoch 变) → 强制重 join gossip");
+                    self.notify_network_change().await;
+                    if let Ok(t) = self.join_channel(channel, self.peers_list()).await {
+                        topic = t;
+                    }
+                    last_bcast = tokio::time::Instant::now() - interval; // 立即重播本地在线态
+                }
                 if last_bcast.elapsed() >= interval {
                     let home = self.ep.id_bytes();
                     let ts = now_secs();

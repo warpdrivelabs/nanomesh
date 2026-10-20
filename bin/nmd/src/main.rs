@@ -53,6 +53,9 @@ const NANO_MESH_ART: &str = r#"
 struct Args {
     #[arg(short, long, default_value = "nmd.toml")]
     config: String,
+    /// P0-2 离线恢复：用指定备份文件覆盖配置里的 db 后退出（须在 nmd 停止时执行）。
+    #[arg(long)]
+    restore: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -388,6 +391,21 @@ async fn async_main() -> anyhow::Result<()> {
 
     let raw = std::fs::read_to_string(&args.config).unwrap_or_default();
     let cfg: Config = toml::from_str(&raw)?;
+
+    // P0-2 离线恢复：--restore <备份> → 覆盖 cfg.db 后退出（覆盖前把现有 db 另存一份，可回滚）。须在 nmd 停止时执行。
+    if let Some(src) = args.restore.as_deref() {
+        let dest = &cfg.db;
+        if std::path::Path::new(dest).exists() {
+            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let bak = format!("{dest}.pre-restore.{ts}");
+            std::fs::copy(dest, &bak)?;
+            println!("已把现有 db 另存为 {bak}");
+        }
+        std::fs::copy(src, dest)?;
+        println!("已从 {src} 恢复到 {dest}；现在不带 --restore 重新启动 nmd 即可。");
+        return Ok(());
+    }
+
     let mode = match cfg.mode.to_ascii_lowercase().as_str() {
         "nat" | "n0" | "internet" => Mode::Nat,
         "selfhost" | "self" | "custom" | "private" => Mode::SelfHost,
@@ -589,6 +607,46 @@ async fn async_main() -> anyhow::Result<()> {
                 // 重打印新地址（NM_NODE_ADDR 不再陈旧）。
                 println!("NM_NODE_ADDR={}", nm_transport::addr_to_string(&node.addr()));
             });
+        });
+
+        // 换网/休眠自愈兜底：换网后 gossip 的热重 join 无法重建 iroh 到对端的旧连接(half-open/旧地址)，
+        // 实测只有【冷启动】(全新 iroh 实例)能恢复动态发现。故换网稳定后(SETTLE 内无新换网，吸收唤醒时
+        // 的连环换网)**保留身份自 exec 重启**——PID 原地用新镜像重跑、cwd 不变(identity/db 相对路径照旧)、
+        // redb 崩溃安全，等效冷启动，必然恢复。换网频繁时去抖只在网络稳定后触发一次。
+        let reexec_node = node.clone();
+        tokio::spawn(async move {
+            const SETTLE: Duration = Duration::from_secs(30);
+            let mut last_epoch = reexec_node.net_epoch();
+            let mut pending_since: Option<std::time::Instant> = None;
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let e = reexec_node.net_epoch();
+                if e != last_epoch {
+                    last_epoch = e;
+                    pending_since = Some(std::time::Instant::now()); // 新换网 → 重置去抖计时
+                    continue;
+                }
+                let Some(t) = pending_since else { continue };
+                if t.elapsed() < SETTLE {
+                    continue;
+                }
+                tracing::warn!("换网已稳定（{:?} 无新变化）→ 保留身份自重启 nmd 以恢复动态发现（等效冷启动）", SETTLE);
+                let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("nmd"));
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt;
+                    let err = std::process::Command::new(&exe)
+                        .args(std::env::args_os().skip(1))
+                        .exec(); // 成功则不返回（进程镜像被替换）
+                    tracing::error!("自重启 exec 失败: {err}；退出(1) 让 supervisor 拉起");
+                    std::process::exit(1);
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = exe;
+                    std::process::exit(1); // 非 unix：退出让 supervisor 重启
+                }
+            }
         });
     }
 

@@ -106,6 +106,7 @@ pub async fn serve(
         .route("/kick", post(kick))
         .route("/add-peer", post(add_peer))
         .route("/remove-peer", post(remove_peer))
+        .route("/backup", post(backup))
         .route("/names/domains", get(names_domains))
         .route("/names/domain-add", post(names_domain_add))
         .route("/names/domain-decision", post(names_domain_decision))
@@ -278,7 +279,7 @@ async fn system(State(st): State<AppState>) -> Json<Value> {
     let pm = *st.proc.lock().unwrap();
     let addr = st.node.addr();
     let (roam_changes, roam_last_ms) = st.node.roam_snapshot();
-    let (grp_fanouts, grp_acks, grp_retx, grp_giveups, grp_ack_batches) = st.node.group_metrics_snapshot();
+    let (grp_fanouts, grp_acks, grp_retx, grp_giveups, grp_ack_batches, grp_dead, grp_ratelimited) = st.node.group_metrics_snapshot();
     let tables: serde_json::Map<String, Value> = st
         .node
         .table_sizes()
@@ -306,6 +307,10 @@ async fn system(State(st): State<AppState>) -> Json<Value> {
         "group_giveups": grp_giveups,
         // 群 ack 聚合：本节点作为成员发出的 GroupAckBatch 块数（块数 ≪ 被确认消息数 = 聚合生效）。
         "group_ack_batches": grp_ack_batches,
+        // P0-3/P0-4 可观测：死信累计(达期限放弃并落档)/被消息级限流丢弃累计/当前死信留存条数。
+        "dead_letters": grp_dead,
+        "msgs_rate_limited": grp_ratelimited,
+        "dead_letter_pending": st.node.dead_letter_count(),
     }))
 }
 
@@ -395,6 +400,18 @@ async fn kick(State(st): State<AppState>, Json(r): Json<IdReq>) -> Result<Json<V
     let id = parse_id(&r.id).ok_or(StatusCode::BAD_REQUEST)?;
     let cut = st.node.kick(id);
     Ok(Json(json!({ "ok": true, "cut": cut })))
+}
+
+/// P0-2 在线备份：把当前 nmd.redb 一致快照拷到 `dest`（绝对路径或相对 nmd 工作目录）。
+#[derive(serde::Deserialize)]
+struct BackupReq { dest: String }
+
+async fn backup(State(st): State<AppState>, Json(r): Json<BackupReq>) -> Result<Json<Value>, StatusCode> {
+    let dest = std::path::PathBuf::from(&r.dest);
+    match st.node.backup_db(&dest) {
+        Ok(n) => { tracing::info!(dest = %r.dest, bytes = n, "db backup written"); Ok(Json(json!({ "ok": true, "bytes": n, "dest": r.dest }))) }
+        Err(e) => { tracing::warn!("db backup failed: {e}"); Err(StatusCode::INTERNAL_SERVER_ERROR) }
+    }
 }
 
 /// 运行时添加/编辑联邦对等（node id + 名称/物理地址/email/mobile/gps）——无需重启；重复 id 即编辑。

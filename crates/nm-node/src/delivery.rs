@@ -210,6 +210,15 @@ pub(crate) async fn deliver_account(
             let targets: Vec<Vec<u8>> = inbox_targets(ctx, account)
                 .into_iter()
                 .filter(|d| skip != Some(d.as_slice()) && !reached.contains(d))
+                // P0-1 配额：设备离线信箱达上限则丢弃本条离线副本（防被灌爆无界增长）。
+                .filter(|d| match s.inbox_len(d) {
+                    Ok(n) if n >= crate::INBOX_MAX_PER_ENTITY => {
+                        tracing::warn!(device = %crate::records::hex_encode(&d[..d.len().min(4)]),
+                            "inbox quota reached; dropping offline copy (P0-1)");
+                        false
+                    }
+                    _ => true,
+                })
                 .collect();
             if !targets.is_empty() {
                 let items: Vec<(&[u8], &Gram)> = targets.iter().map(|d| (d.as_slice(), gram)).collect();
@@ -274,6 +283,30 @@ pub(crate) fn clear_inbox_on_receipt(ctx: &Ctx, acking_rid: &[u8], acking_accoun
     let Some(store) = &ctx.store else { return };
     let _ = store.del_inbox_one(acking_rid, gram_id);
     let _ = store.del_inbox_one(acking_account, gram_id);
+}
+
+/// P0-3：投递彻底失败（达 24h 期限放弃）时给**本地发送方**推一条"投递失败"系统 gram。
+/// 客户端据 `ref_gram_id` 把对应气泡标记为未送达"!"；在线直推 + 离线入库（重连可见）。best-effort。
+pub(crate) const DELIVERY_FAILED_TYPE: &str = "nmspace.v1/delivery.failed";
+
+pub(crate) async fn notify_delivery_failed(ctx: &Ctx, sender: &[u8], receiver: &[u8], failed_gram_id: u64, reason: &str) {
+    let value = format!(
+        "{{\"to\":\"{}\",\"gram_id\":{},\"reason\":\"{}\"}}",
+        crate::records::hex_encode(receiver), failed_gram_id, reason
+    ).into_bytes();
+    let fg = Gram {
+        version: nm_proto::PROTOCOL_VERSION,
+        kind: nm_proto::GramKind::Message as i32,
+        gram_id: now_ms(),                 // 新 id，避免与被通知消息冲突
+        ref_gram_id: Some(failed_gram_id), // 指向失败的那条，客户端据此标记
+        sender: ctx.node_id.to_vec(),      // 系统/home 节点署名
+        receiver: sender.to_vec(),
+        timestamp_ms: now_ms(),
+        payload: Some(nm_proto::Any { type_url: DELIVERY_FAILED_TYPE.into(), value }),
+        crc: Vec::new(),
+    };
+    // 发送方为本节点本地账号（outbox 在其 home）→ 直投其在线设备 + 离线入库。
+    deliver_account(sender, &fg, ctx, true, None).await;
 }
 
 /// 私聊单播投递（不依赖 s2s 中继）：
