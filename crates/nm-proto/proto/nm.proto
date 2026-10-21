@@ -127,6 +127,17 @@ message Invite {
   bytes sig = 10;                 // Ed25519(规范字节)
 }
 
+// P2-13 成员准入(anti-Sybil)：锚点(联邦权威)签发的「某节点获准加入本联邦」凭证。
+// 启用准入的节点在学习成员/presence 前要求对方出示有效 grant（issuer ∈ 本地信任锚点）。
+message AdmissionGrant {
+  string federation = 1;   // 目标联邦名
+  bytes subject = 2;       // 被准入的节点公钥(32)
+  uint64 expires_ms = 3;   // 过期 Unix ms；0=永不过期
+  bytes nonce = 4;         // 随机防重放/唯一标识
+  bytes issuer = 5;        // 签发锚点公钥(32)
+  bytes sig = 6;           // Ed25519(规范字节)
+}
+
 // 目录（Directory）查询与结果（E1：实体注册 + 发现）。
 message DirectoryQuery {
   string kind_prefix = 1;                       // 如 "compute." 命中训练+推理；"" 匹配全部

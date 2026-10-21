@@ -96,14 +96,15 @@
 
 ## 附录 A：Phase A 实施记录（2026-10-21，已落地，未提交/未部署）
 
-`cargo check --workspace` **0 errors**；`nm-node --lib` 11/11；**`pkarr_mock` 2/2（新增 `pkarr_multi_relay_failover` 实跑过）**——证 publish 写全部中继、首个中继宕机 resolve 仍 failover 成功（退单点），计数器正确。**part 3（iroh 传输层 node-addr 多 pkarr）按范围推迟**（`bind_*_selfhosted(pkarr_url: String)` 跨 nm-client/agent-bridge/gateway/compute/nmd+测试 6+ 调用点的签名级改动，非自包含、须活节点实测，另立一批）。
+`cargo check --workspace` **0 errors**；`nm-node --lib` 11/11；**`pkarr_mock` 2/2（新增 `pkarr_multi_relay_failover` 实跑过）**——证 publish 写全部中继、首个中继宕机 resolve 仍 failover 成功（退单点），计数器正确。**part 3（iroh 传输层 node-addr 多 pkarr）亦已补**（见下），`selfhost_smoke` 单 URL 传输路径未回归。
 
 - **`nm-node/src/pkarr_runtime.rs`**（重写）：`PkarrStat{resolve_ok,resolve_fail}`；`pkarr_endpoints()`（逗号多中继，pub(crate)，从 membership.rs 迁来统一）；`pkarr_put_all`（PUT **每个**中继）；`pkarr_resolve_key`（逐中继 GET+验签，**首个非空即返回**，ok/fail 计数）；`pkarr_publish_group`/`pkarr_resolve_group`/`pkarr_publish_channel` 改走多中继；`pkarr_relay_count`/`pkarr_stat_snapshot` 观测。首成功足够（记录 ed25519 自验，多中继仅做可用性冗余）。
 - **`nm-node/src/membership.rs`**：删重复 `pkarr_endpoints`（迁至 pkarr_runtime，成员索引 3 处调用方自动复用统一实现）。
 - **`nm-node/src/lib.rs` + `node_runtime.rs`**：`Node` +`pkarr_stat: Arc<PkarrStat>` + init。
-- **`bin/nmd/src/main.rs`**：`DnsCfg` +`urls: Vec<String>` +`all()`（合并 url+urls 去重保序）/`first()`/`joined()`；selfhost 传输用 `first()`（part 3 待办），`set_pkarr(joined())`（逗号多中继喂既有协议，群/频道/成员发现统一多中继），relay_index 门改 `all().is_empty()`，reload 同步。
+- **`bin/nmd/src/main.rs`**：`DnsCfg` +`urls: Vec<String>` +`all()`（合并 url+urls 去重保序）/`joined()`；selfhost 传输用 `joined()`（part 3：逗号多中继透传传输层），`set_pkarr(joined())`（逗号多中继喂既有协议，群/频道/成员发现统一多中继），relay_index 门改 `all().is_empty()`，reload 同步。
 - **`bin/nmd/src/admin.rs`**：`/system` +`pkarr_relays`（中继数,>1=已退单点）/`pkarr_resolve_ok`/`pkarr_resolve_fail`。
+- **`crates/nm-transport/src/lib.rs`**（part 3）：`bind_infra` selfhost 分支把 `pkarr_url` **按逗号拆分**，逐个注册 `PkarrPublisher`+`PkarrResolver`（node-addr 发布/解析也多副本）。**零签名改动**（`bind_*_selfhosted(pkarr_url: String)` 全不变→nm-client/gateway/compute/**excluded nm-agent-bridge**/测试全不受影响；单 URL=原行为）。`selfhost_smoke` 过。
 
-**部署即消单点**：运维在 `[dns]` 配 2–3 台独立中继（现有 relay.robot.link + 再起 1–2）→ 任一中继挂不影响群/频道/成员发现。向后兼容：单 `url` 行为不变。**未做**：part 3（传输层 node-addr 多 pkarr）、Phase B（真 Mainline DHT）。**未提交**。
+**部署即消单点**：运维在 `[dns]` 配 2–3 台独立中继（现有 relay.robot.link + 再起 1–2）→ 任一中继挂不影响群/频道/成员发现**与** node-addr 解析。向后兼容：单 `url` 行为不变。**未做**：Phase B（真 Mainline DHT，新依赖）。**未提交、未部署**。
 
 <sub>Generated with dmxapi</sub>

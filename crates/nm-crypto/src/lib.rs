@@ -6,7 +6,7 @@
 //! 「entity_id == 连接公钥」。本模块聚焦 Grant：谁(issuer)授权谁(audience)在
 //! `expires` 前对 `resource` 执行 `action`，可校验、可过期。
 
-use nm_proto::{DeviceCert, DeviceRevoke, Grant, Invite};
+use nm_proto::{AdmissionGrant, DeviceCert, DeviceRevoke, Grant, Invite};
 pub use iroh::SecretKey;
 use iroh::{PublicKey, Signature};
 
@@ -264,9 +264,71 @@ pub fn verify_invite(inv: &Invite, now_ms: u64) -> Result<()> {
         .map_err(|_| CryptoError::BadSignature)
 }
 
+/// P2-13 准入凭证签名字节：域分隔前缀 + 各字段长度前缀拼接（不含 sig）。
+fn admission_signing_bytes(g: &AdmissionGrant) -> Vec<u8> {
+    let mut b = b"nmspace-admission-v1".to_vec();
+    push_field(&mut b, g.federation.as_bytes());
+    push_field(&mut b, &g.subject);
+    b.extend_from_slice(&g.expires_ms.to_be_bytes());
+    push_field(&mut b, &g.nonce);
+    push_field(&mut b, &g.issuer);
+    b
+}
+
+/// 锚点私钥签发准入凭证：填 `issuer`（=锚点公钥）+ `sig`（覆盖除 sig 外全部字段，含 issuer）。
+pub fn sign_admission(anchor_sk: &SecretKey, g: &mut AdmissionGrant) {
+    g.issuer = anchor_sk.public().as_bytes().to_vec();
+    g.sig = Vec::new();
+    let sig = anchor_sk.sign(&admission_signing_bytes(g));
+    g.sig = sig.to_bytes().to_vec();
+}
+
+/// 校验准入凭证的**自洽性**：有效期（`now_ms`）+ `issuer` 对规范字节的签名。
+/// issuer 是否为本地信任锚点由调用方（成员准入门）据配置判定；本函数只保证「确由 issuer 签发、未过期、未篡改」。
+pub fn verify_admission(g: &AdmissionGrant, now_ms: u64) -> Result<()> {
+    if g.expires_ms != 0 && now_ms > g.expires_ms {
+        return Err(CryptoError::Expired);
+    }
+    if g.subject.len() != 32 || g.issuer.len() != 32 {
+        return Err(CryptoError::BadBytes);
+    }
+    let issuer = pubkey_from(&g.issuer)?;
+    let sig = signature_from(&g.sig)?;
+    issuer
+        .verify(&admission_signing_bytes(g), &sig)
+        .map_err(|_| CryptoError::BadSignature)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admission_sign_verify_tamper_expiry() {
+        let anchor = SecretKey::from_bytes(&[7u8; 32]);
+        let subject = [42u8; 32];
+        let mut g = AdmissionGrant {
+            federation: "nmspace".into(),
+            subject: subject.to_vec(),
+            expires_ms: 0,
+            nonce: vec![1, 2, 3, 4],
+            issuer: Vec::new(),
+            sig: Vec::new(),
+        };
+        sign_admission(&anchor, &mut g);
+        // issuer 应被填为锚点公钥；自洽校验通过。
+        assert_eq!(g.issuer, anchor.public().as_bytes().to_vec());
+        assert!(verify_admission(&g, 1_000).is_ok());
+        // 篡改 subject → 签名失效。
+        let mut tampered = g.clone();
+        tampered.subject = [43u8; 32].to_vec();
+        assert!(verify_admission(&tampered, 1_000).is_err());
+        // 过期。
+        let mut exp = AdmissionGrant { expires_ms: 500, ..g.clone() };
+        sign_admission(&anchor, &mut exp);
+        assert!(verify_admission(&exp, 400).is_ok());
+        assert!(matches!(verify_admission(&exp, 600), Err(CryptoError::Expired)));
+    }
 
     #[test]
     fn grant_roundtrip_and_scope() {

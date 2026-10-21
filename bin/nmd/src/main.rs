@@ -192,6 +192,15 @@ struct MembershipCfg {
     /// F6/M1：要解析的锚点公钥（64-hex）列表。新节点据此 GET 锚点索引做零配置冷启动 bootstrap。
     #[serde(default)]
     anchors: Vec<String>,
+    /// P2-13 成员准入(anti-Sybil)：开=只学习出示「本地信任锚点签发的有效 grant」的成员广播。缺省关（行为中性）。
+    #[serde(default)]
+    admission: bool,
+    /// 信任的准入签发锚点公钥(64-hex)列表。
+    #[serde(default)]
+    admission_anchors: Vec<String>,
+    /// 本节点对外出示的准入凭证(hex of AdmissionGrant)；空=不出示（锚点自身/未受控节点留空）。
+    #[serde(default)]
+    admission_grant: String,
 }
 
 impl Default for MembershipCfg {
@@ -209,6 +218,9 @@ impl Default for MembershipCfg {
             relay_index: false,
             anchor: false,
             anchors: Vec::new(),
+            admission: false,
+            admission_anchors: Vec::new(),
+            admission_grant: String::new(),
         }
     }
 }
@@ -281,11 +293,7 @@ impl DnsCfg {
         }
         out
     }
-    /// 首个中继（供尚未多中继化的 iroh 传输层 selfhost 发现用；part 3 待办）。
-    fn first(&self) -> Option<String> {
-        self.all().into_iter().next()
-    }
-    /// 逗号拼接的多中继串（喂 set_pkarr 的既有逗号协议；空=None）。
+    /// 逗号拼接的多中继串（喂 set_pkarr 的既有逗号协议，也透传给 selfhost 传输层；空=None）。
     fn joined(&self) -> Option<String> {
         let all = self.all();
         if all.is_empty() { None } else { Some(all.join(",")) }
@@ -463,9 +471,9 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Mode::SelfHost => {
             // 自建中继 + 自建 dns/pkarr：自主可控地穿透 NAT。
-            let pkarr_url = cfg.dns.first().ok_or_else(|| {
+            let pkarr_url = cfg.dns.joined().ok_or_else(|| {
                 anyhow::anyhow!("mode=selfhost 需在 [dns] url 配置自建 iroh-dns-server 的 pkarr 端点，如 https://dns.example.com/pkarr")
-            })?;
+            })?; // P2-12 Phase A(part 3)：逗号多中继透传给传输层（node-addr 发布/解析也多副本）
             let relays = cfg.relay.all();
             if relays.is_empty() {
                 tracing::warn!("mode=selfhost 未配置 [relay] url——无中继回退，仅当对端可直连(pkarr 发布的地址)时可达，NAT 打洞将不可用");
@@ -568,6 +576,15 @@ async fn async_main() -> anyhow::Result<()> {
         node.clone().spawn_pending_flush(); // Defect C 冷启动补发 + 跨节点可靠投递 outbox 持久重传（2s 扫描）
         node.set_per_topic(cfg.federation.per_topic); // F1–F5：[federation] per_topic（缺省开）启停每主题；火管仍双写兜底、存活后退火管
         node.set_pkarr(cfg.dns.joined()); // F2/P2-12A：群/频道/成员发现 pkarr 中继（逗号多中继=弱锚多副本退单点；否则仅火管/home 锚点发现）
+        // P2-13 成员准入(anti-Sybil)：信任锚点 + 本节点 grant + 启停门（缺省关=行为中性）。
+        node.set_admission_anchors(cfg.membership.admission_anchors.iter().filter_map(|h| parse_id_hex(h).ok()).collect());
+        if !cfg.membership.admission_grant.is_empty() {
+            node.set_admission_grant(cfg.membership.admission_grant.clone());
+        }
+        node.set_admission_enabled(cfg.membership.admission);
+        if cfg.membership.admission {
+            tracing::info!(anchors = cfg.membership.admission_anchors.len(), "[membership] 成员准入已启用（拒绝无本地信任锚点有效 grant 的成员广播）");
+        }
         node.clone().spawn_group_sync(m.federation.clone()); // 群联邦：发现 + 消息扇出走 gossip（免 s2s 中继）
         node.clone().spawn_group_ack_batcher(); // 群 ack 聚合：成员节点按 250ms 窗口合并 GroupAck→GroupAckBatch（仅火管），降低高并发群 ack 数量级
         node.clone().spawn_channel_restore(); // P4：从持久化恢复本节点订阅的频道（重 join 主题 + 回填 subs）
@@ -744,6 +761,8 @@ pub(crate) fn reload_config_from(cfg_path: &str, node: &std::sync::Arc<nm_node::
     node.set_per_topic(cfg.federation.per_topic);
     node.set_presence_scoped(cfg.federation.presence_scoped);
     node.set_pkarr(cfg.dns.joined());
+    node.set_admission_anchors(cfg.membership.admission_anchors.iter().filter_map(|h| parse_id_hex(h).ok()).collect());
+    node.set_admission_enabled(cfg.membership.admission); // P2-13：准入开关/锚点热加载；本节点 grant 换发需重启
     node.set_domain(cfg.domain.clone());
     changes.push(format!("per_topic={}", cfg.federation.per_topic));
     changes.push(format!("presence_scoped={}", cfg.federation.presence_scoped));

@@ -47,7 +47,8 @@ pub enum Infra {
     /// 自建基础设施：`Minimal` 基座 + 自定义 iroh-relay + 自建 iroh-dns-server(pkarr)。
     /// - `relay_urls`：自建中继的 URL（如 `https://relay.example.com`）；为空则不启用中继（仅直连+发现）。
     /// - `pkarr_url`：自建 iroh-dns-server 的 pkarr 端点（如 `https://dns.example.com/pkarr`），
-    ///   同时用于**发布**本节点地址与**解析**对端地址（dial-by-key）。
+    ///   同时用于**发布**本节点地址与**解析**对端地址（dial-by-key）。可为**逗号分隔的多中继**
+    ///   （P2-12 Phase A：弱锚多副本，退单点；单 URL=原行为）。
     /// - `dns_origin`：可选，额外走 DNS 查询解析的源域（如 `dns.example.com.`）。
     SelfHosted {
         relay_urls: Vec<String>,
@@ -94,8 +95,13 @@ impl NodeEndpoint {
                 // Minimal 基座（不含任何 n0 中继/发现），再叠加自建发现与中继。
                 let mut b = Endpoint::builder(presets::Minimal);
                 // 自建 iroh-dns-server 的 pkarr：既发布本节点地址、也解析对端（HTTPS /pkarr）。
-                b = b.address_lookup(PkarrPublisher::builder(pkarr_url.parse().map_err(err)?));
-                b = b.address_lookup(PkarrResolver::builder(pkarr_url.parse().map_err(err)?));
+                // P2-12 Phase A(part 3)：`pkarr_url` 可为逗号分隔的多中继——逐个注册 publisher+resolver
+                // （弱锚多副本：地址发布写多个、解析查多个，任一可达即可 dial-by-key；退「单中继即单点」）。
+                // 单 URL（无逗号）= 原行为不变。
+                for u in pkarr_url.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    b = b.address_lookup(PkarrPublisher::builder(u.parse().map_err(err)?));
+                    b = b.address_lookup(PkarrResolver::builder(u.parse().map_err(err)?));
+                }
                 // 可选：额外用 DNS 查询解析（指向自建 dns 源域）。
                 if let Some(origin) = dns_origin {
                     b = b.address_lookup(DnsAddressLookup::builder(origin.clone()));

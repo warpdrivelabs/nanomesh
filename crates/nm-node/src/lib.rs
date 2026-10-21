@@ -202,6 +202,10 @@ pub struct Node {
     seen: Arc<std::sync::Mutex<SeenGrams>>, // 群消息去重（火管 + 每群主题双写只投一次）
     per_topic_nodes: Arc<DashSet<Vec<u8>>>, // F1 协商：已广告支持每群主题的节点 id（收 announce 时记录；F5 据此停火管）
     presence_scoped_nodes: Arc<DashSet<Vec<u8>>>, // P2-11 B：已广告支持 scoped presence（按 home 拉取）的节点 id；近期活跃者全支持→自动退 presence overlay
+    // P2-13 成员准入(anti-Sybil)：启用则只学习出示「本地信任锚点签发的有效 grant」的成员广播。
+    admission_enabled: Arc<std::sync::atomic::AtomicBool>,
+    admission_anchors: Arc<DashSet<Vec<u8>>>,       // 信任的准入签发锚点公钥集合
+    admission_grant: Arc<std::sync::RwLock<String>>, // 本节点对外出示的准入凭证(hex)；空=不出示
     per_group_live: Arc<GroupLive>,         // F5：各群主题上各节点的最近存活（据此省略群消息的火管副本）
     pkarr_url: Arc<std::sync::RwLock<Option<String>>>, // F2：pkarr relay 端点（nmd 据 infra 设置；None=不发布/解析）
     pkarr_seeds: Arc<DashMap<Vec<u8>, Vec<[u8; 32]>>>, // F2：pkarr 解析到的各群 seed 节点（join bootstrap 兜底/无锚发现）

@@ -1,7 +1,11 @@
 use std::sync::Arc;
 
-use crate::records::{hex_decode_n, hex_encode, member_rec};
+use dashmap::DashSet;
+use prost::Message;
+
+use crate::records::{hex_decode, hex_decode_n, hex_encode, member_rec};
 use crate::{now_secs, Node};
+use nm_proto::AdmissionGrant;
 
 /// 联邦对等元数据（管理台展示/持久化，可扩展）。连接一律按 node id（公钥）解析。
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -56,6 +60,10 @@ struct MembershipAnnounce {
     /// 谎报最坏后果=对端多留一会儿火管或照常拉取，均安全）。
     #[serde(default)]
     supports_presence_scoped: bool,
+    /// P2-13 成员准入(anti-Sybil)：锚点签发的准入凭证（hex of 编码后的 AdmissionGrant）；空=未出示。
+    /// 自带 issuer 签名，故不入成员卡片签名字节（与 supports_presence_scoped 同属透明附加字段）。
+    #[serde(default)]
+    admission: String,
     sig: String,
 }
 
@@ -186,6 +194,7 @@ impl Node {
             info: card.clone(),
             addr: nm_transport::addr_to_string(&self.addr()),
             supports_presence_scoped: true, // P2-11 B：编译期能力——本节点支持按 home 拉取
+            admission: self.admission_grant.read().unwrap().clone(), // P2-13：出示本节点准入凭证（无则空）
             sig: hex_encode(&sig),
         };
         serde_json::to_vec(&ann).unwrap_or_default()
@@ -218,6 +227,13 @@ impl Node {
         // 反重放/防陈旧：拒绝过旧(>1 天)或来自明显未来(>5 分钟)的卡片。
         let now = now_secs();
         if ann.ts + 86_400 < now || ann.ts > now + 300 {
+            return;
+        }
+        // P2-13 成员准入(anti-Sybil)：启用则要求对方出示本地信任锚点签发的有效 grant，否则不学习（丢弃）。
+        if self.admission_enabled.load(std::sync::atomic::Ordering::Relaxed)
+            && !admission_allows(&ann.admission, &node_id, federation, &self.admission_anchors, nm_proto::now_ms())
+        {
+            tracing::debug!(peer = %ann.node_id, "membership: 准入被拒(无本地信任锚点签发的有效 grant)，丢弃");
             return;
         }
         // 拨号提示仅当其内嵌 id 与声明 node_id 一致才采用（addr 未签名，防注入错配）。
@@ -413,5 +429,115 @@ impl Node {
                 }
             }
         })
+    }
+}
+
+/// P2-13 成员准入(anti-Sybil) 纯判定：announce 携带的 grant(hex) 是否准许该节点加入本联邦。
+/// 要求：非空 + 可解码 + subject==声明节点 + federation 匹配 + issuer ∈ 本地信任锚点 + 签名/有效期 OK。
+pub(crate) fn admission_allows(
+    grant_hex: &str,
+    subject: &[u8; 32],
+    federation: &str,
+    anchors: &DashSet<Vec<u8>>,
+    now_ms: u64,
+) -> bool {
+    if grant_hex.is_empty() {
+        return false;
+    }
+    let Some(bytes) = hex_decode(grant_hex) else { return false };
+    let Ok(g) = AdmissionGrant::decode(bytes.as_slice()) else { return false };
+    g.subject == subject.to_vec()
+        && g.federation == federation
+        && anchors.contains(&g.issuer)
+        && nm_crypto::verify_admission(&g, now_ms).is_ok()
+}
+
+impl Node {
+    /// P2-13：启停成员准入门（开=拒绝未出示本地信任锚点有效 grant 的成员广播）。
+    pub fn set_admission_enabled(&self, on: bool) {
+        self.admission_enabled.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+    /// P2-13：设置信任的准入签发锚点公钥集合（替换全集）。
+    pub fn set_admission_anchors(&self, anchors: Vec<[u8; 32]>) {
+        self.admission_anchors.clear();
+        for a in anchors {
+            self.admission_anchors.insert(a.to_vec());
+        }
+    }
+    /// P2-13：设置本节点对外出示的准入凭证（hex of 编码后的 AdmissionGrant；空=不出示）。
+    pub fn set_admission_grant(&self, grant_hex: String) {
+        *self.admission_grant.write().unwrap() = grant_hex;
+    }
+    /// 观测：(准入是否启用, 信任锚点数)。
+    pub fn admission_status(&self) -> (bool, usize) {
+        (
+            self.admission_enabled.load(std::sync::atomic::Ordering::Relaxed),
+            self.admission_anchors.len(),
+        )
+    }
+
+    /// P2-13：本节点作为锚点签发一张准入凭证（issuer=本节点公钥，用本节点私钥签名）。
+    /// `expires_ms=0` 表示永不过期。返回已签名的 grant；调用方通常 hex 编码后下发给 subject 节点。
+    pub fn issue_admission(&self, subject: [u8; 32], federation: &str, expires_ms: u64) -> AdmissionGrant {
+        let mut nonce = nm_proto::now_ms().to_be_bytes().to_vec();
+        nonce.extend_from_slice(&subject[..8]); // 时间 + subject 前缀 → 唯一
+        let mut g = AdmissionGrant {
+            federation: federation.to_string(),
+            subject: subject.to_vec(),
+            expires_ms,
+            nonce,
+            issuer: Vec::new(),
+            sig: Vec::new(),
+        };
+        nm_crypto::sign_admission(self.ep.secret_key(), &mut g);
+        g
+    }
+
+    /// P2-13：签发并 hex 编码——返回 `(grant_hex, issuer_hex)`，供 admin 直接下发（免调用方依赖 prost）。
+    pub fn issue_admission_hex(&self, subject: [u8; 32], federation: &str, expires_ms: u64) -> (String, String) {
+        let g = self.issue_admission(subject, federation, expires_ms);
+        (hex_encode(&g.encode_to_vec()), hex_encode(&g.issuer))
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::admission_allows;
+    use dashmap::DashSet;
+    use nm_proto::AdmissionGrant;
+    use prost::Message;
+
+    fn grant_hex(anchor_seed: [u8; 32], subject: &[u8; 32], federation: &str, expires_ms: u64) -> String {
+        let anchor = nm_transport::SecretKey::from_bytes(&anchor_seed);
+        let mut g = AdmissionGrant {
+            federation: federation.into(),
+            subject: subject.to_vec(),
+            expires_ms,
+            nonce: vec![9, 9],
+            issuer: Vec::new(),
+            sig: Vec::new(),
+        };
+        nm_crypto::sign_admission(&anchor, &mut g);
+        crate::records::hex_encode(&g.encode_to_vec())
+    }
+
+    #[test]
+    fn admission_gate_predicate() {
+        let anchor_seed = [3u8; 32];
+        let anchor_pub = nm_transport::SecretKey::from_bytes(&anchor_seed).public().as_bytes().to_vec();
+        let subject = [8u8; 32];
+        let anchors: DashSet<Vec<u8>> = DashSet::new();
+        anchors.insert(anchor_pub);
+
+        let good = grant_hex(anchor_seed, &subject, "nmspace", 0);
+        assert!(admission_allows(&good, &subject, "nmspace", &anchors, 1000)); // 信任锚点+匹配+未过期
+        assert!(!admission_allows("", &subject, "nmspace", &anchors, 1000)); // 空 grant
+        assert!(!admission_allows(&good, &[9u8; 32], "nmspace", &anchors, 1000)); // subject 不符
+        assert!(!admission_allows(&good, &subject, "other", &anchors, 1000)); // 联邦不符
+        let rogue = grant_hex([4u8; 32], &subject, "nmspace", 0);
+        assert!(!admission_allows(&rogue, &subject, "nmspace", &anchors, 1000)); // 非信任锚点
+        let expiring = grant_hex(anchor_seed, &subject, "nmspace", 500);
+        assert!(admission_allows(&expiring, &subject, "nmspace", &anchors, 400)); // 未过期
+        assert!(!admission_allows(&expiring, &subject, "nmspace", &anchors, 600)); // 过期
     }
 }

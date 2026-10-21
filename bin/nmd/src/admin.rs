@@ -131,6 +131,7 @@ pub async fn serve(
         .route("/remove-peer", post(remove_peer))
         .route("/backup", post(backup))
         .route("/reload", post(reload))
+        .route("/admission/issue", post(admission_issue))
         .route("/names/domains", get(names_domains))
         .route("/names/domain-add", post(names_domain_add))
         .route("/names/domain-decision", post(names_domain_decision))
@@ -374,6 +375,7 @@ async fn system(State(st): State<AppState>) -> Json<Value> {
     let (grp_fanouts, grp_acks, grp_retx, grp_giveups, grp_ack_batches, grp_dead, grp_ratelimited) = st.node.group_metrics_snapshot();
     let (presence_pulls, presence_pull_cache_hits, presence_pull_errors) = st.node.presence_stat_snapshot();
     let (pkarr_resolve_ok, pkarr_resolve_fail) = st.node.pkarr_stat_snapshot();
+    let (admission_enabled, admission_anchors) = st.node.admission_status();
     let tables: serde_json::Map<String, Value> = st
         .node
         .table_sizes()
@@ -416,6 +418,9 @@ async fn system(State(st): State<AppState>) -> Json<Value> {
         "pkarr_relays": st.node.pkarr_relay_count(),
         "pkarr_resolve_ok": pkarr_resolve_ok,
         "pkarr_resolve_fail": pkarr_resolve_fail,
+        // P2-13 成员准入观测：是否启用 + 本地信任锚点数。
+        "admission_enabled": admission_enabled,
+        "admission_anchors": admission_anchors,
     }))
 }
 
@@ -527,6 +532,40 @@ async fn backup(State(st): State<AppState>, headers: axum::http::HeaderMap, Json
         Ok(n) => { audit(&op, "backup", &r.dest, true, &format!("{n} bytes")); Ok(Json(json!({ "ok": true, "bytes": n, "dest": r.dest }))) }
         Err(e) => { audit(&op, "backup", &r.dest, false, &e); Err(StatusCode::INTERNAL_SERVER_ERROR) }
     }
+}
+
+/// P2-13：锚点签发准入凭证。本节点用自身私钥签（issuer=本节点公钥）；返回 hex 供运维下发给 subject 节点。
+#[derive(serde::Deserialize)]
+struct AdmissionIssueReq {
+    subject: String, // 被准入节点公钥 hex(64)
+    #[serde(default)]
+    federation: String, // 空=nmspace
+    #[serde(default)]
+    ttl_secs: u64, // 0=永不过期
+}
+
+async fn admission_issue(
+    State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(r): Json<AdmissionIssueReq>,
+) -> Result<Json<Value>, StatusCode> {
+    let op = operator(&headers);
+    let subject = parse_id(&r.subject).ok_or_else(|| {
+        audit(&op, "admission.issue", &r.subject, false, "bad subject id");
+        StatusCode::BAD_REQUEST
+    })?;
+    let federation = if r.federation.trim().is_empty() { "nmspace".to_string() } else { r.federation.trim().to_string() };
+    let expires_ms = if r.ttl_secs == 0 { 0 } else { nm_proto::now_ms() + r.ttl_secs * 1000 };
+    let (grant_hex, issuer_hex) = st.node.issue_admission_hex(subject, &federation, expires_ms);
+    audit(&op, "admission.issue", &r.subject, true, &format!("fed={federation} exp={expires_ms}"));
+    Ok(Json(json!({
+        "ok": true,
+        "grant": grant_hex,   // 下发给 subject 节点：其 set_admission_grant(此 hex) 后出示
+        "issuer": issuer_hex,  // 本节点(锚点)公钥；需被 subject 的对端信任列表收录
+        "subject": r.subject,
+        "federation": federation,
+        "expires_ms": expires_ms,
+    })))
 }
 
 /// 运行时添加/编辑联邦对等（node id + 名称/物理地址/email/mobile/gps）——无需重启；重复 id 即编辑。

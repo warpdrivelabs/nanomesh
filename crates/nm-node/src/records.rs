@@ -18,6 +18,17 @@ pub(crate) fn hex_decode_n<const N: usize>(s: &str) -> Option<[u8; N]> {
     Some(out)
 }
 
+/// 变长 hex 解码（P2-13：承载编码后的 AdmissionGrant 等变长字节）。
+pub(crate) fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
 /// F2 pkarr group discovery record codec.
 pub(crate) mod pkarr_rec {
     use super::{hex_decode_n, hex_encode, SignedPacket, SecretKey};
