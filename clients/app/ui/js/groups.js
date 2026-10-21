@@ -123,6 +123,7 @@
           <button class="ns-btn ns-primary" id="grp-open-chat">进入群聊</button>
           ${isAdmin ? `<button class="ns-btn" id="grp-edit">编辑群信息</button>` : ""}
           ${isAdmin ? `<button class="ns-btn" id="grp-add">添加成员</button>` : ""}
+          ${isAdmin ? `<button class="ns-btn" id="grp-invite">邀请链接</button>` : ""}
           ${isOwner ? `<button class="ns-btn ns-danger" id="grp-dissolve">解散群</button>` : `<button class="ns-btn ns-danger" id="grp-leave">退出群</button>`}
         </div>
         <div class="detail-rows">
@@ -145,6 +146,7 @@
     on("grp-open-chat", () => { if (window.openGroupChat) window.openGroupChat(gid); });
     on("grp-edit", () => editGroupMeta(gid));
     on("grp-add", () => openAddMember(gid));
+    on("grp-invite", () => { if (window.Invite) Invite.generateAndCopy({ groupId: gid }); });
     on("grp-dissolve", async () => { if (confirm("确定解散该群？此操作不可恢复。")) { await act("group_dissolve", { groupId: gid }, "群已解散"); if (window.Tabs) Tabs.close("g:" + gid); else backToList(); renderGroupsList(); } });
     on("grp-leave", async () => { if (confirm("退出该群？")) { await act("group_leave", { groupId: gid }, "已退出"); if (window.Tabs) Tabs.close("g:" + gid); else backToList(); renderGroupsList(); } });
     conv.querySelectorAll(".grp-kick").forEach((b) => b.addEventListener("click", async () => { await act("group_kick", { groupId: gid, target: b.dataset.id }, "已移除"); openDetail(gid); }));

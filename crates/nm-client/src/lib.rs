@@ -25,6 +25,7 @@ mod session_naming;
 mod session_presence;
 mod session_roster;
 mod session_read;
+mod session_invite;
 mod stream;
 
 pub use error::ClientError;

@@ -264,3 +264,34 @@ P1-6 后端机制的桌面消费端（`clients/app`）已接上，已读状态�
 - **ui/js**：`im.js` 加 `READ_UPTO` map + `convLastTs`/`syncRead`(去抖 400ms)/`applyReadMarker` helpers；`imStart` 重置 READ_UPTO + 登录后 `read_list` 追平；开会话三处(selectContact/openGroupChat/openChannel)调 `syncRead`；`im_events.js` onCoreEvent 加 `read` 事件分支→applyReadMarker，并把未读自增改为「正在看→syncRead；没看且 `m.ts>READ_UPTO` 才++」；`im_tray_bridge.js` imMarkRead/imMarkAllRead 调 syncRead。
 - **链路**：开会话→syncRead→read_mark→节点单调写+扇 StateSync 给在线他设备→他设备 pump emit read 事件→applyReadMarker 清角标；离线设备登录 read_list 追平。
 - **未做**：`clients/mobile`（镜像结构，独立项目，另行接入）；端到端双设备实测需手动 QA（编译+语法+逻辑已校验）。
+
+---
+
+## 附录 E：P2 自包含快赢实施记录（2026-10-20，已落地）
+
+P2 架构级项（presence 作用域化 / 真 DHT / 跨联邦）仍为待设计文档；本批只做两个自包含、不动现网拓扑的快赢。`cargo check --workspace` 过；nm-proto `version_compat` + nm-crypto `invite_sign_verify_tamper_expiry` 测试过；nm-node 回归 + app 编译过。
+
+**协议版本握手（让 PROTOCOL_VERSION 真参与）**
+- `crates/nm-proto/src/lib.rs`：新增 `MIN_SUPPORTED_VERSION` + `version_compatible(peer)`（`0`=旧端未声明容忍；否则须 ∈ `[MIN, PROTOCOL]`，过旧/过新都判不兼容）+ 单测。
+- `crates/nm-node/src/protocol.rs`：`handle_conn` 回包路径加版本门——不兼容即回明确 `nmspace.v1/error` 回包（客户端 `route_send` 已会把它转成可读 toast），不再静默乱处理。现网全 v1 → 不受影响；未来升 v2 破坏性变更时 v1↔v2 互相明确拒绝。
+- `bin/nmd/src/admin.rs`：`/identity` 吐 `protocol_version`/`min_supported_version` 供自检。
+
+**邀请链接（后端铸造签名入网凭证）**
+- `crates/nm-proto/proto/nm.proto`：`Invite{federation, seed_node, relay_urls, pkarr_url, group_id?, channel_id?, expires_ms, nonce, issuer, sig}` + lib.rs 导出。
+- `crates/nm-crypto/src/lib.rs`：`sign_invite`(节点私钥签，填 issuer+sig)/`verify_invite`(有效期+issuer 验签)——镜像设备证书长度前缀域分隔签名；+ 篡改/过期/冒充单测。
+- `crates/nm-node/src/invite.rs`(新)+protocol dispatch：`invite.create` 命令——客户端填联邦/relay/pkarr/群频道/有效期，节点盖 `seed_node=本节点`+nonce+签名后返回。节点只对"自己作种子"签名背书；其余字段客户端自备并一并纳入签名防篡改。
+- `crates/nm-client/src/session_invite.rs`(新)：`Session::invite_create(fed, relays, pkarr, group?, channel?, expires_ms) -> Invite`。
+- **消费方待接入**：客户端生成链接（base64(Invite) 嵌 `nmspace://invite/…`）；打开链接 → `verify_invite` → 配 relay/pkarr/种子 → 连接 →（可选）join 群/订阅频道。零配置入网链路。
+
+**改动文件**：`crates/nm-proto/{proto/nm.proto,src/lib.rs}`、`crates/nm-crypto/src/lib.rs`、`crates/nm-node/src/{invite.rs(新),lib.rs,protocol.rs}`、`crates/nm-client/src/{session_invite.rs(新),lib.rs}`、`bin/nmd/src/admin.rs`。
+
+### 附录 E 续：邀请链接桌面消费端已接入（2026-10-20）
+
+P2 邀请链接的桌面 app 消费端（生成 + 打开）已接上。`cargo check`(nmspace-app) 过；4 js `node --check` 过。
+
+- **src-tauri**（`social.rs` + `runtime.rs` 注册）：`invite_create(group_id?, channel_id?, ttl_secs)` → 从 `last_connect` 取 selfhost 配置 + 调 `Session::invite_create` + URL-safe-base64 → 返回 `nmspace://invite/<b64>`；`invite_parse(link)` → base64 decode + `nm_crypto::verify_invite`（离线验签，无需连接）→ 返回校验过的字段 JSON；`group_join(group_id)` → `Session::group_join`（补齐"自己加群"命令，原来只有管理员 `group_add`）。
+- **ui/js**（新 `invite.js` + 4 处接线）：`window.Invite = {applyLink, generate, generateAndCopy, openFromPaste, consumePending}`。打开流程(登录前)：粘贴 → `invite_parse` 验签 → 写 `nm-relay-urls`/`nm-pkarr-url`（自动持久化）+ `NodeSvc.put` 种子为 selfhost 服务 → 暂存群/频道待连后加入 → 提示照常登录（login 即 connect，`infra()` 读到刚写的配置）。连接就绪(`imStart` 末)→ `consumePending` 自动 `channel_sub` / `group_join`。生成流程(已登录)：群详情"邀请链接"按钮 → `generateAndCopy({groupId})` → 复制 `nmspace://invite/…`。登录屏加"打开邀请链接"入口。
+- **设计取舍**：遵 recon 的 option (a)——打开邀请只落地配置+种子，不自驱连接（新用户无本地身份，须走登录表单）；群现在可经 `group_join` 自助加入（邀请自动加入其 group_id）。
+- **未做**：OS deep-link（`nmspace://` 系统级唤起，需 tauri onOpenUrl 插件）——目前靠手动粘贴；`clients/mobile` 镜像；双机端到端实测需手动 QA。
+
+**改动文件**：`clients/app/src-tauri/src/{social.rs,runtime.rs}`、`clients/app/ui/index.html`、`clients/app/ui/js/{invite.js(新),account.js,im.js,groups.js}`。

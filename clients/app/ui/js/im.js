@@ -200,6 +200,8 @@ async function imStart(myId) {
   renderConversation();
   // 前端已就绪（监听器+MY_ID+本地库）→ 通知后端放水，补投离线消息不再因早于监听器而丢失。
   try { await NM.inv("im_ready"); } catch (_) {}
+  // P2 邀请：若登录前打开过邀请链接，连接就绪后自动订阅频道/加入群。
+  if (window.Invite && Invite.consumePending) { try { await Invite.consumePending(); } catch (_) {} }
 }
 
 function dirSig(list) {

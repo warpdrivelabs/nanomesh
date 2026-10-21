@@ -6,7 +6,7 @@
 //! 「entity_id == 连接公钥」。本模块聚焦 Grant：谁(issuer)授权谁(audience)在
 //! `expires` 前对 `resource` 执行 `action`，可校验、可过期。
 
-use nm_proto::{DeviceCert, DeviceRevoke, Grant};
+use nm_proto::{DeviceCert, DeviceRevoke, Grant, Invite};
 pub use iroh::SecretKey;
 use iroh::{PublicKey, Signature};
 
@@ -221,6 +221,49 @@ fn signature_from(b: &[u8]) -> Result<Signature> {
     Ok(Signature::from_bytes(&arr))
 }
 
+// ── P2 邀请链接签名（节点自描述入网凭证）──
+
+/// 邀请的规范签名字节：域分隔前缀 + 各字段长度前缀拼接（不含 `sig`；含 `issuer`、`seed_node`）。
+fn invite_signing_bytes(inv: &Invite) -> Vec<u8> {
+    let mut b = b"nmspace-invite-v1".to_vec();
+    push_field(&mut b, inv.federation.as_bytes());
+    push_field(&mut b, &inv.seed_node);
+    b.extend_from_slice(&(inv.relay_urls.len() as u32).to_be_bytes());
+    for u in &inv.relay_urls {
+        push_field(&mut b, u.as_bytes());
+    }
+    push_field(&mut b, inv.pkarr_url.as_bytes());
+    push_field(&mut b, &inv.group_id);
+    push_field(&mut b, &inv.channel_id);
+    b.extend_from_slice(&inv.expires_ms.to_be_bytes());
+    push_field(&mut b, &inv.nonce);
+    push_field(&mut b, &inv.issuer);
+    b
+}
+
+/// 用签发节点私钥签发邀请：填 `issuer`（=节点公钥）+ `sig`（覆盖除 sig 外全部字段，含 issuer）。
+pub fn sign_invite(node_sk: &SecretKey, inv: &mut Invite) {
+    inv.issuer = node_sk.public().as_bytes().to_vec();
+    inv.sig = Vec::new();
+    let sig = node_sk.sign(&invite_signing_bytes(inv));
+    inv.sig = sig.to_bytes().to_vec();
+}
+
+/// 校验邀请：有效期（`now_ms`）+ `issuer` 对规范字节的签名。新端据此确认邀请真实、未被篡改。
+pub fn verify_invite(inv: &Invite, now_ms: u64) -> Result<()> {
+    if inv.expires_ms != 0 && now_ms > inv.expires_ms {
+        return Err(CryptoError::Expired);
+    }
+    if inv.seed_node.len() != 32 || inv.issuer.len() != 32 {
+        return Err(CryptoError::BadBytes);
+    }
+    let issuer = pubkey_from(&inv.issuer)?;
+    let sig = signature_from(&inv.sig)?;
+    issuer
+        .verify(&invite_signing_bytes(inv), &sig)
+        .map_err(|_| CryptoError::BadSignature)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,5 +344,33 @@ mod tests {
             verify_bytes(&other, msg, &sig),
             Err(CryptoError::BadSignature)
         ));
+    }
+
+    #[test]
+    fn invite_sign_verify_tamper_expiry() {
+        let node = SecretKey::from_bytes(&[21u8; 32]);
+        let mut inv = Invite {
+            federation: "nmspace".into(),
+            seed_node: node.public().as_bytes().to_vec(),
+            relay_urls: vec!["https://relay.robot.link:8443".into()],
+            pkarr_url: "https://relay.robot.link:8444/pkarr".into(),
+            group_id: Vec::new(),
+            channel_id: Vec::new(),
+            expires_ms: 1000,
+            nonce: vec![1, 2, 3],
+            issuer: Vec::new(),
+            sig: Vec::new(),
+        };
+        sign_invite(&node, &mut inv);
+        assert!(verify_invite(&inv, 500).is_ok(), "未过期+签名有效");
+        assert!(matches!(verify_invite(&inv, 2000), Err(CryptoError::Expired)), "过期拒绝");
+        // 篡改 relay → 验签失败
+        let mut bad = inv.clone();
+        bad.relay_urls = vec!["https://evil.example:8443".into()];
+        assert!(matches!(verify_invite(&bad, 500), Err(CryptoError::BadSignature)), "篡改字段验签失败");
+        // 换 issuer（冒充）→ 验签失败
+        let mut forged = inv.clone();
+        forged.issuer = SecretKey::from_bytes(&[22u8; 32]).public().as_bytes().to_vec();
+        assert!(verify_invite(&forged, 500).is_err(), "冒充签发者失败");
     }
 }

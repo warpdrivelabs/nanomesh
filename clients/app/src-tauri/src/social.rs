@@ -1,5 +1,6 @@
 use serde_json::{Value, json};
 use tauri::{AppHandle, State};
+use prost::Message;
 
 use crate::{AppState, hex, parse_id, send_with_retry, session_of};
 
@@ -425,4 +426,60 @@ pub(crate) async fn channel_backfill(
 pub(crate) async fn my_id(state: State<'_, AppState>) -> Result<String, String> {
     let g = state.conn.lock().await;
     Ok(hex(&g.as_ref().ok_or("尚未连接")?.my_id))
+}
+
+// ── P2 邀请链接消费端 ──
+
+/// 生成邀请链接：从当前连接取 selfhost 基础设施填入，节点盖种子(=本连接 home 节点)+签名；
+/// 返回 `nmspace://invite/<url-safe-base64(Invite)>`。可选携带要自动加入的群/频道，`ttl_secs=0` 永不过期。
+#[tauri::command]
+pub(crate) async fn invite_create(
+    state: State<'_, AppState>,
+    group_id: Option<String>,
+    channel_id: Option<String>,
+    ttl_secs: u64,
+) -> Result<String, String> {
+    let session = session_of(&state).await?;
+    let args = state.last_connect.lock().await.clone().unwrap_or_default();
+    let gid = match group_id { Some(s) if !s.trim().is_empty() => Some(parse_id(&s)?), _ => None };
+    let cid = match channel_id { Some(s) if !s.trim().is_empty() => Some(parse_id(&s)?), _ => None };
+    let expires = if ttl_secs == 0 { 0 } else { nm_proto::now_ms() + ttl_secs.saturating_mul(1000) };
+    let inv = session
+        .invite_create("nmspace", args.relay_urls, args.pkarr_url.as_deref().unwrap_or(""), gid, cid, expires)
+        .await
+        .map_err(|e| e.to_string())?;
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(inv.encode_to_vec());
+    Ok(format!("nmspace://invite/{b64}"))
+}
+
+/// 解析并校验邀请链接（离线、无需连接）：验签 + 有效期，返回校验通过的字段（供前端预填连接配置）。
+#[tauri::command]
+pub(crate) fn invite_parse(link: String) -> Result<Value, String> {
+    let b64 = link.trim().rsplit('/').next().unwrap_or("").trim();
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(b64)
+        .map_err(|_| "邀请链接格式错误".to_string())?;
+    let inv = nm_proto::Invite::decode(bytes.as_slice()).map_err(|_| "邀请链接解析失败".to_string())?;
+    nm_crypto::verify_invite(&inv, nm_proto::now_ms()).map_err(|e| format!("邀请校验失败: {e}"))?;
+    Ok(json!({
+        "federation": inv.federation,
+        "seedNode": hex(&inv.seed_node),
+        "relayUrls": inv.relay_urls,
+        "pkarrUrl": inv.pkarr_url,
+        "groupId": if inv.group_id.is_empty() { Value::Null } else { json!(hex(&inv.group_id)) },
+        "channelId": if inv.channel_id.is_empty() { Value::Null } else { json!(hex(&inv.channel_id)) },
+        "expiresMs": inv.expires_ms,
+    }))
+}
+
+/// 自己加入某群（区别于 `group_add` 的"管理员拉别人"）：供打开邀请后自动加入其 group_id。
+#[tauri::command]
+pub(crate) async fn group_join(
+    state: State<'_, AppState>,
+    group_id: String,
+) -> Result<(), String> {
+    let session = session_of(&state).await?;
+    session.group_join(parse_id(&group_id)?).await.map_err(|e| e.to_string())
 }

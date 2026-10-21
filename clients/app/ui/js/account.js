@@ -447,6 +447,8 @@
     document.getElementById("acct-switch").addEventListener("click", () => {
       setMode(mode === "login" ? "register" : "login");
     });
+    const invBtn = document.getElementById("acct-invite-open");
+    if (invBtn) invBtn.addEventListener("click", () => { if (window.Invite) Invite.openFromPaste(); });
     document.getElementById("acct-forgot").addEventListener("click", () => {
       if (!document.getElementById("acct-local").value.trim() || !document.getElementById("acct-domain").value.trim()) {
         errBox().textContent = "请先填写用户名和域名";

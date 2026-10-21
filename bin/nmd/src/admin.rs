@@ -410,6 +410,9 @@ async fn identity(State(st): State<AppState>) -> Json<Value> {
     Json(json!({
         "node_id": hex(st.node.id().as_bytes()),
         "addr": nm_transport::addr_to_string(&st.node.addr()),
+        // P2 协议版本握手：本节点声明的协议版本与可兼容下限（客户端/对端据此自检）。
+        "protocol_version": nm_proto::PROTOCOL_VERSION,
+        "min_supported_version": nm_proto::MIN_SUPPORTED_VERSION,
     }))
 }
 

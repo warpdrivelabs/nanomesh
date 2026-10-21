@@ -18,11 +18,19 @@ pub use pb::{
     ChannelPubReq, Command, CommandResult,
     DeviceCert, DeviceInfo, DeviceList, DeviceRevoke, DirectoryQuery, Entity, EntityList, Grant, Gram, FedSyncReq, FedSyncResp, GramKind, Group,
     GroupAck, GroupAckBatch, GroupAckEntry, GroupGossip, GroupList, GroupOp, JobSpec, NameList, NameOp, NameQuery, NameRecord, PubPolicy,
-    ReadMarker, ReadMarkerList,
+    ReadMarker, ReadMarkerList, Invite,
 };
 
 /// 协议主版本；握手时协商，拒绝不兼容主版本。
 pub const PROTOCOL_VERSION: u32 = 1;
+/// 可兼容的最低对端协议版本：对端 < 此值即不兼容而拒绝。升主版本做破坏性变更时同步抬高。
+pub const MIN_SUPPORTED_VERSION: u32 = 1;
+
+/// P2 协议版本握手：对端版本是否与本端兼容。`0` 视为旧端未声明（容忍）；否则须落在
+/// `[MIN_SUPPORTED_VERSION, PROTOCOL_VERSION]`——过旧(破坏性早于 MIN)或过新(本端解不了)都判不兼容。
+pub fn version_compatible(peer: u32) -> bool {
+    peer == 0 || (peer >= MIN_SUPPORTED_VERSION && peer <= PROTOCOL_VERSION)
+}
 
 /// 当前 Unix 毫秒时间戳。
 pub fn now_ms() -> u64 {
@@ -79,5 +87,20 @@ impl core::fmt::Debug for Id32 {
             write!(f, "{:02x}", b)?;
         }
         write!(f, "…")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn version_compat() {
+        assert!(version_compatible(0), "未声明(旧端)容忍");
+        assert!(version_compatible(PROTOCOL_VERSION));
+        assert!(version_compatible(MIN_SUPPORTED_VERSION));
+        assert!(!version_compatible(PROTOCOL_VERSION + 1), "过新(本端解不了)拒绝");
+        if MIN_SUPPORTED_VERSION > 1 {
+            assert!(!version_compatible(MIN_SUPPORTED_VERSION - 1), "过旧拒绝");
+        }
     }
 }

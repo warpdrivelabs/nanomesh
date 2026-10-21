@@ -112,6 +112,21 @@ message CommandResult { uint64 correlation_id = 1; bool ok = 2; Any result = 3; 
 message ReadMarker { bytes conversation = 1; uint64 read_up_to_ms = 2; }
 message ReadMarkerList { repeated ReadMarker markers = 1; }
 
+// P2 邀请链接：节点自描述的签名入网凭证。新端据此零配置接入本联邦（选用 selfhost relay/pkarr + 种子节点），
+// 可选自动加入某群/订阅某频道。`issuer`=签发节点公钥，`sig`=对除 sig 外全部字段的 Ed25519 签名。
+message Invite {
+  string federation = 1;           // 目标联邦名
+  bytes seed_node = 2;             // 引导种子节点 id(32) = 签发节点（新端加入 [[peers]] 的首个种子）
+  repeated string relay_urls = 3;  // selfhost relay（新端 mode=selfhost 用）
+  string pkarr_url = 4;            // selfhost dns/pkarr 端点
+  bytes group_id = 5;              // 可选：自动加入的群(32)；空=无
+  bytes channel_id = 6;            // 可选：自动订阅的频道(32)；空=无
+  uint64 expires_ms = 7;          // 过期 Unix ms；0=永不过期
+  bytes nonce = 8;                // 随机防重放/唯一标识
+  bytes issuer = 9;               // 签发节点公钥(32)
+  bytes sig = 10;                 // Ed25519(规范字节)
+}
+
 // 目录（Directory）查询与结果（E1：实体注册 + 发现）。
 message DirectoryQuery {
   string kind_prefix = 1;                       // 如 "compute." 命中训练+推理；"" 匹配全部

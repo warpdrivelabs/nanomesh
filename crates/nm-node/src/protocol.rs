@@ -39,6 +39,7 @@ use crate::records::hex_decode_n;
 use crate::retire::group_topic_retireable;
 use crate::roster::{roster_add, roster_list, roster_remove, roster_update};
 use crate::read_sync::{read_list, read_mark};
+use crate::invite::invite_create;
 use crate::{now_secs, Ctx, SessionMeta, LIVE_TTL_MS};
 
 /// nmspace 单播/命令/联邦协议处理器：包住既有的每连接处理逻辑，注册到 `Router` 的 `nmspace/0`。
@@ -200,16 +201,28 @@ async fn handle_conn(conn: IrohConnection, ctx: Ctx, rid: Vec<u8>) {
         // 契约：非黑名单的请求必有响应。handle_gram 返回 None = 消息被拒（防冒名/未知 kind），
         // 若直接关流，client 的 route_send 读到空流会报 "stream finished early(0 bytes read)"——
         // 既误导用户（像连接坏了，实为被拒），又让重连无法自愈。故回明确的拒绝 Reply。
-        let reply = match handle_gram(&gram, &ctx, &principal, &rid).await {
-            Some(r) => r,
-            None => reply_gram(
-                &gram,
-                GramKind::Reply,
-                Some(nm_proto::pb::Any {
-                    type_url: "nmspace.v1/error".into(),
-                    value: b"rejected: message dropped by node (sender-principal mismatch / unsupported)".to_vec(),
-                }),
-            ),
+        // P2 协议版本握手：对端版本不兼容 → 回明确错误（而非静默处理致乱解析/错投）。version==0(旧端未声明)容忍。
+        let reply = if !nm_proto::version_compatible(gram.version) {
+            tracing::warn!(peer_version = gram.version, "rejected: protocol version incompatible");
+            reply_gram(&gram, GramKind::Reply, Some(nm_proto::pb::Any {
+                type_url: "nmspace.v1/error".into(),
+                value: format!(
+                    "protocol version incompatible: peer v{}, node supports v{}..=v{}",
+                    gram.version, nm_proto::MIN_SUPPORTED_VERSION, nm_proto::PROTOCOL_VERSION
+                ).into_bytes(),
+            }))
+        } else {
+            match handle_gram(&gram, &ctx, &principal, &rid).await {
+                Some(r) => r,
+                None => reply_gram(
+                    &gram,
+                    GramKind::Reply,
+                    Some(nm_proto::pb::Any {
+                        type_url: "nmspace.v1/error".into(),
+                        value: b"rejected: message dropped by node (sender-principal mismatch / unsupported)".to_vec(),
+                    }),
+                ),
+            }
         };
         if let Err(e) = write_gram(&mut send, &reply).await {
             tracing::warn!("write reply failed: {e}");
@@ -547,6 +560,7 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Op
         "roster.update" => roster_update(ctx, caller, &cmd),
         "read.mark" => read_mark(ctx, caller, rid, &cmd).await, // P1-6 多设备已读：写入并扇到在线设备
         "read.list" => read_list(ctx, caller),                  // P1-6 登录追平：拉取账号全部已读位
+        "invite.create" => invite_create(ctx, &cmd),            // P2 邀请链接：节点签发自描述入网凭证
         "blob.put" => blob_put(ctx, &cmd),
         "blob.get" => blob_get(ctx, &cmd).await,
         "group.create" => group_create(&cmd, groups, store, caller, ctx.node_id.as_slice()),
