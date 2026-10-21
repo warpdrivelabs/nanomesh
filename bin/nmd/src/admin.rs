@@ -373,6 +373,7 @@ async fn system(State(st): State<AppState>) -> Json<Value> {
     let (roam_changes, roam_last_ms) = st.node.roam_snapshot();
     let (grp_fanouts, grp_acks, grp_retx, grp_giveups, grp_ack_batches, grp_dead, grp_ratelimited) = st.node.group_metrics_snapshot();
     let (presence_pulls, presence_pull_cache_hits, presence_pull_errors) = st.node.presence_stat_snapshot();
+    let (pkarr_resolve_ok, pkarr_resolve_fail) = st.node.pkarr_stat_snapshot();
     let tables: serde_json::Map<String, Value> = st
         .node
         .table_sizes()
@@ -411,6 +412,10 @@ async fn system(State(st): State<AppState>) -> Json<Value> {
         "presence_pulls": presence_pulls,
         "presence_pull_cache_hits": presence_pull_cache_hits,
         "presence_pull_errors": presence_pull_errors,
+        // P2-12 Phase A 去中心发现观测：配置的 pkarr 中继数（>1=已退单点）+ 多中继解析命中/全失败累计。
+        "pkarr_relays": st.node.pkarr_relay_count(),
+        "pkarr_resolve_ok": pkarr_resolve_ok,
+        "pkarr_resolve_fail": pkarr_resolve_fail,
     }))
 }
 

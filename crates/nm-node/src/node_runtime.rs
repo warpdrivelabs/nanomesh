@@ -224,6 +224,7 @@ impl Node {
             pkarr_url: Arc::new(std::sync::RwLock::new(None)),
             pkarr_seeds: Arc::new(DashMap::new()),
             http: reqwest::Client::new(),
+            pkarr_stat: Arc::new(crate::pkarr_runtime::PkarrStat::default()),
             group_pub,
             group_pub_rx: std::sync::Mutex::new(Some(group_pub_rx)),
             domains: Arc::new(std::sync::RwLock::new(owned_domains)),

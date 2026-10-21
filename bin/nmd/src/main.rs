@@ -261,9 +261,35 @@ struct DnsCfg {
     /// 自建 iroh-dns-server 的 pkarr 端点（发布+解析），如 `https://dns.example.com/pkarr`。
     #[serde(default)]
     url: Option<String>,
+    /// P2-12 Phase A：额外的 pkarr 中继列表（弱锚多副本，退单点）。与 `url` 合并去重。
+    #[serde(default)]
+    urls: Vec<String>,
     /// 可选：额外走 DNS 查询解析的源域，如 `dns.example.com.`。
     #[serde(default)]
     origin: Option<String>,
+}
+
+impl DnsCfg {
+    /// 合并 `url` + `urls`，去空去重，保序。
+    fn all(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for u in self.url.iter().cloned().chain(self.urls.iter().cloned()) {
+            let u = u.trim().to_string();
+            if !u.is_empty() && !out.contains(&u) {
+                out.push(u);
+            }
+        }
+        out
+    }
+    /// 首个中继（供尚未多中继化的 iroh 传输层 selfhost 发现用；part 3 待办）。
+    fn first(&self) -> Option<String> {
+        self.all().into_iter().next()
+    }
+    /// 逗号拼接的多中继串（喂 set_pkarr 的既有逗号协议；空=None）。
+    fn joined(&self) -> Option<String> {
+        let all = self.all();
+        if all.is_empty() { None } else { Some(all.join(",")) }
+    }
 }
 
 /// 连通模式。
@@ -437,7 +463,7 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Mode::SelfHost => {
             // 自建中继 + 自建 dns/pkarr：自主可控地穿透 NAT。
-            let pkarr_url = cfg.dns.url.clone().ok_or_else(|| {
+            let pkarr_url = cfg.dns.first().ok_or_else(|| {
                 anyhow::anyhow!("mode=selfhost 需在 [dns] url 配置自建 iroh-dns-server 的 pkarr 端点，如 https://dns.example.com/pkarr")
             })?;
             let relays = cfg.relay.all();
@@ -541,7 +567,7 @@ async fn async_main() -> anyhow::Result<()> {
         node.clone().spawn_presence(m.federation.clone()); // P2：在线状态（关=gossip overlay+TTL；开=退 overlay、按 home 拉取）
         node.clone().spawn_pending_flush(); // Defect C 冷启动补发 + 跨节点可靠投递 outbox 持久重传（2s 扫描）
         node.set_per_topic(cfg.federation.per_topic); // F1–F5：[federation] per_topic（缺省开）启停每主题；火管仍双写兜底、存活后退火管
-        node.set_pkarr(cfg.dns.url.clone()); // F2：群发现 pkarr relay（配置了 [dns] url 即启用；否则仅火管/home 锚点发现）
+        node.set_pkarr(cfg.dns.joined()); // F2/P2-12A：群/频道/成员发现 pkarr 中继（逗号多中继=弱锚多副本退单点；否则仅火管/home 锚点发现）
         node.clone().spawn_group_sync(m.federation.clone()); // 群联邦：发现 + 消息扇出走 gossip（免 s2s 中继）
         node.clone().spawn_group_ack_batcher(); // 群 ack 聚合：成员节点按 250ms 窗口合并 GroupAck→GroupAckBatch（仅火管），降低高并发群 ack 数量级
         node.clone().spawn_channel_restore(); // P4：从持久化恢复本节点订阅的频道（重 join 主题 + 回填 subs）
@@ -553,7 +579,7 @@ async fn async_main() -> anyhow::Result<()> {
                 .iter()
                 .filter_map(|h| parse_id_hex(h).ok())
                 .collect();
-            if cfg.dns.url.is_none() {
+            if cfg.dns.all().is_empty() {
                 tracing::warn!("[membership] relay_index=true 但未配 [dns] url —— 成员索引不发布/解析");
             }
             tracing::info!(
@@ -717,7 +743,7 @@ pub(crate) fn reload_config_from(cfg_path: &str, node: &std::sync::Arc<nm_node::
     // ② per_topic / pkarr / 域名：直接覆盖（&self 原子/RwLock）。
     node.set_per_topic(cfg.federation.per_topic);
     node.set_presence_scoped(cfg.federation.presence_scoped);
-    node.set_pkarr(cfg.dns.url.clone());
+    node.set_pkarr(cfg.dns.joined());
     node.set_domain(cfg.domain.clone());
     changes.push(format!("per_topic={}", cfg.federation.per_topic));
     changes.push(format!("presence_scoped={}", cfg.federation.presence_scoped));

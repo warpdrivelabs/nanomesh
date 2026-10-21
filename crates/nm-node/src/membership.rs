@@ -80,17 +80,6 @@ fn membership_signing_bytes(node_id: &[u8; 32], ts: u64, info: &PeerInfo) -> Vec
 }
 
 impl Node {
-    /// F6/D5：relay 端点列表（`[dns] url` 支持逗号分隔多 relay；弱锚多副本，发布写多个、解析轮询）。
-    /// F2 群发现仍用 `pkarr_endpoint()`（首个）；成员索引 publish/resolve 用本列表。
-    fn pkarr_endpoints(&self) -> Vec<String> {
-        self.pkarr_url
-            .read()
-            .unwrap()
-            .as_deref()
-            .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
-            .unwrap_or_default()
-    }
-
     /// F6/M1：锚点把「本联邦近期活跃成员」的 bootstrap 集合（本节点 + 已知活跃 peer，≤8）用**本节点私钥**
     /// 签名 PUT 到 relay（key=本节点公钥 z32，TXT 名 `_nmmember`）。仅锚点调用；无 relay 则跳过。
     /// 新节点据带外配置的锚点公钥 GET 此记录即得入网 bootstrap。pub 便于运维/测试直接触发。
