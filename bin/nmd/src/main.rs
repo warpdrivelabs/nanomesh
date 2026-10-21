@@ -144,11 +144,15 @@ struct FederationCfg {
     /// 对端在主题上存活后退火管。**缺省 true=默认启用**；显式 `per_topic = false` 可回退仅火管。
     #[serde(default = "default_true")]
     per_topic: bool,
+    /// P2-11：presence 退火管——开则本节点退出 presence overlay（不 join/发/收），presence 全走按 home 拉取。
+    /// **缺省 false**（迁移安全：先全网升级、确认各 home 可被拉取后，再在全自有集群统一开启）。
+    #[serde(default)]
+    presence_scoped: bool,
 }
 impl Default for FederationCfg {
     // `[federation]` 整段缺省时也默认启用（保证 default 行为一致，不只是段内缺字段）。
     fn default() -> Self {
-        Self { per_topic: true }
+        Self { per_topic: true, presence_scoped: false }
     }
 }
 
@@ -533,7 +537,8 @@ async fn async_main() -> anyhow::Result<()> {
             ttl_secs: m.ttl_secs,
             card,
         });
-        node.clone().spawn_presence(m.federation.clone()); // P2：在线状态 gossip + TTL
+        node.set_presence_scoped(cfg.federation.presence_scoped); // P2-11：presence 退火管（缺省关=维持 overlay 双写兜底；全升级后开 → 纯按 home 拉取）
+        node.clone().spawn_presence(m.federation.clone()); // P2：在线状态（关=gossip overlay+TTL；开=退 overlay、按 home 拉取）
         node.clone().spawn_pending_flush(); // Defect C 冷启动补发 + 跨节点可靠投递 outbox 持久重传（2s 扫描）
         node.set_per_topic(cfg.federation.per_topic); // F1–F5：[federation] per_topic（缺省开）启停每主题；火管仍双写兜底、存活后退火管
         node.set_pkarr(cfg.dns.url.clone()); // F2：群发现 pkarr relay（配置了 [dns] url 即启用；否则仅火管/home 锚点发现）
@@ -711,9 +716,11 @@ pub(crate) fn reload_config_from(cfg_path: &str, node: &std::sync::Arc<nm_node::
 
     // ② per_topic / pkarr / 域名：直接覆盖（&self 原子/RwLock）。
     node.set_per_topic(cfg.federation.per_topic);
+    node.set_presence_scoped(cfg.federation.presence_scoped);
     node.set_pkarr(cfg.dns.url.clone());
     node.set_domain(cfg.domain.clone());
     changes.push(format!("per_topic={}", cfg.federation.per_topic));
+    changes.push(format!("presence_scoped={}", cfg.federation.presence_scoped));
 
     // ③ 需重绑项：检测到与进程启动时不同则告警（此处只提示；真正生效需重启/自重启）。
     if !cfg.relay.all().is_empty() {

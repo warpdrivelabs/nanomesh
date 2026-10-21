@@ -42,7 +42,7 @@ mod s2s;
 use channels::Channels;
 use dedup::SeenGrams;
 pub use directory::MemDirectory;
-use presence::{PresenceMap, StatusIntent};
+use presence::{PresenceMap, PresenceStat, StatusIntent};
 use protocol::{GossipGate, ImspaceProto};
 #[cfg(test)]
 use records::{member_rec, pkarr_rec};
@@ -143,6 +143,7 @@ struct Ctx {
     sessions_meta: Arc<SessionsMeta>,
     presence: Arc<PresenceMap>,      // 在线状态缓存（gossip + 本地会话，TTL 过期即离线）
     status_intent: Arc<StatusIntent>, // 用户设定状态（away/busy/dnd…），广播时采用
+    presence_stat: Arc<PresenceStat>, // P2-11：presence 拉取观测（pulls/cache_hits/errors）
     channels: Arc<Channels>,          // P4 频道运行态（gossip pub/sub）
     gossip: Gossip,                   // 频道动态 join 需要
     group_pub: tokio::sync::mpsc::UnboundedSender<Vec<u8>>, // 群消息/群公告 → 联邦 gossip 广播队列
@@ -190,6 +191,9 @@ pub struct Node {
     peer_info: Arc<DashMap<Vec<u8>, PeerInfo>>,        // 对等元数据（名称/地址/email/mobile/gps）
     presence: Arc<PresenceMap>,                        // 在线状态缓存（gossip + 本地会话，TTL）
     status_intent: Arc<StatusIntent>,                  // 用户设定状态（away/busy/dnd…）
+    // P2-11 presence 去火管化：开则本节点退出 presence overlay（不 join/发/收），presence 全走按 home 拉取。
+    presence_scoped: Arc<std::sync::atomic::AtomicBool>,
+    presence_stat: Arc<PresenceStat>,                  // presence 拉取观测（pulls/cache_hits/errors）
     channels: Arc<Channels>,                           // P4 频道运行态（gossip pub/sub）
     // 规模化联邦（F1）：每群独立主题收发；灰度开关 per_topic（默认关=仅火管，零行为变化）。
     fed: Arc<nm_federation::Federation>,
@@ -197,6 +201,7 @@ pub struct Node {
     per_topic: Arc<std::sync::atomic::AtomicBool>,
     seen: Arc<std::sync::Mutex<SeenGrams>>, // 群消息去重（火管 + 每群主题双写只投一次）
     per_topic_nodes: Arc<DashSet<Vec<u8>>>, // F1 协商：已广告支持每群主题的节点 id（收 announce 时记录；F5 据此停火管）
+    presence_scoped_nodes: Arc<DashSet<Vec<u8>>>, // P2-11 B：已广告支持 scoped presence（按 home 拉取）的节点 id；近期活跃者全支持→自动退 presence overlay
     per_group_live: Arc<GroupLive>,         // F5：各群主题上各节点的最近存活（据此省略群消息的火管副本）
     pkarr_url: Arc<std::sync::RwLock<Option<String>>>, // F2：pkarr relay 端点（nmd 据 infra 设置；None=不发布/解析）
     pkarr_seeds: Arc<DashMap<Vec<u8>, Vec<[u8; 32]>>>, // F2：pkarr 解析到的各群 seed 节点（join bootstrap 兜底/无锚发现）

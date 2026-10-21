@@ -372,6 +372,7 @@ async fn system(State(st): State<AppState>) -> Json<Value> {
     let addr = st.node.addr();
     let (roam_changes, roam_last_ms) = st.node.roam_snapshot();
     let (grp_fanouts, grp_acks, grp_retx, grp_giveups, grp_ack_batches, grp_dead, grp_ratelimited) = st.node.group_metrics_snapshot();
+    let (presence_pulls, presence_pull_cache_hits, presence_pull_errors) = st.node.presence_stat_snapshot();
     let tables: serde_json::Map<String, Value> = st
         .node
         .table_sizes()
@@ -403,6 +404,13 @@ async fn system(State(st): State<AppState>) -> Json<Value> {
         "dead_letters": grp_dead,
         "msgs_rate_limited": grp_ratelimited,
         "dead_letter_pending": st.node.dead_letter_count(),
+        // P2-11 presence 去火管化观测：实际是否已退 overlay（强制 or 自动）、强制开关、已广告支持的 peer 数、拉取/命中/失败累计。
+        "presence_scoped": st.node.presence_retired(),
+        "presence_scoped_forced": st.node.presence_scoped_on(),
+        "presence_scoped_peers": st.node.presence_scoped_peer_count(),
+        "presence_pulls": presence_pulls,
+        "presence_pull_cache_hits": presence_pull_cache_hits,
+        "presence_pull_errors": presence_pull_errors,
     }))
 }
 

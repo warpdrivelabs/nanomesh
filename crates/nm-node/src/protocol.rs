@@ -34,8 +34,7 @@ use crate::naming::{
     passwd_name_account, register_name_account, reset_name_account, valid_local_part,
 };
 use crate::naming_runtime::apply_domain_decision;
-use crate::presence::{presence_status, PresenceRec};
-use crate::records::hex_decode_n;
+use crate::presence::{presence_query_handle, presence_resolve, PresenceRec};
 use crate::retire::group_topic_retireable;
 use crate::roster::{roster_add, roster_list, roster_remove, roster_update};
 use crate::read_sync::{read_list, read_mark};
@@ -484,15 +483,17 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Op
                 .and_then(|p| DirectoryQuery::decode(p.value.as_slice()).ok())
                 .unwrap_or_default();
             let mut list = dir.query(&q).await.unwrap_or_default();
-            // P2：给每个实体盖上实时 presence（本地会话/gossip 缓存 + TTL）到 attributes["presence"]。
             // N1：反向盖上命名 name=local@domain（命名缓存里 client_pubkey 命中者）。
             let name_by_pk: std::collections::HashMap<Vec<u8>, String> = ctx
                 .names
                 .iter()
                 .map(|r| (r.client_pubkey.clone(), format!("{}@{}", r.local_part, r.domain)))
                 .collect();
+            // P2-11：presence 盖戳走按 home 拉取解析器（overlay 退火下非本地实体也得真态，不再误显 offline）。
+            // overlay 在时缓存热 → 全命中、零拨号，行为同旧；退火后按需并发拉取。
+            let pres = presence_resolve(ctx, list.iter().map(|e| e.entity_id.clone()).collect()).await;
             for e in list.iter_mut() {
-                let p = presence_status(&ctx.sessions, &ctx.principals, &ctx.devices, &ctx.presence, &ctx.status_intent, &e.entity_id);
+                let p = pres.get(&e.entity_id).cloned().unwrap_or_else(|| "offline".to_string());
                 e.attributes.insert("presence".to_string(), p);
                 if let Some(n) = name_by_pk.get(&e.entity_id) {
                     e.attributes.insert("name".to_string(), n.clone());
@@ -532,28 +533,11 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Op
             }
             (true, None, String::new())
         }
-        // A：按 id 批量查在线状态——供 app 给「跨节点好友」（不在本地 directory）盖 presence。
-        // params.value = JSON {"ids":["<hex>",...]}；结果 = JSON {"<hex>":"online|away|...|offline"}。
-        // 复用 presence_of 同源（本地会话priority + gossip 缓存 + TTL），节点间 presence 不额外 RPC。
-        "presence.query" => {
-            let ids: Vec<String> = cmd
-                .params
-                .as_ref()
-                .and_then(|p| serde_json::from_slice::<serde_json::Value>(&p.value).ok())
-                .and_then(|v| v.get("ids").and_then(|x| x.as_array()).map(|a| {
-                    a.iter().filter_map(|e| e.as_str().map(|s| s.to_string())).collect()
-                }))
-                .unwrap_or_default();
-            let mut out = serde_json::Map::new();
-            for id_hex in ids.into_iter().take(1024) {
-                if let Some(id) = hex_decode_n::<32>(&id_hex) {
-                    let st = presence_status(&ctx.sessions, &ctx.principals, &ctx.devices, &ctx.presence, &ctx.status_intent, &id);
-                    out.insert(id_hex, serde_json::Value::String(st));
-                }
-            }
-            let body = serde_json::Value::Object(out).to_string();
-            (true, Some(Any { type_url: "text/plain".into(), value: body.into_bytes() }), String::new())
-        }
+        // A：按 id 批量查在线状态——供 app 给「跨节点好友」盖 presence。
+        // params.value = JSON {"ids":["<hex>",...], "local_only"?:bool}；结果 = JSON {"<hex>":"online|away|...|offline"}。
+        // P2-11：缺省（客户端查询）按 home 分流——本地直答、远端按 home 拉取（缓存新鲜免拨）；
+        // local_only=true（节点→home 内部调用）只做本地权威读防递归。详见 presence::presence_query_handle。
+        "presence.query" => presence_query_handle(ctx, &cmd).await,
         "roster.list" => roster_list(ctx, caller),
         "roster.add" => roster_add(ctx, caller, &cmd),
         "roster.remove" => roster_remove(ctx, caller, &cmd),

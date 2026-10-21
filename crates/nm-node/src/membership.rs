@@ -52,6 +52,10 @@ struct MembershipAnnounce {
     info: PeerInfo,
     #[serde(default)]
     addr: String,
+    /// P2-11 B：本节点是否支持 scoped presence（按 home 拉取）。编译期能力位，不入签名（非安全关键：
+    /// 谎报最坏后果=对端多留一会儿火管或照常拉取，均安全）。
+    #[serde(default)]
+    supports_presence_scoped: bool,
     sig: String,
 }
 
@@ -192,6 +196,7 @@ impl Node {
             ts,
             info: card.clone(),
             addr: nm_transport::addr_to_string(&self.addr()),
+            supports_presence_scoped: true, // P2-11 B：编译期能力——本节点支持按 home 拉取
             sig: hex_encode(&sig),
         };
         serde_json::to_vec(&ann).unwrap_or_default()
@@ -230,6 +235,13 @@ impl Node {
         let addr_hint = nm_transport::addr_from_string(&ann.addr)
             .ok()
             .filter(|a| *a.id.as_bytes() == node_id);
+        // P2-11 B：记录 peer 的 scoped 能力（镜像 per_topic_nodes 的 insert/else-remove 自愈）。
+        // 全员支持 → presence_retired() 自动退 overlay；出现不支持的老 peer → 回退维持火管。
+        if ann.supports_presence_scoped {
+            self.presence_scoped_nodes.insert(node_id.to_vec());
+        } else {
+            self.presence_scoped_nodes.remove(&node_id.to_vec());
+        }
         self.learn_peer(node_id, ann.info, addr_hint, federation);
     }
 

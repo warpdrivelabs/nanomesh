@@ -83,6 +83,36 @@ pub(crate) async fn s2s_blob_get(
     BlobData::decode(body.value.as_slice()).map_err(|e| NodeError::Other(e.to_string()))
 }
 
+/// P2-11：向账号 home 节点拉取其本地账号的实时 presence。`local_only=true` 让 home 只做本地权威读、不再向外拉（防递归）。
+pub(crate) async fn s2s_presence_query(
+    ep: &NodeEndpoint,
+    addr: nm_transport::Addr,
+    ids_hex: &[String],
+) -> Result<std::collections::HashMap<String, String>, NodeError> {
+    let params = serde_json::json!({ "ids": ids_hex, "local_only": true }).to_string();
+    let cmd = Command {
+        method: "presence.query".to_string(),
+        params: Some(Any { type_url: "text/plain".to_string(), value: params.into_bytes() }),
+        correlation_id: 1,
+        timeout_ms: 5_000,
+        grant: None,
+    };
+    let gram = s2s_gram(
+        ep.id_bytes(),
+        GramKind::Command,
+        Some(Any { type_url: "nmspace.v1.Command".to_string(), value: cmd.encode_to_vec() }),
+    );
+    let resp = s2s_request(ep, addr, &gram).await?;
+    let payload = resp.payload.ok_or_else(|| NodeError::Other("presence.query no payload".into()))?;
+    let cr = CommandResult::decode(payload.value.as_slice()).map_err(|e| NodeError::Other(e.to_string()))?;
+    if !cr.ok {
+        return Err(NodeError::Other(if cr.error.is_empty() { "presence.query failed".into() } else { cr.error }));
+    }
+    let body = cr.result.ok_or_else(|| NodeError::Other("presence.query no result".into()))?;
+    serde_json::from_slice::<std::collections::HashMap<String, String>>(&body.value)
+        .map_err(|e| NodeError::Other(e.to_string()))
+}
+
 async fn s2s_request(ep: &NodeEndpoint, addr: nm_transport::Addr, gram: &Gram) -> Result<Gram, NodeError> {
     let fut = async {
         let conn = ep.connect(addr).await.map_err(|e| NodeError::Other(e.to_string()))?;
