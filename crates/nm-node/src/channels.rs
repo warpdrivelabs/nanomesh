@@ -52,6 +52,11 @@ pub(crate) fn node_is_channel_home(store: &Option<Arc<nm_store::RedbStore>>, cha
 /// 崩溃安全：持久（含签名）在本函数内 commit，调用方 commit 后才广播。
 fn sequence_pubreq(ctx: &Ctx, req: &ChannelPubReq) -> Result<ChannelMsg, String> {
     let Some(store) = &ctx.store else { return Err("no store".into()) };
+    // 体积闸（home 定序咽喉）：挡住远端经火管/频道主题直灌 home 的超大 PubReq（绕过本机 channel_publish
+    // 入口闸的路径）。超限拒序，不落日志、不回广播。见 crate::MAX_CHANNEL_BODY。
+    if req.body.len() > crate::MAX_CHANNEL_BODY {
+        return Err(format!("消息过大：{} 字节 > 上限 {}", req.body.len(), crate::MAX_CHANNEL_BODY));
+    }
     let Some(secret) = store.channel_secret(&req.channel_id).ok().flatten() else {
         return Err("not home".into());
     };
@@ -502,10 +507,23 @@ fn channel_home_sk(ctx: &Ctx, channel_id: &[u8]) -> Option<nm_transport::SecretK
 fn build_backfill_log(ctx: &Ctx, req: &ChannelBackfillReq) -> Option<ChannelLog> {
     let s = ctx.store.as_ref()?;
     let limit = if req.limit == 0 { CHANNEL_BACKFILL_LIMIT } else { (req.limit as usize).min(CHANNEL_BACKFILL_LIMIT) };
-    let msgs = s.channel_log_since(&req.channel_id, req.since_seq, limit).unwrap_or_default();
+    let mut msgs = s.channel_log_since(&req.channel_id, req.since_seq, limit).unwrap_or_default();
+    let fetched = msgs.len();
+    // 字节封顶：经 gossip 广播的 Log 必须 < MAX_GOSSIP_MSG，否则这条回填本身又打爆 gossip（毒消息经 backfill
+    // 复发的路径）。按累计 body 字节裁剪，至少保留 1 条（避免单条略大即卡死回填；单条过大由入口闸拦）。
+    {
+        let mut acc = 0usize;
+        let mut keep = 0usize;
+        for m in &msgs {
+            acc += m.body.len() + 128; // 每条 prost 包头/签名粗略余量
+            if keep > 0 && acc > crate::MAX_CHANNEL_BODY { break; }
+            keep += 1;
+        }
+        if keep < msgs.len() { msgs.truncate(keep); }
+    }
     let (earliest, _latest) = s.channel_log_bounds(&req.channel_id).ok().flatten().unwrap_or((0, 0));
     let next_seq = msgs.last().map(|m| m.seq).unwrap_or(req.since_seq);
-    let more = msgs.len() == limit;
+    let more = fetched == limit || msgs.len() < fetched; // 命中条数上限 或 被字节封顶截断 → 还有更多
     Some(ChannelLog { msgs, earliest_seq: earliest, next_seq, more })
 }
 
@@ -538,6 +556,16 @@ async fn retransmit_outbox(ctx: &Ctx, channel_id: &[u8], topic: &mut nm_gossip::
         // 达 24h 期限 → 放弃（home 长期不可达）。
         if now.saturating_sub(row.first_ms) > crate::OUTBOX_MAX_HORIZON_MS {
             tracing::warn!("channel publish giving up after horizon (home unreachable)");
+            let _ = s.channel_outbox_del(&row.channel_id, &row.sender, &row.nonce);
+            continue;
+        }
+        // 超大旧消息（升级前残留、或对端旧节点灌入）→ 立即放弃，不再每 2s 重广播打爆 gossip。
+        // 这是「已入库毒消息」的自清路径：升级后一轮重传扫描即清除，无需 chanpurge。见 crate::MAX_CHANNEL_BODY。
+        if ChannelPubReq::decode(row.pubreq_bytes.as_slice())
+            .map(|r| r.body.len() > crate::MAX_CHANNEL_BODY)
+            .unwrap_or(false)
+        {
+            tracing::warn!(bytes = row.pubreq_bytes.len(), "dropping oversized channel outbox entry (self-heal)");
             let _ = s.channel_outbox_del(&row.channel_id, &row.sender, &row.nonce);
             continue;
         }
@@ -828,6 +856,14 @@ pub(crate) fn channel_publish(ctx: &Ctx, caller: &[u8], cmd: &Command) -> (bool,
     match cmd.params.as_ref().and_then(|p| ChannelPub::decode(p.value.as_slice()).ok()) {
         Some(pp) => match ctx.channels.get(&pp.channel_id) {
             Some(e) => {
+                // 体积闸（根治「大消息打爆 gossip」）：超限直接拒、给客户端明确错误，绝不进 outbox/gossip。
+                // 大内容应走内容寻址 blob（blob.put），而非频道正文。见 crate::MAX_CHANNEL_BODY。
+                if pp.body.len() > crate::MAX_CHANNEL_BODY {
+                    return (false, None, format!(
+                        "消息过大：{} 字节 > 频道上限 {} 字节（大内容请用附件/blob）",
+                        pp.body.len(), crate::MAX_CHANNEL_BODY
+                    ));
+                }
                 // 幂等 nonce（client 重传同一条用同 nonce；此处 node-origin 发布随机生成）。
                 let nonce = nm_transport::SecretKey::generate().to_bytes()[..16].to_vec();
                 let req = ChannelPubReq {

@@ -85,6 +85,50 @@ async fn channel_ops_do_not_drop_unicast_sessions() {
     node.trigger_shutdown();
 }
 
+/// 根因回归(单节点确定性):频道发超限大消息被入口闸拒、不进 outbox、不冲单播会话;正常小消息照常通过。
+/// 对应「发 22K 大文档就崩」——iroh-gossip 单条上限 4096B,超限被拒却经 outbox 反复重传打爆共享 gossip actor。
+#[tokio::test]
+async fn channel_oversized_publish_rejected_not_queued() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = Arc::new(
+        nm_node::Node::bind_local_persistent([68u8; 32], dir.path().join("n.redb")).await.unwrap(),
+    );
+    let addr = node.addr();
+    {
+        let n = node.clone();
+        tokio::spawn(async move { let _ = n.serve().await; });
+    }
+    let (_c, sess) = connect([69u8; 32], &addr).await;
+    sess.register_as::<kinds::Person>(&PersonProfile::default(), "A", HashMap::new()).await.unwrap();
+    let (cid, sk) = new_channel();
+    sess.channel_create(cid, "大消息频道", "", "", &sk).await.expect("create");
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let before = node.online_count();
+
+    // 超限消息(220KB > 200KiB 上限):入口闸应拒(channel_publish 返回 Err)。
+    let big = "x".repeat(220 * 1024);
+    let r = sess.channel_publish(cid, &big).await;
+    assert!(r.is_err(), "超限消息(220KB)应被拒,实际 {r:?}");
+
+    // 不得进 outbox(否则会反复重传打爆 gossip),且单播会话不受影响。
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(node.channel_outbox_pending(), 0, "超限消息不得进 outbox");
+    assert_eq!(node.online_count(), before, "超限消息被拒不得影响单播会话");
+
+    // 22K(线上"崩"的体积,< 200KiB 上限)修复后应正常成功 —— 这正是把 gossip 上限从 4KB 抬到 256KiB 的目的。
+    let doc = "D".repeat(22 * 1024);
+    sess.channel_publish(cid, &doc).await.expect("22K 文档修复后应可发送");
+    // 正常小消息照常成功 + 落库可回填。
+    sess.channel_publish(cid, "正常小消息").await.expect("正常消息应成功");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let msgs = sess.channel_backfill(cid, 0).await.expect("backfill");
+    assert!(msgs.iter().any(|m| m.body == "正常小消息"), "正常消息应落库可回填");
+    assert!(msgs.iter().any(|m| m.body.len() == 22 * 1024), "22K 文档应落库可回填");
+
+    node.trigger_shutdown();
+}
+
 /// 跨节点(#[ignore],与其它跨节点 e2e 同类——串行跑 scripts/test-crossnode.sh):
 /// node1 上建/订阅频道(触发频道 gossip join)后,node1↔node2 的跨节点 DM 仍能送达
 /// (频道 join 不破坏单播/联邦投递)。

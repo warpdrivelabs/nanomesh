@@ -175,7 +175,11 @@ impl Node {
             }
         }
         // 频道 pub/sub：与单播共用同一 iroh endpoint（accept 侧由 serve() 的 Router 分流）。
-        let gossip = Gossip::builder().spawn(ep.iroh().clone());
+        // max_message_size 覆盖 iroh-gossip 默认 4096B（否则频道发 >4KB 正文被拒→outbox 反复重传打爆
+        // 共享 gossip actor→membership 饿死→peers 塌）。**网络级：全节点须一致**，见 crate::MAX_GOSSIP_MSG。
+        let gossip = Gossip::builder()
+            .max_message_size(crate::MAX_GOSSIP_MSG)
+            .spawn(ep.iroh().clone());
         let (group_pub, group_pub_rx) = tokio::sync::mpsc::unbounded_channel();
         // F1：每群主题联邦句柄（复用同一 gossip endpoint）；默认 per_topic=关 → self.fed 空置、零行为变化。
         let (fed, fed_rx) = nm_federation::Federation::new(gossip.clone(), ep.id_bytes());

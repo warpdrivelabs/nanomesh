@@ -128,6 +128,14 @@ type ConnGate = DashMap<[u8; 32], (u64, u32)>;
 // (根治「建/订阅频道冲垮单播 mesh」)。小集群(peers<=K)等价于全部、行为不变；大集群据此封顶、退 O(N)。
 pub(crate) const GOSSIP_BOOTSTRAP_K: usize = 16;
 
+// 频道大消息打爆 gossip 的根治（iroh-gossip 单条消息默认上限仅 4096B；超限被拒但频道 outbox 每 2s 可靠
+// 重传、24h 才放弃 → 同一条超大消息反复打爆共享 gossip actor → membership/火管饿死 → peers TTL 过期 → 塌）。
+/// gossip 单条消息上限（覆盖 iroh-gossip 默认 4096B）。**网络级参数：全节点必须一致**，否则互相拒收。
+pub(crate) const MAX_GOSSIP_MSG: usize = 256 * 1024;
+/// 频道单条正文（body）字节上限：留足 prost 包头/签名/火管 GroupGossip 封装余量，确保编码后 < MAX_GOSSIP_MSG。
+/// 入口（channel_publish / home sequence_pubreq）即拒超限，绝不进 outbox/gossip。大内容应走内容寻址 blob。
+pub(crate) const MAX_CHANNEL_BODY: usize = 200 * 1024;
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
