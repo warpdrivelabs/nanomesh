@@ -124,9 +124,13 @@ impl NodeEndpoint {
             .alpns(alpns);
         if port != 0 {
             // 固定 UDP 端口：让本节点地址稳定，便于 LAN 对等配置。
-            builder = builder
-                .bind_addr((std::net::Ipv4Addr::UNSPECIFIED, port))
-                .map_err(err)?;
+            // NM_BIND_ADDR（nmd 据 [bind_addr] 配置设置）限定监听到某个本机 IP：多网卡/docker 节点据此
+            // 只广播可达地址，避免广播一堆不可达地址（如 docker 网桥/公网段 bip）致对端选错路、连不稳。
+            let ip = std::env::var("NM_BIND_ADDR")
+                .ok()
+                .and_then(|s| s.trim().parse::<std::net::Ipv4Addr>().ok())
+                .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
+            builder = builder.bind_addr((ip, port)).map_err(err)?;
         }
         let endpoint = builder.bind().await.map_err(err)?;
         // 注册一个内存地址簿：供「按公钥拨号」（如 gossip）在 LAN/无发现时解析对端地址。

@@ -68,6 +68,9 @@ struct Config {
     db: String,
     #[serde(default)]
     bind_port: u16,
+    /// 可选：把监听限定到某个本机 IP（多网卡/docker 节点避免广播一堆不可达地址致连接不稳）。空=0.0.0.0 全部接口。
+    #[serde(default)]
+    bind_addr: Option<String>,
     #[serde(default)]
     peers: Vec<PeerCfg>,
     /// 自建中继（仅 selfhost）。
@@ -429,6 +432,12 @@ async fn async_main() -> anyhow::Result<()> {
 
     let raw = std::fs::read_to_string(&args.config).unwrap_or_default();
     let cfg: Config = toml::from_str(&raw)?;
+
+    // P2-13 修复：把监听限定到配置的 bind_addr（多网卡/docker 节点去地址污染，只广播可达地址）。
+    // 经 NM_BIND_ADDR 内传给 nm-transport::bind_infra；在启动早期、建节点前设置，彼时无并发 env 访问。
+    if let Some(a) = cfg.bind_addr.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        unsafe { std::env::set_var("NM_BIND_ADDR", a) };
+    }
 
     // P0-2 离线恢复：--restore <备份> → 覆盖 cfg.db 后退出（覆盖前把现有 db 另存一份，可回滚）。须在 nmd 停止时执行。
     if let Some(src) = args.restore.as_deref() {
