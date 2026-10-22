@@ -113,7 +113,10 @@
       <div class="conv-head"><b>群资料</b></div>
       <div class="detail-scroll"><div class="detail">
         <div class="detail-hero">
-          <div class="ed-avatar ed-avatar-slot" style="background:${avatarColor(gid)}">${groupAv(g, 104)}</div>
+          <div class="detail-av-wrap">
+            <div class="ed-avatar ed-avatar-slot${isAdmin ? " ed-avatar-editable" : ""}" style="background:${avatarColor(gid)}" ${isAdmin ? 'id="grp-av-set" title="设置群头像" role="button" tabindex="0"' : ""}>${groupAv(g, 104)}</div>
+            ${isAdmin ? `<button type="button" class="ns-btn detail-av-btn" id="grp-av-btn">设置头像</button>` : ""}
+          </div>
           <div>
             <div class="detail-name">${escapeHtml(g.name || "(未命名群)")}</div>
             <div class="detail-sub">${(g.members || []).length} 人${g.topic ? " · " + escapeHtml(g.topic) : ""}</div>
@@ -139,12 +142,14 @@
     if (window.Profile && Profile.isRef(g.avatar)) {
       Profile.resolveAvatar(g.avatar, g.homeNode).then((uri) => {
         if (!uri) return; g.avatar = uri;
-        const slot = conv.querySelector(".ed-avatar-slot"); if (slot) slot.innerHTML = groupAv(g, 72);
+        const slot = conv.querySelector(".ed-avatar-slot"); if (slot) slot.innerHTML = groupAv(g, 104);
       });
     }
     const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener("click", fn); };
     on("grp-open-chat", () => { if (window.openGroupChat) window.openGroupChat(gid); });
     on("grp-edit", () => editGroupMeta(gid));
+    on("grp-av-set", () => setGroupAvatar(gid));
+    on("grp-av-btn", () => setGroupAvatar(gid));
     on("grp-add", () => openAddMember(gid));
     on("grp-invite", () => { if (window.Invite) Invite.generateAndCopy({ groupId: gid }); });
     on("grp-dissolve", async () => { if (confirm("确定解散该群？此操作不可恢复。")) { await act("group_dissolve", { groupId: gid }, "群已解散"); if (window.Tabs) Tabs.close("g:" + gid); else backToList(); renderGroupsList(); } });
@@ -186,15 +191,95 @@
       namePh: "群名称", bioLabel: "群简介", bioPh: "群公告 / 一句话简介",
       onSave: async ({ name, bio, avatar }) => {
         await NM.inv("group_set_meta", { groupId: gid, name: name || (g.name || ""), topic: bio, avatar });
-        await refresh();
-        if (window.Tabs) { Tabs.retitle("g:" + gid, name || g.name || "群", "groups"); Tabs.retitle("c:" + gid, name || g.name || "群", "groups"); }
-        renderGroupsList();
-        const conv = document.getElementById("conv");
-        if (conv && conv.querySelector(".ed-avatar-slot")) renderGroupDetail(gid); // 详情页在看 → 重绘
-        const mb = document.getElementById("grp-members"); if (mb) renderMembersPanel(gid, mb); // 群聊成员栏在看 → 重绘
+        await afterGroupMetaSaved(gid, name || g.name || "群");
         if (window.toast) toast("群信息已更新");
       },
     });
+  }
+
+  // 仅设置群头像（群资料页点头像 /「设置头像」）：选图 → 裁剪 → blob_put → group_set_meta。
+  async function setGroupAvatar(gid) {
+    const g = byId(gid);
+    if (!g) return;
+    if (!(myRole(g) === "owner" || myRole(g) === "admin")) {
+      if (window.toast) toast("仅群主或管理员可设置头像");
+      return;
+    }
+    if (!window.Profile || !Profile.openAvatarCrop) {
+      if (window.toast) toast("头像组件不可用");
+      return;
+    }
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/*";
+    input.style.display = "none";
+    document.body.appendChild(input);
+    input.addEventListener("change", async () => {
+      const f = input.files && input.files[0];
+      input.remove();
+      if (!f) return;
+      try {
+        let data = await Profile.openAvatarCrop(f, 256, 0.85);
+        if (!data) return;
+        // 体积超限则降质重编码（与个人资料一致）
+        if (data.length > 200 * 1024) {
+          data = await new Promise((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => {
+              const c = document.createElement("canvas"); c.width = 192; c.height = 192;
+              c.getContext("2d").drawImage(img, 0, 0, 192, 192);
+              resolve(c.toDataURL("image/jpeg", 0.72));
+            };
+            img.onerror = () => reject(new Error("重编码失败"));
+            img.src = data;
+          });
+        }
+        if (data.length > 200 * 1024) { if (window.toast) toast("图片太大，请换更简单的图"); return; }
+        let avatar = data;
+        const m = /^data:([^;]+);base64,(.+)$/.exec(data);
+        if (m && window.NM && NM.hasTauri && NM.hasTauri()) {
+          try {
+            const ref = await NM.inv("blob_put", { dataB64: m[2], mime: m[1] });
+            if (ref) avatar = ref;
+          } catch (e) {
+            if (window.toast) toast("头像上传失败：" + (e && e.message ? e.message : e));
+            return;
+          }
+        }
+        await NM.inv("group_set_meta", {
+          groupId: gid,
+          name: g.name || "",
+          topic: g.topic || "",
+          avatar,
+        });
+        // 本地立刻用裁剪结果刷新预览（引用需等 resolve）
+        if (window.Profile && Profile.isRef(avatar) && Profile.isImg(data)) {
+          g.avatar = data;
+        } else {
+          g.avatar = avatar;
+        }
+        await afterGroupMetaSaved(gid, g.name || "群");
+        if (window.toast) toast("群头像已更新");
+      } catch (e) {
+        if (e && e.message === "cancelled") return;
+        if (window.toast) toast("设置头像失败：" + (e && e.message ? e.message : e));
+      }
+    });
+    input.click();
+  }
+
+  async function afterGroupMetaSaved(gid, title) {
+    await refresh();
+    if (window.Tabs) {
+      Tabs.retitle("g:" + gid, title, "groups");
+      Tabs.retitle("c:" + gid, title, "groups");
+    }
+    renderGroupsList();
+    const conv = document.getElementById("conv");
+    if (conv && conv.querySelector(".ed-avatar-slot")) renderGroupDetail(gid);
+    const mb = document.getElementById("grp-members");
+    if (mb) renderMembersPanel(gid, mb);
+    if (typeof renderConversation === "function" && window.ACTIVE === gid) renderConversation();
   }
 
   // 添加成员：从实体目录挑人（person）或粘贴公钥。

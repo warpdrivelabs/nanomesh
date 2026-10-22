@@ -64,23 +64,169 @@
     return `<div class="av" style="width:${s}px;height:${s}px;flex:0 0 ${s}px;background:${bg || "var(--accent)"};font-size:${Math.round(s * 0.42)}px">${ch}</div>`;
   }
 
-  // 选图 → 居中裁剪缩放到 size → JPEG data:URI。
-  function fileToAvatar(file, size, quality) {
-    size = size || 256; quality = quality || 0.85;
+  // 选图 → 交互裁剪（拖动位置 + 缩放）→ 导出正方形 JPEG data:URI。
+  // 用户 / 群 / 频道头像共用。file 为 File；返回 Promise<data:URI>，取消则 reject("cancelled")。
+  // 通用裁剪：opts = { outW, outH, quality, title, minZoom, maxZoom }
+  // z=1 为铺满视口（cover）；z<1 可缩小（留边填背景色）。
+  function openImageCrop(file, opts) {
+    opts = opts || {};
+    const outW = opts.outW || 256;
+    const outH = opts.outH || outW;
+    const quality = opts.quality || 0.85;
+    const title = opts.title || "调整图片";
+    const minZoom = opts.minZoom != null ? opts.minZoom : 0.5;
+    const maxZoom = opts.maxZoom != null ? opts.maxZoom : 3;
+    const aspect = outW / outH;
+    const isWide = aspect > 1.15;
     return new Promise((resolve, reject) => {
-      const img = new Image();
       const url = URL.createObjectURL(file);
+      const img = new Image();
       img.onload = () => {
-        URL.revokeObjectURL(url);
-        const c = document.createElement("canvas"); c.width = size; c.height = size;
-        const ctx = c.getContext("2d");
-        const s = Math.min(img.width, img.height);
-        ctx.drawImage(img, (img.width - s) / 2, (img.height - s) / 2, s, s, 0, 0, size, size);
-        resolve(c.toDataURL("image/jpeg", quality));
+        const m = document.createElement("div");
+        m.className = "sec-overlay on av-crop-overlay";
+        m.innerHTML = `
+          <div class="av-crop-box${isWide ? " av-crop-box--wide" : ""}" role="dialog" aria-label="${title}">
+            <div class="av-crop-head"><span>${title}</span><button type="button" class="sec-x av-crop-x" title="关闭">${nmIcon("close")}</button></div>
+            <div class="av-crop-stage">
+              <div class="av-crop-view${isWide ? " av-crop-view--wide" : ""}" tabindex="0" style="aspect-ratio:${outW} / ${outH}">
+                <img class="av-crop-img" alt="" draggable="false">
+              </div>
+            </div>
+            <div class="av-crop-zoom">
+              <span class="av-crop-zoom-lab">缩小</span>
+              <input type="range" class="av-crop-range" min="${Math.round(minZoom * 100)}" max="${Math.round(maxZoom * 100)}" value="100" step="1">
+              <span class="av-crop-zoom-lab">放大</span>
+            </div>
+            <div class="av-crop-hint">拖动移动位置，滑块或滚轮调整大小（可缩小）</div>
+            <div class="av-crop-actions">
+              <button type="button" class="ns-btn av-crop-cancel">取消</button>
+              <button type="button" class="ns-btn ns-primary av-crop-ok">确定</button>
+            </div>
+          </div>`;
+        document.body.appendChild(m);
+        const view = m.querySelector(".av-crop-view");
+        const imgEl = m.querySelector(".av-crop-img");
+        const range = m.querySelector(".av-crop-range");
+        imgEl.src = url;
+        const br = view.getBoundingClientRect();
+        const viewW = Math.max(160, Math.round(br.width) || (isWide ? 360 : 280));
+        const viewH = Math.max(48, Math.round(br.height) || Math.round(viewW / aspect));
+
+        // cover：铺满视口；z 相对 cover，可 <1 缩小。
+        const cover = Math.max(viewW / img.naturalWidth, viewH / img.naturalHeight);
+        let z = 1, ox = 0, oy = 0;
+
+        function drawn() {
+          const s = cover * z;
+          return { s, w: img.naturalWidth * s, h: img.naturalHeight * s };
+        }
+        function clamp() {
+          const { w, h } = drawn();
+          // 图大于视口：限制不露边；图小于视口：限制不拖出框外。
+          const maxX = Math.abs(w - viewW) / 2;
+          const maxY = Math.abs(h - viewH) / 2;
+          ox = Math.max(-maxX, Math.min(maxX, ox));
+          oy = Math.max(-maxY, Math.min(maxY, oy));
+        }
+        function paint() {
+          clamp();
+          const { w, h } = drawn();
+          imgEl.style.width = w + "px";
+          imgEl.style.height = h + "px";
+          imgEl.style.left = ((viewW - w) / 2 + ox) + "px";
+          imgEl.style.top = ((viewH - h) / 2 + oy) + "px";
+        }
+        function setZoom(nz) {
+          z = Math.max(minZoom, Math.min(maxZoom, nz));
+          range.value = String(Math.round(z * 100));
+          paint();
+        }
+
+        let drag = null;
+        const onMove = (e) => {
+          if (!drag) return;
+          ox = drag.ox0 + (e.clientX - drag.x0);
+          oy = drag.oy0 + (e.clientY - drag.y0);
+          paint();
+        };
+        const onUp = () => {
+          if (!drag) return;
+          drag = null;
+          view.classList.remove("dragging");
+          window.removeEventListener("pointermove", onMove);
+          window.removeEventListener("pointerup", onUp);
+        };
+        view.addEventListener("pointerdown", (e) => {
+          if (e.button !== 0) return;
+          e.preventDefault();
+          drag = { x0: e.clientX, y0: e.clientY, ox0: ox, oy0: oy };
+          view.classList.add("dragging");
+          view.setPointerCapture?.(e.pointerId);
+          window.addEventListener("pointermove", onMove);
+          window.addEventListener("pointerup", onUp);
+        });
+        view.addEventListener("wheel", (e) => {
+          e.preventDefault();
+          setZoom(z * (e.deltaY < 0 ? 1.08 : 1 / 1.08));
+        }, { passive: false });
+        range.addEventListener("input", () => setZoom(Number(range.value) / 100));
+
+        function finish(ok) {
+          window.removeEventListener("pointermove", onMove);
+          window.removeEventListener("pointerup", onUp);
+          URL.revokeObjectURL(url);
+          m.remove();
+          if (!ok) { reject(new Error("cancelled")); return; }
+          const d = drawn();
+          const sx = ((viewW - d.w) / 2 + ox) * -1 / d.s;
+          const sy = ((viewH - d.h) / 2 + oy) * -1 / d.s;
+          const sw = viewW / d.s;
+          const sh = viewH / d.s;
+          const c = document.createElement("canvas");
+          c.width = outW; c.height = outH;
+          const ctx = c.getContext("2d");
+          // 缩小后可能留边：先铺背景再画可见图区。
+          ctx.fillStyle = "#1a1a1a";
+          ctx.fillRect(0, 0, outW, outH);
+          const srcL = Math.max(0, sx);
+          const srcT = Math.max(0, sy);
+          const srcR = Math.min(img.naturalWidth, sx + sw);
+          const srcB = Math.min(img.naturalHeight, sy + sh);
+          if (srcR > srcL && srcB > srcT) {
+            const dw = outW / sw, dh = outH / sh;
+            ctx.drawImage(
+              img,
+              srcL, srcT, srcR - srcL, srcB - srcT,
+              (srcL - sx) * dw, (srcT - sy) * dh, (srcR - srcL) * dw, (srcB - srcT) * dh
+            );
+          }
+          resolve(c.toDataURL("image/jpeg", quality));
+        }
+        m.querySelector(".av-crop-ok").onclick = () => finish(true);
+        m.querySelector(".av-crop-cancel").onclick = () => finish(false);
+        m.querySelector(".av-crop-x").onclick = () => finish(false);
+        m.addEventListener("click", (e) => { if (e.target === m) finish(false); });
+        paint();
       };
       img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("图片加载失败")); };
       img.src = url;
     });
+  }
+
+  function openAvatarCrop(file, size, quality) {
+    return openImageCrop(file, {
+      outW: size || 256, outH: size || 256, quality: quality || 0.85, title: "调整头像",
+    });
+  }
+
+  // 选图 → 打开裁剪器 → JPEG data:URI（取消时返回 null，不抛错，方便调用方静默）。
+  async function fileToAvatar(file, size, quality) {
+    try {
+      return await openAvatarCrop(file, size, quality);
+    } catch (e) {
+      if (e && e.message === "cancelled") return null;
+      throw e;
+    }
   }
 
   // data:URI → 上传为内容寻址 blob，返回 "b3:<hash>"（失败返回 null）。
@@ -144,23 +290,30 @@
     } catch (e) { if (window.toast) toast("资料发布失败：" + (e && e.message ? e.message : e)); return false; }
   }
 
-  // 横幅封面：宽幅裁剪 JPEG（频道 Hero 用）。
-  function fileToCover(file, w, h, quality) {
-    w = w || 960; h = h || 320; quality = quality || 0.82;
+  // 横幅封面：交互裁剪 JPEG（频道 Hero 用，比例约 3:1）。
+  async function fileToCover(file, w, h, quality) {
+    try {
+      return await openImageCrop(file, {
+        outW: w || 960, outH: h || 320, quality: quality || 0.82, title: "调整封面",
+      });
+    } catch (e) {
+      if (e && e.message === "cancelled") return null;
+      throw e;
+    }
+  }
+
+  // 已裁好的 data:URI 再缩一档（封面过大时用，避免重开裁剪丢位置）。
+  function reencodeRect(dataUri, w, h, quality) {
     return new Promise((resolve, reject) => {
       const img = new Image();
-      const url = URL.createObjectURL(file);
       img.onload = () => {
-        URL.revokeObjectURL(url);
-        const c = document.createElement("canvas"); c.width = w; c.height = h;
-        const ctx = c.getContext("2d");
-        const scale = Math.max(w / img.width, h / img.height);
-        const sw = w / scale, sh = h / scale;
-        ctx.drawImage(img, (img.width - sw) / 2, (img.height - sh) / 2, sw, sh, 0, 0, w, h);
-        resolve(c.toDataURL("image/jpeg", quality));
+        const c = document.createElement("canvas");
+        c.width = w; c.height = h;
+        c.getContext("2d").drawImage(img, 0, 0, w, h);
+        resolve(c.toDataURL("image/jpeg", quality || 0.72));
       };
-      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("图片加载失败")); };
-      img.src = url;
+      img.onerror = () => reject(new Error("图片加载失败"));
+      img.src = dataUri;
     });
   }
 
@@ -225,7 +378,11 @@
       if (!f) return;
       try {
         let data = await fileToAvatar(f, 256, 0.85);
-        if (data.length > AV_MAX) data = await fileToAvatar(f, 192, 0.72);
+        if (!data) return; // 用户取消裁剪
+        if (data.length > AV_MAX) {
+          // 再开一次裁剪不合适；对已裁结果降质重编码。
+          data = await reencodeAvatar(data, 192, 0.72);
+        }
         if (data.length > AV_MAX) { if (window.toast) toast("图片太大，请换更简单的图"); return; }
         pending = data; paint();
       } catch (err) { if (window.toast) toast("处理图片失败：" + (err && err.message ? err.message : err)); }
@@ -238,7 +395,8 @@
         if (!f) return;
         try {
           let data = await fileToCover(f, 960, 320, 0.82);
-          if (data.length > 280 * 1024) data = await fileToCover(f, 800, 268, 0.72);
+          if (!data) return; // 用户取消裁剪
+          if (data.length > 280 * 1024) data = await reencodeRect(data, 800, 268, 0.72);
           if (data.length > 280 * 1024) { if (window.toast) toast("封面太大，请换更简单的图"); return; }
           pendingCover = data; paint();
         } catch (err) { if (window.toast) toast("处理封面失败：" + (err && err.message ? err.message : err)); }
@@ -308,7 +466,8 @@
       if (!f) return;
       try {
         let data = await fileToAvatar(f, 256, 0.85);
-        if (data.length > AV_MAX) data = await fileToAvatar(f, 192, 0.72);
+        if (!data) return; // 用户取消裁剪
+        if (data.length > AV_MAX) data = await reencodeAvatar(data, 192, 0.72);
         if (data.length > AV_MAX) { if (window.toast) toast("图片太大，请换更简单的图"); return; }
         pendingAvatar = data; renderPreview(data);
       } catch (err) { if (window.toast) toast("处理图片失败：" + (err && err.message ? err.message : err)); }
@@ -370,7 +529,22 @@
     m.classList.add("on");
   }
 
-  window.Profile = { load, get, save, publish, open, statusLabel, avatarHtml, faceHtml, displayAvatar, isImg, isRef, resolveAvatar, resolveList, ownAvatar, presenceColor, presenceLabel, presenceDot, applyPresence, metaEditor };
+  // 已裁剪的 data:URI → 再缩到 size 并降质（体积超限时用，不再弹裁剪框）。
+  function reencodeAvatar(dataUri, size, quality) {
+    size = size || 192; quality = quality || 0.72;
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const c = document.createElement("canvas"); c.width = size; c.height = size;
+        c.getContext("2d").drawImage(img, 0, 0, size, size);
+        resolve(c.toDataURL("image/jpeg", quality));
+      };
+      img.onerror = () => reject(new Error("图片重编码失败"));
+      img.src = dataUri;
+    });
+  }
+
+  window.Profile = { load, get, save, publish, open, statusLabel, avatarHtml, faceHtml, displayAvatar, isImg, isRef, resolveAvatar, resolveList, ownAvatar, presenceColor, presenceLabel, presenceDot, applyPresence, metaEditor, openAvatarCrop, openImageCrop };
   window.openProfileModal = open;
 
   // ── P2 在线状态 ──
