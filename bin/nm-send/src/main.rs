@@ -73,31 +73,20 @@ async fn main() -> anyhow::Result<()> {
     }
 
     println!("等待回包 {}s …", args.wait);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(args.wait);
-    loop {
-        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if left.is_zero() {
-            println!("超时：{}s 内未收到任何回包", args.wait);
-            break;
+    match tokio::time::timeout(Duration::from_secs(args.wait), inbox.recv()).await {
+        Ok(Some(g)) => {
+            let body = g
+                .payload
+                .as_ref()
+                .map(|p| String::from_utf8_lossy(&p.value).to_string())
+                .unwrap_or_default();
+            println!("✅ 收到回包 from={} text={:?}", hex(&g.sender[..4.min(g.sender.len())]), body);
         }
-        match tokio::time::timeout(left, inbox.recv()).await {
-            Ok(Some(g)) => {
-                let body = g
-                    .payload
-                    .as_ref()
-                    .map(|p| String::from_utf8_lossy(&p.value).to_string())
-                    .unwrap_or_default();
-                println!("✅ 收到回包 from={} text={:?}", hex(&g.sender[..4.min(g.sender.len())]), body);
-                break;
-            }
-            Ok(None) => {
-                println!("inbox 关闭（连接断开）");
-                break;
-            }
-            Err(_) => {
-                println!("超时：{}s 内未收到任何回包", args.wait);
-                break;
-            }
+        Ok(None) => {
+            println!("inbox 关闭（连接断开）");
+        }
+        Err(_) => {
+            println!("超时：{}s 内未收到任何回包", args.wait);
         }
     }
     Ok(())

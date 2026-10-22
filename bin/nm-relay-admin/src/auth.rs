@@ -11,6 +11,8 @@ use argon2::Argon2;
 use serde::{Deserialize, Serialize};
 
 const SESSION_TTL: Duration = Duration::from_secs(8 * 3600);
+const LOGIN_FAIL_WINDOW: Duration = Duration::from_secs(300);
+const LOGIN_MAX_FAILS: u32 = 5;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Cred {
@@ -23,6 +25,7 @@ pub struct Auth {
     path: PathBuf,
     cred: Mutex<Cred>,
     sessions: Mutex<HashMap<String, Instant>>,
+    login_fails: Mutex<(Instant, u32)>,
 }
 
 impl Auth {
@@ -35,6 +38,7 @@ impl Auth {
                     path,
                     cred: Mutex::new(cred),
                     sessions: Mutex::new(HashMap::new()),
+                    login_fails: Mutex::new((Instant::now(), 0)),
                 },
                 None,
             ));
@@ -49,6 +53,7 @@ impl Auth {
             path,
             cred: Mutex::new(cred),
             sessions: Mutex::new(HashMap::new()),
+            login_fails: Mutex::new((Instant::now(), 0)),
         };
         auth.persist()?;
         Ok((auth, Some(initial_password)))
@@ -63,9 +68,26 @@ impl Auth {
         Ok(())
     }
 
-    pub fn login(&self, username: &str, password: &str) -> Option<(String, bool)> {
+    pub fn login(&self, username: &str, password: &str, src: &str) -> Option<(String, bool)> {
+        {
+            let mut lf = self.login_fails.lock().unwrap();
+            if lf.0.elapsed() >= LOGIN_FAIL_WINDOW {
+                *lf = (Instant::now(), 0);
+            }
+            if lf.1 >= LOGIN_MAX_FAILS {
+                tracing::warn!(audit = true, event = "login", ok = false, reason = "rate_limited",
+                    user = %username, src = %src, "RELAY ADMIN LOGIN 限流锁定");
+                return None;
+            }
+        }
         let cred = self.cred.lock().unwrap().clone();
         if username != cred.username || !verify_password(&cred.phc, password) {
+            let mut lf = self.login_fails.lock().unwrap();
+            lf.1 += 1;
+            let fails = lf.1;
+            drop(lf);
+            tracing::warn!(audit = true, event = "login", ok = false, reason = "bad_credentials",
+                user = %username, src = %src, fails, "RELAY ADMIN LOGIN 失败");
             return None;
         }
         let token = gen_token();
@@ -73,6 +95,8 @@ impl Auth {
             .lock()
             .unwrap()
             .insert(token.clone(), Instant::now() + SESSION_TTL);
+        *self.login_fails.lock().unwrap() = (Instant::now(), 0);
+        tracing::info!(audit = true, event = "login", ok = true, user = %username, src = %src, "RELAY ADMIN LOGIN 成功");
         Some((token, cred.must_change))
     }
 
@@ -99,17 +123,21 @@ impl Auth {
         {
             let mut cred = self.cred.lock().unwrap();
             if !verify_password(&cred.phc, old) {
+                tracing::warn!(audit = true, event = "change_password", ok = false, reason = "bad_old_password", "RELAY ADMIN 改密失败");
                 anyhow::bail!("原密码不正确");
             }
             cred.phc = hash_password(new)?;
             cred.must_change = false;
         }
         self.persist()?;
+        tracing::info!(audit = true, event = "change_password", ok = true, "RELAY ADMIN 改密成功");
         Ok(())
     }
 
     pub fn logout(&self, token: &str) {
-        self.sessions.lock().unwrap().remove(token);
+        if self.sessions.lock().unwrap().remove(token).is_some() {
+            tracing::info!(audit = true, event = "logout", ok = true, "RELAY ADMIN 登出");
+        }
     }
 }
 

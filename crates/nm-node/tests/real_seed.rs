@@ -56,8 +56,10 @@ async fn real_seed_group_and_channel() {
     }
 
     // ---- 频道：owner 建频道 + bob 订阅 + publish ----
-    let cid = [211u8; 32];
-    owner.channel_create(cid, "真网频道", "简介", "").await.unwrap();
+    let channel_sk = nm_transport::SecretKey::from_bytes(&[211u8; 32]);
+    let cid = *channel_sk.public().as_bytes();
+    let secret = channel_sk.to_bytes();
+    owner.channel_create(cid, "真网频道", "简介", "", &secret).await.unwrap();
     bob.channel_sub(cid, "真网频道").await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     owner.channel_publish(cid, "频道消息-真网").await.unwrap();
@@ -85,10 +87,10 @@ async fn real_cross_seed_group_and_channel() {
     bob.register_as::<kinds::Person>(&PersonProfile::default(), "BobX", HashMap::new()).await.unwrap();
 
     let mut gid = [220u8; 32];
-    let mut cid = [221u8; 32];
+    let mut channel_seed = [221u8; 32];
     let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos().to_le_bytes();
     gid[..16].copy_from_slice(&n); // 每次运行用新 id，避免与上次残留冲突
-    cid[..16].copy_from_slice(&n);
+    channel_seed[..16].copy_from_slice(&n);
     owner.group_create(gid, "跨种子群").await.unwrap();
     owner.group_add(gid, bob.id_bytes()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -98,8 +100,10 @@ async fn real_cross_seed_group_and_channel() {
         _ => eprintln!("❌ X-GROUP: bob(异节点) 未收到群消息 → 跨种子联邦不通"),
     }
 
-    let cid = cid; // 见上：已按时间戳生成唯一 id
-    owner.channel_create(cid, "跨种子频道", "简介", "").await.unwrap();
+    let channel_sk = nm_transport::SecretKey::from_bytes(&channel_seed);
+    let cid = *channel_sk.public().as_bytes();
+    let secret = channel_sk.to_bytes();
+    owner.channel_create(cid, "跨种子频道", "简介", "", &secret).await.unwrap();
     bob.channel_sub(cid, "跨种子频道").await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     owner.channel_publish(cid, "跨种子频道消息").await.unwrap();

@@ -73,8 +73,10 @@ async fn channel_sub_then_publish_delivers() {
     let (_bc, mut sub) = online([85u8; 32], &addr).await;
     reg(&sub, "订阅者").await;
 
-    let cid = [91u8; 32];
-    owner.channel_create(cid, "公告", "频道简介", "").await.unwrap();
+    let channel_sk = nm_transport::SecretKey::from_bytes(&[91u8; 32]);
+    let cid = *channel_sk.public().as_bytes();
+    let secret = channel_sk.to_bytes();
+    owner.channel_create(cid, "公告", "频道简介", "", &secret).await.unwrap();
     // 第二客户端订阅（app 的 primeChannels/粘贴订阅路径）。
     sub.channel_sub(cid, "公告").await.unwrap();
 

@@ -114,11 +114,11 @@ impl Client {
     /// 监听本端点地址（IP/relay）变化，每次变化调用 `on_change`。换网后地址一变即触发——
     /// 客户端据此**主动重连**，恢复入站推送通道（不必等用户下一次发送）。
     /// 见 `docs/NETWORK_ROAMING_RECOVERY_DESIGN.md` §5.5。端点关闭即任务结束。
-    pub fn spawn_addr_change_task<F>(&self, mut on_change: F)
+    pub fn spawn_addr_change_task<F>(&self, on_change: F)
     where
         F: FnMut() + Send + 'static,
     {
-        self.ep.spawn_addr_change(move || on_change());
+        self.ep.spawn_addr_change(on_change);
     }
 
     /// 作为资源所有者，用本地私钥签发一份能力授权(Grant)：

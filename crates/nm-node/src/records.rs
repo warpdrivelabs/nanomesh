@@ -20,7 +20,7 @@ pub(crate) fn hex_decode_n<const N: usize>(s: &str) -> Option<[u8; N]> {
 
 /// 变长 hex 解码（P2-13：承载编码后的 AdmissionGrant 等变长字节）。
 pub(crate) fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len())

@@ -304,7 +304,7 @@ impl Node {
                             // 同 IP 唤醒不触发换网回调 → iroh 可能还抱着死的 relay 连接。
                             // 带冷却地 nudge 它重探测/重 home relay,让 rejoin 真能连上。
                             let now = tokio::time::Instant::now();
-                            if last_net_nudge.map_or(true, |t| now.duration_since(t).as_secs() >= 30) {
+                            if last_net_nudge.is_none_or(|t| now.duration_since(t).as_secs() >= 30) {
                                 self.notify_network_change().await;
                                 last_net_nudge = Some(now);
                             }
@@ -398,8 +398,12 @@ pub(crate) async fn presence_resolve(
     }
 
     let now = now_secs();
-    let mut js: tokio::task::JoinSet<(Vec<u8>, Vec<Vec<u8>>, Option<std::collections::HashMap<String, String>>)> =
-        tokio::task::JoinSet::new();
+    type PresencePullResult = (
+        Vec<u8>,
+        Vec<Vec<u8>>,
+        Option<std::collections::HashMap<String, String>>,
+    );
+    let mut js: tokio::task::JoinSet<PresencePullResult> = tokio::task::JoinSet::new();
     for (home, ids_for_home) in by_home {
         // 全部缓存新鲜（≤PULL_TTL）→ 免拨（火管在时缓存常热 → 几乎不拨）。
         let all_fresh = ids_for_home.iter().all(|id| {

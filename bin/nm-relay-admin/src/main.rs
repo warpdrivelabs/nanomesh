@@ -228,8 +228,13 @@ struct LoginBody {
     password: String,
 }
 
-async fn login(State(s): State<AppState>, Json(body): Json<LoginBody>) -> Response {
-    match s.auth.login(&body.username, &body.password) {
+async fn login(State(s): State<AppState>, headers: HeaderMap, Json(body): Json<LoginBody>) -> Response {
+    let src = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(',').next().unwrap_or(s).trim().to_string())
+        .unwrap_or_else(|| "direct".to_string());
+    match s.auth.login(&body.username, &body.password, &src) {
         Some((token, must_change)) => (
             StatusCode::OK,
             [(header::SET_COOKIE, session_cookie(&token, s.cookie_secure))],

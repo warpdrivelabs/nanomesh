@@ -77,12 +77,6 @@ impl Store {
         }
     }
 
-    pub fn is_banned(&self, id: &str) -> bool {
-        let id = Self::normalize_id(id);
-        let g = self.inner.lock().unwrap();
-        g.blacklist.iter().any(|b| Self::normalize_id(b) == id || ids_equivalent(b, &id))
-    }
-
     pub fn ban(&self, id: &str, note: Option<&str>) -> anyhow::Result<()> {
         let id = Self::normalize_id(id);
         if id.is_empty() {
@@ -103,10 +97,9 @@ impl Store {
                 note: String::new(),
             });
             e.last_allowed = false;
-            if let Some(n) = note {
-                if !n.is_empty() {
+            if let Some(n) = note
+                && !n.is_empty() {
                     e.note = n.to_string();
-                }
             }
         }
         self.persist()
@@ -150,7 +143,7 @@ impl Store {
             e.connects = e.connects.saturating_add(1);
             e.last_allowed = allowed;
             // 每 10 次连接落盘一次，降低回调热路径 IO。
-            (allowed, e.connects == 1 || e.connects % 10 == 0)
+            (allowed, e.connects == 1 || e.connects.is_multiple_of(10))
         };
         if should_persist {
             let _ = self.persist();
@@ -161,7 +154,7 @@ impl Store {
     pub fn peers_snapshot(&self) -> Vec<PeerSighting> {
         let g = self.inner.lock().unwrap();
         let mut v: Vec<_> = g.peers.values().cloned().collect();
-        v.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+        v.sort_by_key(|a| std::cmp::Reverse(a.last_seen));
         // 标注 ban 状态到 note 字段旁：调用方用 blacklist 集合判断。
         v
     }

@@ -131,7 +131,7 @@ fn group_ack_batch_clears_singleton_pending() {
     let (_d, s) = open();
     let (gid, snd) = ([9u8; 32], [1u8; 32]);
     let n = vec![0xA1u8; 32];
-    s.group_outbox_put(&gid, &snd, 5, 1000, 0, 1002, &[n.clone()], b"x").unwrap();
+    s.group_outbox_put(&gid, &snd, 5, 1000, 0, 1002, std::slice::from_ref(&n), b"x").unwrap();
     let (acked, cleared) = s.group_outbox_ack_batch(&n, &[(gid.to_vec(), snd.to_vec(), 5)]).unwrap();
     assert_eq!((acked, cleared), (1, 1));
     assert!(s.group_outbox_all().unwrap().is_empty());
@@ -143,7 +143,7 @@ fn group_ack_batch_no_match_leaves_state() {
     let (_d, s) = open();
     let (gid, snd) = ([9u8; 32], [1u8; 32]);
     let x = vec![0x11u8; 32];
-    s.group_outbox_put(&gid, &snd, 5, 1000, 0, 1002, &[x.clone()], b"keep").unwrap(); // 哨兵
+    s.group_outbox_put(&gid, &snd, 5, 1000, 0, 1002, std::slice::from_ref(&x), b"keep").unwrap(); // 哨兵
     let entries = vec![
         (gid.to_vec(), snd.to_vec(), 999u64), // 同群不同 gram_id
         (vec![0xEE; 32], snd.to_vec(), 5u64), // 不同 gid

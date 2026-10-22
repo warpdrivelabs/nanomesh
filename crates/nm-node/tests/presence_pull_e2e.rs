@@ -59,10 +59,10 @@ async fn presence_pull_works_with_overlay_retired() {
     // 断言在 overlay 退火下仍得 "online"（= pull-from-home 成立，不依赖火管）。
     let got_online = tokio::time::timeout(Duration::from_secs(40), async {
         loop {
-            if let Ok(m) = owner.presence_query(&[bob_id]).await {
-                if m.get(&bob_hex).map(|s| s == "online").unwrap_or(false) {
-                    break true;
-                }
+            if let Ok(m) = owner.presence_query(&[bob_id]).await
+                && m.get(&bob_hex).map(|s| s == "online").unwrap_or(false)
+            {
+                break true;
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }

@@ -404,10 +404,10 @@ fn print_startup_info(cfg: &Config, mode_label: &str) {
 fn main() -> anyhow::Result<()> {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
-    if let Some(n) = std::env::var("NMD_WORKER_THREADS").ok().and_then(|s| s.parse::<usize>().ok()) {
-        if n > 0 {
-            builder.worker_threads(n);
-        }
+    if let Some(n) = std::env::var("NMD_WORKER_THREADS").ok().and_then(|s| s.parse::<usize>().ok())
+        && n > 0
+    {
+        builder.worker_threads(n);
     }
     let rt = builder.build()?;
     rt.block_on(async_main())

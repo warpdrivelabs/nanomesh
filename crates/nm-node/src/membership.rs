@@ -392,12 +392,12 @@ impl Node {
                                 // 同 IP 唤醒不触发换网回调 → iroh 可能还抱着死的 relay 连接。
                                 // 带冷却地 nudge 它重探测/重 home relay,让后续 rejoin 真能连上。
                                 let now = tokio::time::Instant::now();
-                                if last_net_nudge.map_or(true, |t| now.duration_since(t).as_secs() >= 30) {
+                                if last_net_nudge.is_none_or(|t| now.duration_since(t).as_secs() >= 30) {
                                     self.notify_network_change().await;
                                     last_net_nudge = Some(now);
                                 }
                                 // 退避(2s→30s)重注入:斩断「0 邻居→每 1s 重灌全部 peers」正反馈;邻居恢复即重置。
-                                if last_rejoin.map_or(true, |t| now.duration_since(t) >= rejoin_backoff) {
+                                if last_rejoin.is_none_or(|t| now.duration_since(t) >= rejoin_backoff) {
                                     let _ = topic.rejoin(self.gossip_bootstrap()).await;
                                     last_rejoin = Some(now);
                                     rejoin_backoff = (rejoin_backoff * 2).min(std::time::Duration::from_secs(30));

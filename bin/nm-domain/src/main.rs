@@ -245,6 +245,12 @@ struct LoginReq {
 }
 async fn login(State(s): State<AppState>, req: Request) -> Response {
     let secure = req.extensions().get::<ViaTls>().is_some();
+    let src = req
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(',').next().unwrap_or(s).trim().to_string())
+        .unwrap_or_else(|| "direct".to_string());
     let bytes = axum::body::to_bytes(req.into_body(), 64 * 1024)
         .await
         .unwrap_or_default();
@@ -258,7 +264,7 @@ async fn login(State(s): State<AppState>, req: Request) -> Response {
                 .into_response();
         }
     };
-    match s.auth.login(&b.username, &b.password) {
+    match s.auth.login(&b.username, &b.password, &src) {
         Some((token, must_change)) => {
             (
                 [(header::SET_COOKIE, session_cookie(&token, secure))],

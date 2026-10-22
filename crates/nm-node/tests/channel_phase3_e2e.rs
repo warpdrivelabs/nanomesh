@@ -98,10 +98,10 @@ async fn channel_cross_node_delivery_and_backfill() {
     // （部署复现的失败：订阅后无名称/图标，正是 Meta 没跨节点到达。）
     let meta_seen = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            if let Ok(list) = bob.channel_list().await {
-                if list.iter().any(|c| c.channel_id == cid.to_vec() && c.name == "公告频道") {
-                    break true;
-                }
+            if let Ok(list) = bob.channel_list().await
+                && list.iter().any(|c| c.channel_id == cid && c.name == "公告频道")
+            {
+                break true;
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
