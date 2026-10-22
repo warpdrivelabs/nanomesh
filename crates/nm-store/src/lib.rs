@@ -36,6 +36,8 @@ const REVOKED: TableDefinition<&[u8], &[u8]> = TableDefinition::new("revoked");
 /// 跨节点可靠投递·待确认发件箱：key = sender(32)++receiver(32)++gram_id(8BE)，
 /// val = first_ms(8)++retries(4)++next_due_ms(8)++gram_bytes。收到 DirectAck 前持久保留，重启续传。
 const OUTBOX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("outbox");
+/// OUTBOX 到期索引：key = next_due_ms(8BE)++OUTBOX.key，value=空。重传循环按时间 range 扫，避免全表扫描。
+const OUTBOX_DUE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("outbox_due");
 /// 跨节点 Direct 持久去重：key = sender(32)++gram_id(8BE)++crc(8)，val = first_seen_ms(8BE)。
 /// 并入 crc 防 client 重启 gram_id 回绕导致的误去重。SeenGrams 内存版的持久权威兜底。
 const DEDUP_DIRECT: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dedup_direct");
@@ -43,6 +45,8 @@ const DEDUP_DIRECT: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dedup_
 /// val = first_ms(8)++retries(4)++next_due_ms(8)++n_pending(2)++[node(32)*n]++gram_bytes。
 /// 按「待 ack 成员节点集」跟踪：收到某节点 GroupAck 即移除该 node，集合空则删、停重传。
 const GROUP_OUTBOX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("group_outbox");
+/// GROUP_OUTBOX 到期索引：key = next_due_ms(8BE)++GROUP_OUTBOX.key，value=空。
+const GROUP_OUTBOX_DUE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("group_outbox_due");
 // ── 频道（P4 升级：持久化 + 全局定序 + 可靠广播）──
 /// 频道元信息：key = channel_id(32)，value = prost 编码的 Channel。重启回填频道目录。
 const CHANNELS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("channels");
@@ -63,6 +67,8 @@ const CHANNEL_INTAKE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("chan
 /// 频道发布待确认发件箱（publisher 侧）：key = channel_id(32)++sender(32)++nonce(≤32)，
 /// val = first_ms(8)++retries(4)++next_due_ms(8)++pubreq_bytes。看到自己的 sequenced 消息/收 PubReject 即删。
 const CHANNEL_OUTBOX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("channel_outbox");
+/// CHANNEL_OUTBOX 到期索引：key = next_due_ms(8BE)++CHANNEL_OUTBOX.key，value=空。
+const CHANNEL_OUTBOX_DUE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("channel_outbox_due");
 /// P0-2 模式元信息：key = "version"(u32 BE) / "magic"(DB_MAGIC) / "last_backup_ms"(u64 BE)。
 /// 打开时据此判定新库/旧库并跑迁移链；版本高于本二进制即拒绝启动（防降级静默丢数据）。
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
@@ -76,7 +82,7 @@ const DEAD_LETTER: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dead_le
 const READ_STATE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("read_state");
 
 /// 当前存储模式版本。每次对**手工字节键/值布局**或表语义做破坏性变更即 +1，并补一条迁移。
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 /// 库身份魔数：防把别的 redb 文件误当 nmd 存储打开。
 const DB_MAGIC: &[u8] = b"nmspace-nmd-store";
 
@@ -113,6 +119,8 @@ pub struct GroupOutboxRow {
     pub gram_bytes: Vec<u8>,
 }
 
+type GroupOutboxDecoded = (u64, u32, u64, Vec<Vec<u8>>, Vec<u8>);
+
 /// 频道发布待确认发件箱一行（publisher 侧重传任务用）。`pubreq_bytes`=编码的 ChannelPubReq。
 pub struct ChannelOutboxRow {
     pub channel_id: Vec<u8>,
@@ -126,6 +134,22 @@ pub struct ChannelOutboxRow {
 
 fn db_err(e: impl std::fmt::Display) -> StoreError {
     StoreError::Db(e.to_string())
+}
+
+fn due_key(next_due_ms: u64, primary_key: &[u8]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(8 + primary_key.len());
+    k.extend_from_slice(&next_due_ms.to_be_bytes());
+    k.extend_from_slice(primary_key);
+    k
+}
+
+fn due_range(until_ms: u64) -> (Vec<u8>, Vec<u8>) {
+    let lo = 0u64.to_be_bytes().to_vec();
+    let hi = until_ms
+        .checked_add(1)
+        .map(|n| n.to_be_bytes().to_vec())
+        .unwrap_or_else(|| vec![0xff; 9]);
+    (lo, hi)
 }
 
 /// redb 后端。
@@ -156,8 +180,10 @@ impl RedbStore {
             wtx.open_table(DEVICES).map_err(db_err)?;
             wtx.open_table(REVOKED).map_err(db_err)?;
             wtx.open_table(OUTBOX).map_err(db_err)?;
+            wtx.open_table(OUTBOX_DUE).map_err(db_err)?;
             wtx.open_table(DEDUP_DIRECT).map_err(db_err)?;
             wtx.open_table(GROUP_OUTBOX).map_err(db_err)?;
+            wtx.open_table(GROUP_OUTBOX_DUE).map_err(db_err)?;
             wtx.open_table(CHANNELS).map_err(db_err)?;
             wtx.open_table(CHANNEL_SUBS).map_err(db_err)?;
             wtx.open_table(CHANNEL_LOG).map_err(db_err)?;
@@ -165,6 +191,7 @@ impl RedbStore {
             wtx.open_table(CHANNEL_SECRETS).map_err(db_err)?;
             wtx.open_table(CHANNEL_INTAKE).map_err(db_err)?;
             wtx.open_table(CHANNEL_OUTBOX).map_err(db_err)?;
+            wtx.open_table(CHANNEL_OUTBOX_DUE).map_err(db_err)?;
             wtx.open_table(META).map_err(db_err)?;
             wtx.open_table(BLOB_META).map_err(db_err)?;
             wtx.open_table(DEAD_LETTER).map_err(db_err)?;
@@ -239,6 +266,7 @@ impl RedbStore {
         tracing::info!(from, to, "nm-store schema 迁移");
         match (from, to) {
             (0, 1) => self.migrate_v0_to_v1(),
+            (1, 2) => self.migrate_v1_to_v2(),
             _ => Err(StoreError::Db(format!("无迁移路径 v{from}→v{to}"))),
         }
     }
@@ -288,6 +316,40 @@ impl RedbStore {
               } }
             wtx.commit().map_err(db_err)?;
         }
+        Ok(())
+    }
+
+    /// v1→v2：为三类 outbox 补 `next_due_ms` 索引。主表布局不变，迁移只从现有主表重建索引。
+    fn migrate_v1_to_v2(&self) -> Result<()> {
+        self.rebuild_outbox_due_indexes()
+    }
+
+    fn rebuild_outbox_due_indexes(&self) -> Result<()> {
+        let outbox = self.outbox_all()?;
+        let group = self.group_outbox_all()?;
+        let channel = self.channel_outbox_all()?;
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        {
+            let mut od = wtx.open_table(OUTBOX_DUE).map_err(db_err)?;
+            for row in &outbox {
+                let pk = Self::outbox_key(&row.sender, &row.receiver, row.gram_id);
+                let dk = due_key(row.next_due_ms, &pk);
+                od.insert(dk.as_slice(), [].as_slice()).map_err(db_err)?;
+            }
+            let mut gd = wtx.open_table(GROUP_OUTBOX_DUE).map_err(db_err)?;
+            for row in &group {
+                let pk = Self::group_outbox_key(&row.gid, &row.sender, row.gram_id);
+                let dk = due_key(row.next_due_ms, &pk);
+                gd.insert(dk.as_slice(), [].as_slice()).map_err(db_err)?;
+            }
+            let mut cd = wtx.open_table(CHANNEL_OUTBOX_DUE).map_err(db_err)?;
+            for row in &channel {
+                let pk = Self::chan_outbox_key(&row.channel_id, &row.sender, &row.nonce);
+                let dk = due_key(row.next_due_ms, &pk);
+                cd.insert(dk.as_slice(), [].as_slice()).map_err(db_err)?;
+            }
+        }
+        wtx.commit().map_err(db_err)?;
         Ok(())
     }
 
@@ -407,7 +469,27 @@ impl RedbStore {
         k
     }
 
+    fn outbox_row_from(k: &[u8], v: &[u8]) -> Option<OutboxRow> {
+        if k.len() != 72 || v.len() < 20 { return None; }
+        Some(OutboxRow {
+            sender: k[0..32].to_vec(),
+            receiver: k[32..64].to_vec(),
+            gram_id: u64::from_be_bytes(k[64..72].try_into().ok()?),
+            first_ms: u64::from_be_bytes(v[0..8].try_into().ok()?),
+            retries: u32::from_be_bytes(v[8..12].try_into().ok()?),
+            next_due_ms: u64::from_be_bytes(v[12..20].try_into().ok()?),
+            gram_bytes: v[20..].to_vec(),
+        })
+    }
+
+    fn outbox_next_due(v: &[u8]) -> Option<u64> {
+        v.get(12..20)
+            .and_then(|s| s.try_into().ok())
+            .map(u64::from_be_bytes)
+    }
+
     /// 存/覆盖一条待确认条目（Immediate 落盘，崩溃不丢）。
+    #[allow(clippy::too_many_arguments)]
     pub fn outbox_put(&self, sender: &[u8], receiver: &[u8], gram_id: u64,
                       first_ms: u64, retries: u32, next_due_ms: u64, gram_bytes: &[u8]) -> Result<()> {
         let key = Self::outbox_key(sender, receiver, gram_id);
@@ -417,8 +499,22 @@ impl RedbStore {
         val.extend_from_slice(&next_due_ms.to_be_bytes());
         val.extend_from_slice(gram_bytes);
         let wtx = self.db.begin_write().map_err(db_err)?;
-        { let mut tb = wtx.open_table(OUTBOX).map_err(db_err)?;
-          tb.insert(key.as_slice(), val.as_slice()).map_err(db_err)?; }
+        let old_due = {
+            let mut tb = wtx.open_table(OUTBOX).map_err(db_err)?;
+            let old_due = tb
+                .get(key.as_slice())
+                .map_err(db_err)?
+                .and_then(|old| Self::outbox_next_due(old.value()));
+            tb.insert(key.as_slice(), val.as_slice()).map_err(db_err)?;
+            old_due
+        };
+        {
+            let mut due = wtx.open_table(OUTBOX_DUE).map_err(db_err)?;
+            if let Some(old) = old_due {
+                due.remove(due_key(old, &key).as_slice()).map_err(db_err)?;
+            }
+            due.insert(due_key(next_due_ms, &key).as_slice(), [].as_slice()).map_err(db_err)?;
+        }
         wtx.commit().map_err(db_err)?;
         Ok(())
     }
@@ -427,9 +523,18 @@ impl RedbStore {
     pub fn outbox_del(&self, sender: &[u8], receiver: &[u8], gram_id: u64) -> Result<bool> {
         let key = Self::outbox_key(sender, receiver, gram_id);
         let wtx = self.db.begin_write().map_err(db_err)?;
+        let old_due;
         let existed;
-        { let mut tb = wtx.open_table(OUTBOX).map_err(db_err)?;
-          existed = tb.remove(key.as_slice()).map_err(db_err)?.is_some(); }
+        {
+            let mut tb = wtx.open_table(OUTBOX).map_err(db_err)?;
+            let old = tb.get(key.as_slice()).map_err(db_err)?.map(|v| v.value().to_vec());
+            old_due = old.as_deref().and_then(Self::outbox_next_due);
+            existed = tb.remove(key.as_slice()).map_err(db_err)?.is_some();
+        }
+        if let Some(old) = old_due {
+            let mut due = wtx.open_table(OUTBOX_DUE).map_err(db_err)?;
+            due.remove(due_key(old, &key).as_slice()).map_err(db_err)?;
+        }
         wtx.commit().map_err(db_err)?;
         Ok(existed)
     }
@@ -452,15 +557,29 @@ impl RedbStore {
             let (k, v) = item.map_err(db_err)?;
             let k = k.value();
             let v = v.value();
-            if k.len() != 72 || v.len() < 20 { continue; }
-            let sender = k[0..32].to_vec();
-            let receiver = k[32..64].to_vec();
-            let gram_id = u64::from_be_bytes(k[64..72].try_into().unwrap());
-            let first_ms = u64::from_be_bytes(v[0..8].try_into().unwrap());
-            let retries = u32::from_be_bytes(v[8..12].try_into().unwrap());
-            let next_due_ms = u64::from_be_bytes(v[12..20].try_into().unwrap());
-            let gram_bytes = v[20..].to_vec();
-            out.push(OutboxRow { sender, receiver, gram_id, first_ms, retries, next_due_ms, gram_bytes });
+            if let Some(row) = Self::outbox_row_from(k, v) {
+                out.push(row);
+            }
+        }
+        Ok(out)
+    }
+
+    /// 只读取 `next_due_ms <= until_ms` 的待确认 DM 条目。到期索引让重传循环避开大量未来条目。
+    pub fn outbox_due(&self, until_ms: u64) -> Result<Vec<OutboxRow>> {
+        let (lo, hi) = due_range(until_ms);
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let due = rtx.open_table(OUTBOX_DUE).map_err(db_err)?;
+        let tb = rtx.open_table(OUTBOX).map_err(db_err)?;
+        let mut out = Vec::new();
+        for item in due.range(lo.as_slice()..hi.as_slice()).map_err(db_err)? {
+            let (dk, _v) = item.map_err(db_err)?;
+            let dk = dk.value();
+            if dk.len() < 8 { continue; }
+            let pk = &dk[8..];
+            let Some(v) = tb.get(pk).map_err(db_err)? else { continue };
+            if let Some(row) = Self::outbox_row_from(pk, v.value()) {
+                out.push(row);
+            }
         }
         Ok(out)
     }
@@ -562,7 +681,7 @@ impl RedbStore {
     }
 
     /// 解出 (first_ms, retries, next_due_ms, pending_nodes, gram_bytes)；格式不符返回 None。
-    fn group_outbox_decode(v: &[u8]) -> Option<(u64, u32, u64, Vec<Vec<u8>>, Vec<u8>)> {
+    fn group_outbox_decode(v: &[u8]) -> Option<GroupOutboxDecoded> {
         if v.len() < 22 { return None; }
         let first_ms = u64::from_be_bytes(v[0..8].try_into().ok()?);
         let retries = u32::from_be_bytes(v[8..12].try_into().ok()?);
@@ -576,15 +695,45 @@ impl RedbStore {
         Some((first_ms, retries, next_due_ms, pending, gram_bytes))
     }
 
+    fn group_outbox_row_from(k: &[u8], v: &[u8]) -> Option<GroupOutboxRow> {
+        if k.len() != 72 { return None; }
+        let (first_ms, retries, next_due_ms, pending_nodes, gram_bytes) = Self::group_outbox_decode(v)?;
+        Some(GroupOutboxRow {
+            gid: k[0..32].to_vec(),
+            sender: k[32..64].to_vec(),
+            gram_id: u64::from_be_bytes(k[64..72].try_into().ok()?),
+            first_ms,
+            retries,
+            next_due_ms,
+            pending_nodes,
+            gram_bytes,
+        })
+    }
+
     /// 存/覆盖一条群待确认条目（Immediate 落盘）。`pending_nodes`=期望回 ack 的成员 home 节点集。
+    #[allow(clippy::too_many_arguments)]
     pub fn group_outbox_put(&self, gid: &[u8], sender: &[u8], gram_id: u64, first_ms: u64,
                             retries: u32, next_due_ms: u64, pending_nodes: &[Vec<u8>],
                             gram_bytes: &[u8]) -> Result<()> {
         let key = Self::group_outbox_key(gid, sender, gram_id);
         let val = Self::group_outbox_encode(first_ms, retries, next_due_ms, pending_nodes, gram_bytes);
         let wtx = self.db.begin_write().map_err(db_err)?;
-        { let mut tb = wtx.open_table(GROUP_OUTBOX).map_err(db_err)?;
-          tb.insert(key.as_slice(), val.as_slice()).map_err(db_err)?; }
+        let old_due = {
+            let mut tb = wtx.open_table(GROUP_OUTBOX).map_err(db_err)?;
+            let old_due = tb
+                .get(key.as_slice())
+                .map_err(db_err)?
+                .and_then(|old| Self::group_outbox_decode(old.value()).map(|(_, _, due, _, _)| due));
+            tb.insert(key.as_slice(), val.as_slice()).map_err(db_err)?;
+            old_due
+        };
+        {
+            let mut due = wtx.open_table(GROUP_OUTBOX_DUE).map_err(db_err)?;
+            if let Some(old) = old_due {
+                due.remove(due_key(old, &key).as_slice()).map_err(db_err)?;
+            }
+            due.insert(due_key(next_due_ms, &key).as_slice(), [].as_slice()).map_err(db_err)?;
+        }
         wtx.commit().map_err(db_err)?;
         Ok(())
     }
@@ -616,6 +765,8 @@ impl RedbStore {
                     pending.retain(|n| n.as_slice() != node);
                     if pending.is_empty() {
                         tb.remove(key.as_slice()).map_err(db_err)?;
+                        let mut due = wtx.open_table(GROUP_OUTBOX_DUE).map_err(db_err)?;
+                        due.remove(due_key(next_due_ms, &key).as_slice()).map_err(db_err)?;
                         cleared = true;
                     } else {
                         let val = Self::group_outbox_encode(first_ms, retries, next_due_ms, &pending, &gram_bytes);
@@ -667,6 +818,8 @@ impl RedbStore {
                 acked += 1;
                 if pending.is_empty() {
                     tb.remove(k.as_slice()).map_err(db_err)?;
+                    let mut due = wtx.open_table(GROUP_OUTBOX_DUE).map_err(db_err)?;
+                    due.remove(due_key(next_due_ms, k).as_slice()).map_err(db_err)?;
                     cleared += 1;
                 } else {
                     let val = Self::group_outbox_encode(first_ms, retries, next_due_ms, &pending, &gram_bytes);
@@ -691,9 +844,18 @@ impl RedbStore {
     pub fn group_outbox_del(&self, gid: &[u8], sender: &[u8], gram_id: u64) -> Result<bool> {
         let key = Self::group_outbox_key(gid, sender, gram_id);
         let wtx = self.db.begin_write().map_err(db_err)?;
+        let old_due;
         let existed;
-        { let mut tb = wtx.open_table(GROUP_OUTBOX).map_err(db_err)?;
-          existed = tb.remove(key.as_slice()).map_err(db_err)?.is_some(); }
+        {
+            let mut tb = wtx.open_table(GROUP_OUTBOX).map_err(db_err)?;
+            let old = tb.get(key.as_slice()).map_err(db_err)?.map(|v| v.value().to_vec());
+            old_due = old.as_deref().and_then(Self::group_outbox_decode).map(|(_, _, due, _, _)| due);
+            existed = tb.remove(key.as_slice()).map_err(db_err)?.is_some();
+        }
+        if let Some(old) = old_due {
+            let mut due = wtx.open_table(GROUP_OUTBOX_DUE).map_err(db_err)?;
+            due.remove(due_key(old, &key).as_slice()).map_err(db_err)?;
+        }
         wtx.commit().map_err(db_err)?;
         Ok(existed)
     }
@@ -706,15 +868,29 @@ impl RedbStore {
         for item in tb.iter().map_err(db_err)? {
             let (k, v) = item.map_err(db_err)?;
             let k = k.value();
-            if k.len() != 72 { continue; }
-            let Some((first_ms, retries, next_due_ms, pending_nodes, gram_bytes)) =
-                Self::group_outbox_decode(v.value()) else { continue };
-            out.push(GroupOutboxRow {
-                gid: k[0..32].to_vec(),
-                sender: k[32..64].to_vec(),
-                gram_id: u64::from_be_bytes(k[64..72].try_into().unwrap()),
-                first_ms, retries, next_due_ms, pending_nodes, gram_bytes,
-            });
+            if let Some(row) = Self::group_outbox_row_from(k, v.value()) {
+                out.push(row);
+            }
+        }
+        Ok(out)
+    }
+
+    /// 只读取 `next_due_ms <= until_ms` 的群待确认条目。
+    pub fn group_outbox_due(&self, until_ms: u64) -> Result<Vec<GroupOutboxRow>> {
+        let (lo, hi) = due_range(until_ms);
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let due = rtx.open_table(GROUP_OUTBOX_DUE).map_err(db_err)?;
+        let tb = rtx.open_table(GROUP_OUTBOX).map_err(db_err)?;
+        let mut out = Vec::new();
+        for item in due.range(lo.as_slice()..hi.as_slice()).map_err(db_err)? {
+            let (dk, _v) = item.map_err(db_err)?;
+            let dk = dk.value();
+            if dk.len() < 8 { continue; }
+            let pk = &dk[8..];
+            let Some(v) = tb.get(pk).map_err(db_err)? else { continue };
+            if let Some(row) = Self::group_outbox_row_from(pk, v.value()) {
+                out.push(row);
+            }
         }
         Ok(out)
     }
@@ -1016,6 +1192,21 @@ impl RedbStore {
     fn chan_outbox_key(channel_id: &[u8], sender: &[u8], nonce: &[u8]) -> Vec<u8> {
         Self::chan_intake_key(channel_id, sender, nonce)
     }
+
+    fn channel_outbox_row_from(k: &[u8], v: &[u8]) -> Option<ChannelOutboxRow> {
+        if k.len() < 64 || v.len() < 20 { return None; }
+        Some(ChannelOutboxRow {
+            channel_id: k[0..32].to_vec(),
+            sender: k[32..64].to_vec(),
+            nonce: k[64..].to_vec(),
+            first_ms: u64::from_be_bytes(v[0..8].try_into().ok()?),
+            retries: u32::from_be_bytes(v[8..12].try_into().ok()?),
+            next_due_ms: u64::from_be_bytes(v[12..20].try_into().ok()?),
+            pubreq_bytes: v[20..].to_vec(),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn channel_outbox_put(&self, channel_id: &[u8], sender: &[u8], nonce: &[u8],
                               first_ms: u64, retries: u32, next_due_ms: u64, pubreq_bytes: &[u8]) -> Result<()> {
         let key = Self::chan_outbox_key(channel_id, sender, nonce);
@@ -1025,17 +1216,40 @@ impl RedbStore {
         val.extend_from_slice(&next_due_ms.to_be_bytes());
         val.extend_from_slice(pubreq_bytes);
         let wtx = self.db.begin_write().map_err(db_err)?;
-        { let mut t = wtx.open_table(CHANNEL_OUTBOX).map_err(db_err)?;
-          t.insert(key.as_slice(), val.as_slice()).map_err(db_err)?; }
+        let old_due = {
+            let mut t = wtx.open_table(CHANNEL_OUTBOX).map_err(db_err)?;
+            let old_due = t
+                .get(key.as_slice())
+                .map_err(db_err)?
+                .and_then(|old| Self::outbox_next_due(old.value()));
+            t.insert(key.as_slice(), val.as_slice()).map_err(db_err)?;
+            old_due
+        };
+        {
+            let mut due = wtx.open_table(CHANNEL_OUTBOX_DUE).map_err(db_err)?;
+            if let Some(old) = old_due {
+                due.remove(due_key(old, &key).as_slice()).map_err(db_err)?;
+            }
+            due.insert(due_key(next_due_ms, &key).as_slice(), [].as_slice()).map_err(db_err)?;
+        }
         wtx.commit().map_err(db_err)?;
         Ok(())
     }
     pub fn channel_outbox_del(&self, channel_id: &[u8], sender: &[u8], nonce: &[u8]) -> Result<bool> {
         let key = Self::chan_outbox_key(channel_id, sender, nonce);
         let wtx = self.db.begin_write().map_err(db_err)?;
+        let old_due;
         let existed;
-        { let mut t = wtx.open_table(CHANNEL_OUTBOX).map_err(db_err)?;
-          existed = t.remove(key.as_slice()).map_err(db_err)?.is_some(); }
+        {
+            let mut t = wtx.open_table(CHANNEL_OUTBOX).map_err(db_err)?;
+            let old = t.get(key.as_slice()).map_err(db_err)?.map(|v| v.value().to_vec());
+            old_due = old.as_deref().and_then(Self::outbox_next_due);
+            existed = t.remove(key.as_slice()).map_err(db_err)?.is_some();
+        }
+        if let Some(old) = old_due {
+            let mut due = wtx.open_table(CHANNEL_OUTBOX_DUE).map_err(db_err)?;
+            due.remove(due_key(old, &key).as_slice()).map_err(db_err)?;
+        }
         wtx.commit().map_err(db_err)?;
         Ok(existed)
     }
@@ -1047,16 +1261,29 @@ impl RedbStore {
             let (k, v) = item.map_err(db_err)?;
             let k = k.value();
             let v = v.value();
-            if k.len() < 64 || v.len() < 20 { continue; }
-            out.push(ChannelOutboxRow {
-                channel_id: k[0..32].to_vec(),
-                sender: k[32..64].to_vec(),
-                nonce: k[64..].to_vec(),
-                first_ms: u64::from_be_bytes(v[0..8].try_into().unwrap()),
-                retries: u32::from_be_bytes(v[8..12].try_into().unwrap()),
-                next_due_ms: u64::from_be_bytes(v[12..20].try_into().unwrap()),
-                pubreq_bytes: v[20..].to_vec(),
-            });
+            if let Some(row) = Self::channel_outbox_row_from(k, v) {
+                out.push(row);
+            }
+        }
+        Ok(out)
+    }
+
+    /// 只读取 `next_due_ms <= until_ms` 的频道发布待确认条目。
+    pub fn channel_outbox_due(&self, until_ms: u64) -> Result<Vec<ChannelOutboxRow>> {
+        let (lo, hi) = due_range(until_ms);
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let due = rtx.open_table(CHANNEL_OUTBOX_DUE).map_err(db_err)?;
+        let tb = rtx.open_table(CHANNEL_OUTBOX).map_err(db_err)?;
+        let mut out = Vec::new();
+        for item in due.range(lo.as_slice()..hi.as_slice()).map_err(db_err)? {
+            let (dk, _v) = item.map_err(db_err)?;
+            let dk = dk.value();
+            if dk.len() < 8 { continue; }
+            let pk = &dk[8..];
+            let Some(v) = tb.get(pk).map_err(db_err)? else { continue };
+            if let Some(row) = Self::channel_outbox_row_from(pk, v.value()) {
+                out.push(row);
+            }
         }
         Ok(out)
     }
@@ -1695,7 +1922,7 @@ mod tests {
     // 打开触发 v0→v1 迁移，验证旧数据被正确重写、可读、可按龄裁剪（对标生产既有库升级）。
     #[test]
     fn migrate_v0_legacy_rows() {
-        use redb::{Database, ReadableDatabase};
+        use redb::Database;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legacy.redb");
         let r = [3u8; 32];
@@ -1744,6 +1971,41 @@ mod tests {
         assert_eq!(m[&conv_a.to_vec()], 200);
         assert_eq!(m[&conv_b.to_vec()], 77);
         assert!(s.read_state_all(&[9u8; 32]).unwrap().is_empty(), "别的账号不串");
+    }
+
+    #[test]
+    fn outbox_due_indexes_filter_update_and_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = RedbStore::open(dir.path().join("t.redb")).unwrap();
+        let a = [1u8; 32];
+        let b = [2u8; 32];
+        let c = [3u8; 32];
+
+        s.outbox_put(&a, &b, 1, 10, 0, 100, b"dm").unwrap();
+        s.outbox_put(&a, &c, 2, 10, 0, 500, b"later").unwrap();
+        assert_eq!(s.outbox_due(99).unwrap().len(), 0);
+        assert_eq!(s.outbox_due(100).unwrap().len(), 1);
+        s.outbox_put(&a, &b, 1, 10, 1, 700, b"dm2").unwrap();
+        assert!(s.outbox_due(100).unwrap().is_empty(), "覆盖写应移走旧 due 索引");
+        let moved = s
+            .outbox_due(700)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.gram_id == 1)
+            .unwrap();
+        assert_eq!(moved.retries, 1);
+        assert!(s.outbox_del(&a, &b, 1).unwrap());
+        assert_eq!(s.outbox_due(700).unwrap().len(), 1, "删除后只剩另一条未来 DM");
+
+        s.group_outbox_put(&a, &b, 7, 10, 0, 100, &[c.to_vec()], b"group").unwrap();
+        assert_eq!(s.group_outbox_due(100).unwrap().len(), 1);
+        assert_eq!(s.group_outbox_ack_node(&a, &b, 7, &c).unwrap(), (true, true));
+        assert!(s.group_outbox_due(100).unwrap().is_empty(), "GroupAck 清空时应删除 due 索引");
+
+        s.channel_outbox_put(&a, &b, b"nonce", 10, 0, 100, b"pub").unwrap();
+        assert_eq!(s.channel_outbox_due(100).unwrap().len(), 1);
+        assert!(s.channel_outbox_del(&a, &b, b"nonce").unwrap());
+        assert!(s.channel_outbox_due(100).unwrap().is_empty(), "频道 outbox 删除应清 due 索引");
     }
 
     #[test]

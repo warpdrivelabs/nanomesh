@@ -568,7 +568,7 @@ impl Node {
                         Err(_) => {
                             if topic.neighbor_count() == 0 {
                                 let now = tokio::time::Instant::now();
-                                if last_rejoin.map_or(true, |t| now.duration_since(t) >= rejoin_backoff) {
+                                if last_rejoin.is_none_or(|t| now.duration_since(t) >= rejoin_backoff) {
                                     let _ = topic.rejoin(self.gossip_bootstrap()).await;
                                     last_rejoin = Some(now);
                                     rejoin_backoff = (rejoin_backoff * 2).min(std::time::Duration::from_secs(30));
@@ -666,7 +666,7 @@ impl Node {
                 // ── 跨节点可靠投递：持久发件箱重传（E2E ack 驱动）──
                 if let Some(store) = &ctx.store {
                     let now_m = now_ms();
-                    let rows = store.outbox_all().unwrap_or_default();
+                    let rows = store.outbox_due(now_m).unwrap_or_default();
                     for row in rows {
                         // 达 24h 期限 → 放弃：落死信(诊断/补投) + 通知本地发送方(不再静默丢) + 告警。
                         if now_m.saturating_sub(row.first_ms) > crate::OUTBOX_MAX_HORIZON_MS {
@@ -706,7 +706,7 @@ impl Node {
                     let _ = store.dedup_prune(now_m.saturating_sub(crate::OUTBOX_MAX_HORIZON_MS));
 
                     // ── 跨节点群消息可靠扇出重传（GroupAck 驱动）──
-                    let grows = store.group_outbox_all().unwrap_or_default();
+                    let grows = store.group_outbox_due(now_m).unwrap_or_default();
                     for row in grows {
                         use std::sync::atomic::Ordering::Relaxed;
                         // 达 24h 期限 → 放弃：落死信 + 告警（记尚未 ack 的成员节点数）。

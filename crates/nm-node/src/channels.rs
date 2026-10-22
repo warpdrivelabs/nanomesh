@@ -124,7 +124,6 @@ fn verify_channel_msg(m: &ChannelMsg, keyed: bool) -> bool {
 pub(crate) struct ChannelEntry {
     meta: Arc<std::sync::Mutex<Channel>>, // 频道元信息（gossip 可更新：晚订阅者据 owner 重播补全）
     subs: Arc<DashSet<Vec<u8>>>, // 本地订阅**账号**公钥（非连接 rid）；投递时各账号 → online_rids
-    seq: Arc<std::sync::atomic::AtomicU64>, // 本地发布序号（Phase 1 暂留每节点；Phase 2 换 home 全局定序）
     pub_tx: tokio::sync::mpsc::UnboundedSender<ChannelOut>, // → 频道任务：待广播的消息 / 元信息
 }
 
@@ -192,9 +191,6 @@ async fn ensure_channel(ctx: &Ctx, channel_id: &[u8], meta: Option<Channel>) -> 
         }
     };
     let subs = Arc::new(DashSet::new());
-    // seq 从持久计数器水位恢复（Phase 1 每节点；Phase 2 定序器接管）。
-    let seq0 = ctx.store.as_ref().and_then(|s| s.channel_seq_peek(channel_id).ok()).unwrap_or(1);
-    let seq = Arc::new(std::sync::atomic::AtomicU64::new(seq0));
     let (pub_tx, pub_rx) = tokio::sync::mpsc::unbounded_channel();
     // 元信息优先用持久化的（重启恢复），否则用传入的，否则空壳。
     let persisted = ctx.store.as_ref().and_then(|s| s.channel(channel_id).ok().flatten());
@@ -204,7 +200,7 @@ async fn ensure_channel(ctx: &Ctx, channel_id: &[u8], meta: Option<Channel>) -> 
             .unwrap_or(Channel { channel_id: channel_id.to_vec(), ..Default::default() }),
     ));
     // 先插入 entry 再 spawn：run_channel 首轮自检 ctx.channels.contains_key，若先 spawn 后 insert 有竞态。
-    ctx.channels.insert(channel_id.to_vec(), ChannelEntry { meta: meta.clone(), subs: subs.clone(), seq, pub_tx });
+    ctx.channels.insert(channel_id.to_vec(), ChannelEntry { meta: meta.clone(), subs: subs.clone(), pub_tx });
     tokio::spawn(run_channel(ctx.clone(), channel_id.to_vec(), topic, subs, pub_rx, meta));
     tracing::info!("channel joined");
     true
@@ -549,7 +545,7 @@ async fn maybe_backfill(ctx: &Ctx, channel_id: &[u8], live: &nm_proto::ChannelLi
 async fn retransmit_outbox(ctx: &Ctx, channel_id: &[u8], topic: &mut nm_gossip::ChannelTopic) {
     let Some(s) = &ctx.store else { return };
     let now = now_ms();
-    for row in s.channel_outbox_all().unwrap_or_default() {
+    for row in s.channel_outbox_due(now).unwrap_or_default() {
         if row.channel_id != channel_id {
             continue; // 本任务只管本频道
         }
