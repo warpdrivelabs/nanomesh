@@ -6,4 +6,5 @@ license.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+nm-transport = { path = "../crates/nm-transport" }
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }

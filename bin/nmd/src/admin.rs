@@ -5,16 +5,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::{
-    extract::State,
+    Json, Router,
+    extract::{Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
 };
 use nm_core::Directory;
 use nm_node::Node;
 use nm_proto::DirectoryQuery;
-use serde_json::{json, Value};
+use serde::Deserialize;
+use serde_json::{Value, json};
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
@@ -47,7 +48,15 @@ fn operator(headers: &axum::http::HeaderMap) -> String {
 
 /// 记一条管理审计事件：`action`=操作名，`target`=作用对象(id/域名等)，`ok`=是否成功，`detail`=补充。
 fn audit(actor: &str, action: &str, target: &str, ok: bool, detail: &str) {
-    tracing::info!(audit = true, actor, action, target, ok, detail, "ADMIN AUDIT");
+    tracing::info!(
+        audit = true,
+        actor,
+        action,
+        target,
+        ok,
+        detail,
+        "ADMIN AUDIT"
+    );
 }
 
 /// 会话链路质量 JSON（连接监控 / 对等节点共用）。
@@ -70,6 +79,40 @@ fn session_json(r: &nm_node::SessionRow) -> Value {
         "path_kind": r.path_kind,
         "remote_addr": r.remote_addr,
     })
+}
+
+const DEFAULT_PAGE_LIMIT: usize = 200;
+const MAX_PAGE_LIMIT: usize = 1000;
+
+#[derive(Deserialize, Default)]
+struct PageQuery {
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
+fn page_params(q: &PageQuery) -> (usize, usize) {
+    let offset = q.offset.unwrap_or(0);
+    let limit = q
+        .limit
+        .unwrap_or(DEFAULT_PAGE_LIMIT)
+        .clamp(1, MAX_PAGE_LIMIT);
+    (offset, limit)
+}
+
+fn page_meta(total: usize, offset: usize, limit: usize) -> Value {
+    let next = offset.checked_add(limit).filter(|n| *n < total);
+    json!({
+        "offset": offset,
+        "limit": limit,
+        "total": total,
+        "next_offset": next,
+    })
+}
+
+fn page_slice<T>(rows: &[T], offset: usize, limit: usize) -> &[T] {
+    let start = offset.min(rows.len());
+    let end = start.saturating_add(limit).min(rows.len());
+    &rows[start..end]
 }
 
 /// 进程自指标（后台每 2s 采样）。
@@ -222,48 +265,150 @@ async fn metrics(State(st): State<AppState>) -> axum::response::Response {
         let _ = writeln!(o, "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {v}");
     };
     // 到达率/可靠性计数器
-    c(&mut o, "nmd_group_fanouts_total", "group messages fanned out & tracked", f);
+    c(
+        &mut o,
+        "nmd_group_fanouts_total",
+        "group messages fanned out & tracked",
+        f,
+    );
     c(&mut o, "nmd_group_acks_total", "group acks received", acks);
-    c(&mut o, "nmd_group_retransmits_total", "group retransmits", retx);
-    c(&mut o, "nmd_group_giveups_total", "group messages given up after horizon", giveups);
-    c(&mut o, "nmd_group_ack_batches_total", "GroupAckBatch grams emitted", batches);
-    c(&mut o, "nmd_dead_letters_total", "messages dead-lettered after horizon", dead);
-    c(&mut o, "nmd_msgs_rate_limited_total", "inbound messages dropped by rate limit", ratelimited);
+    c(
+        &mut o,
+        "nmd_group_retransmits_total",
+        "group retransmits",
+        retx,
+    );
+    c(
+        &mut o,
+        "nmd_group_giveups_total",
+        "group messages given up after horizon",
+        giveups,
+    );
+    c(
+        &mut o,
+        "nmd_group_ack_batches_total",
+        "GroupAckBatch grams emitted",
+        batches,
+    );
+    c(
+        &mut o,
+        "nmd_dead_letters_total",
+        "messages dead-lettered after horizon",
+        dead,
+    );
+    c(
+        &mut o,
+        "nmd_msgs_rate_limited_total",
+        "inbound messages dropped by rate limit",
+        ratelimited,
+    );
     // 连接拒绝错误率
-    c(&mut o, "nmd_conn_rejected_banned_total", "connections rejected: banned", rj_ban);
-    c(&mut o, "nmd_conn_rejected_revoked_total", "connections rejected: revoked device", rj_rev);
-    c(&mut o, "nmd_conn_rejected_server_busy_total", "connections rejected: conn cap", rj_busy);
-    c(&mut o, "nmd_conn_rejected_rate_limited_total", "connections rejected: reconnect storm", rj_rate);
+    c(
+        &mut o,
+        "nmd_conn_rejected_banned_total",
+        "connections rejected: banned",
+        rj_ban,
+    );
+    c(
+        &mut o,
+        "nmd_conn_rejected_revoked_total",
+        "connections rejected: revoked device",
+        rj_rev,
+    );
+    c(
+        &mut o,
+        "nmd_conn_rejected_server_busy_total",
+        "connections rejected: conn cap",
+        rj_busy,
+    );
+    c(
+        &mut o,
+        "nmd_conn_rejected_rate_limited_total",
+        "connections rejected: reconnect storm",
+        rj_rate,
+    );
     // 流量
     c(&mut o, "nmd_grams_in_total", "grams received", tr.grams_in);
     c(&mut o, "nmd_grams_out_total", "grams sent", tr.grams_out);
     c(&mut o, "nmd_bytes_in_total", "bytes received", tr.bytes_in);
     c(&mut o, "nmd_bytes_out_total", "bytes sent", tr.bytes_out);
     // 换网
-    c(&mut o, "nmd_roam_changes_total", "endpoint address changes (roam)", roam_changes);
-    g(&mut o, "nmd_roam_last_change_ms", "unix ms of last roam (0=none)", roam_last_ms as f64);
+    c(
+        &mut o,
+        "nmd_roam_changes_total",
+        "endpoint address changes (roam)",
+        roam_changes,
+    );
+    g(
+        &mut o,
+        "nmd_roam_last_change_ms",
+        "unix ms of last roam (0=none)",
+        roam_last_ms as f64,
+    );
     // 送达时延直方图（send→ack，毫秒）
-    let _ = writeln!(o, "# HELP nmd_delivery_latency_ms send→ack delivery latency (ms)\n# TYPE nmd_delivery_latency_ms histogram");
+    let _ = writeln!(
+        o,
+        "# HELP nmd_delivery_latency_ms send→ack delivery latency (ms)\n# TYPE nmd_delivery_latency_ms histogram"
+    );
     for (le, cum) in &buckets {
         let _ = writeln!(o, "nmd_delivery_latency_ms_bucket{{le=\"{le}\"}} {cum}");
     }
-    let _ = writeln!(o, "nmd_delivery_latency_ms_bucket{{le=\"+Inf\"}} {lat_count}");
+    let _ = writeln!(
+        o,
+        "nmd_delivery_latency_ms_bucket{{le=\"+Inf\"}} {lat_count}"
+    );
     let _ = writeln!(o, "nmd_delivery_latency_ms_sum {lat_sum_ms}");
     let _ = writeln!(o, "nmd_delivery_latency_ms_count {lat_count}");
     // 进程 / 在线 / 死信留存
-    g(&mut o, "nmd_online_sessions", "current online sessions", st.node.online_count() as f64);
-    g(&mut o, "nmd_peers", "known federation peers", st.node.peer_count() as f64);
-    g(&mut o, "nmd_rss_bytes", "process resident memory", pm.rss_bytes as f64);
-    g(&mut o, "nmd_cpu_pct", "process cpu percent", pm.cpu_pct as f64);
-    g(&mut o, "nmd_uptime_seconds", "process uptime", st.start.elapsed().as_secs() as f64);
-    g(&mut o, "nmd_dead_letter_pending", "dead letters currently retained", st.node.dead_letter_count() as f64);
+    g(
+        &mut o,
+        "nmd_online_sessions",
+        "current online sessions",
+        st.node.online_count() as f64,
+    );
+    g(
+        &mut o,
+        "nmd_peers",
+        "known federation peers",
+        st.node.peer_count() as f64,
+    );
+    g(
+        &mut o,
+        "nmd_rss_bytes",
+        "process resident memory",
+        pm.rss_bytes as f64,
+    );
+    g(
+        &mut o,
+        "nmd_cpu_pct",
+        "process cpu percent",
+        pm.cpu_pct as f64,
+    );
+    g(
+        &mut o,
+        "nmd_uptime_seconds",
+        "process uptime",
+        st.start.elapsed().as_secs() as f64,
+    );
+    g(
+        &mut o,
+        "nmd_dead_letter_pending",
+        "dead letters currently retained",
+        st.node.dead_letter_count() as f64,
+    );
     // 各表 gauge（内存/存储增长观测）
     for (name, v) in st.node.table_sizes() {
-        let _ = writeln!(o, "# TYPE nmd_table_size gauge\nnmd_table_size{{table=\"{name}\"}} {v}");
+        let _ = writeln!(
+            o,
+            "# TYPE nmd_table_size gauge\nnmd_table_size{{table=\"{name}\"}} {v}"
+        );
     }
     let _ = writeln!(o, "# EOF");
     (
-        [(axum::http::header::CONTENT_TYPE, "application/openmetrics-text; version=1.0.0; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/openmetrics-text; version=1.0.0; charset=utf-8",
+        )],
         o,
     )
         .into_response()
@@ -289,23 +434,29 @@ async fn overview(State(st): State<AppState>) -> Json<Value> {
     }))
 }
 
-async fn connections(State(st): State<AppState>) -> Json<Value> {
-    let rows: Vec<Value> = st
-        .node
-        .sessions_snapshot()
-        .into_iter()
-        .map(|r| session_json(&r))
+async fn connections(State(st): State<AppState>, Query(q): Query<PageQuery>) -> Json<Value> {
+    let (offset, limit) = page_params(&q);
+    let rows = st.node.sessions_snapshot();
+    let total = rows.len();
+    let rows: Vec<Value> = page_slice(&rows, offset, limit)
+        .iter()
+        .map(session_json)
         .collect();
-    Json(json!({ "connections": rows }))
+    Json(json!({ "connections": rows, "page": page_meta(total, offset, limit) }))
 }
 
-async fn users(State(st): State<AppState>) -> Json<Value> {
+async fn users(State(st): State<AppState>, Query(q): Query<PageQuery>) -> Json<Value> {
+    let (offset, limit) = page_params(&q);
     let dir = st.node.directory();
-    let entities = dir.query(&DirectoryQuery::default()).await.unwrap_or_default();
+    let entities = dir
+        .query(&DirectoryQuery::default())
+        .await
+        .unwrap_or_default();
+    let total = entities.len();
     let banned_vec = st.node.banned();
     let banned_set: std::collections::HashSet<[u8; 32]> = banned_vec.iter().copied().collect();
-    let users: Vec<Value> = entities
-        .into_iter()
+    let users: Vec<Value> = page_slice(&entities, offset, limit)
+        .iter()
         .map(|e| {
             let mut idarr = [0u8; 32];
             if e.entity_id.len() == 32 {
@@ -320,18 +471,23 @@ async fn users(State(st): State<AppState>) -> Json<Value> {
         })
         .collect();
     let banned: Vec<String> = banned_vec.iter().map(|b| hex(b)).collect();
-    Json(json!({ "users": users, "banned": banned }))
+    Json(json!({ "users": users, "banned": banned, "page": page_meta(total, offset, limit) }))
 }
 
 /// 全部已登记设备（按账号分组由前端完成）：供「域内命名登记」展开某账号的设备列表 + 每个设备公钥。
-async fn devices(State(st): State<AppState>) -> Json<Value> {
-    let rows: Vec<Value> = st
-        .node
-        .devices_snapshot()
-        .into_iter()
+async fn devices(State(st): State<AppState>, Query(q): Query<PageQuery>) -> Json<Value> {
+    let (offset, limit) = page_params(&q);
+    let rows = st.node.devices_snapshot();
+    let total = rows.len();
+    let rows: Vec<Value> = page_slice(&rows, offset, limit)
+        .iter()
         .map(|d| {
-            let cert = d.cert.unwrap_or_default();
-            let label = if d.label.is_empty() { cert.label.clone() } else { d.label.clone() };
+            let cert = d.cert.clone().unwrap_or_default();
+            let label = if d.label.is_empty() {
+                cert.label.clone()
+            } else {
+                d.label.clone()
+            };
             json!({
                 "account": hex(&cert.account),   // 所属账号公钥（= 命名登记里的 pubkey）
                 "device": hex(&cert.device),     // 设备连接公钥
@@ -343,7 +499,7 @@ async fn devices(State(st): State<AppState>) -> Json<Value> {
             })
         })
         .collect();
-    Json(json!({ "devices": rows }))
+    Json(json!({ "devices": rows, "page": page_meta(total, offset, limit) }))
 }
 
 async fn storage(State(st): State<AppState>) -> Json<Value> {
@@ -372,8 +528,10 @@ async fn system(State(st): State<AppState>) -> Json<Value> {
     let pm = *st.proc.lock().unwrap();
     let addr = st.node.addr();
     let (roam_changes, roam_last_ms) = st.node.roam_snapshot();
-    let (grp_fanouts, grp_acks, grp_retx, grp_giveups, grp_ack_batches, grp_dead, grp_ratelimited) = st.node.group_metrics_snapshot();
-    let (presence_pulls, presence_pull_cache_hits, presence_pull_errors) = st.node.presence_stat_snapshot();
+    let (grp_fanouts, grp_acks, grp_retx, grp_giveups, grp_ack_batches, grp_dead, grp_ratelimited) =
+        st.node.group_metrics_snapshot();
+    let (presence_pulls, presence_pull_cache_hits, presence_pull_errors) =
+        st.node.presence_stat_snapshot();
     let (pkarr_resolve_ok, pkarr_resolve_fail) = st.node.pkarr_stat_snapshot();
     let (admission_enabled, admission_anchors) = st.node.admission_status();
     let tables: serde_json::Map<String, Value> = st
@@ -434,7 +592,8 @@ async fn identity(State(st): State<AppState>) -> Json<Value> {
     }))
 }
 
-async fn peers(State(st): State<AppState>) -> Json<Value> {
+async fn peers(State(st): State<AppState>, Query(q): Query<PageQuery>) -> Json<Value> {
+    let (offset, limit) = page_params(&q);
     // 活动会话按 id 索引，与联邦 peers 目录 join → 连通性 / 链路质量。
     let sessions: std::collections::HashMap<String, nm_node::SessionRow> = st
         .node
@@ -484,13 +643,15 @@ async fn peers(State(st): State<AppState>) -> Json<Value> {
         })
         .collect();
     let total = peers.len();
+    let page_rows: Vec<Value> = page_slice(&peers, offset, limit).to_vec();
     Json(json!({
-        "peers": peers,
+        "peers": page_rows,
         "federation": st.federation,
         "self_id": hex(st.node.id().as_bytes()),
         "online": online,
         "offline": total.saturating_sub(online),
         "total": total,
+        "page": page_meta(total, offset, limit),
     }))
 }
 
@@ -499,38 +660,81 @@ struct IdReq {
     id: String,
 }
 
-async fn ban(State(st): State<AppState>, headers: axum::http::HeaderMap, Json(r): Json<IdReq>) -> Result<Json<Value>, StatusCode> {
+async fn ban(
+    State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(r): Json<IdReq>,
+) -> Result<Json<Value>, StatusCode> {
     let op = operator(&headers);
-    let id = parse_id(&r.id).ok_or_else(|| { audit(&op, "ban", &r.id, false, "bad id"); StatusCode::BAD_REQUEST })?;
+    let id = parse_id(&r.id).ok_or_else(|| {
+        audit(&op, "ban", &r.id, false, "bad id");
+        StatusCode::BAD_REQUEST
+    })?;
     st.node.ban(id);
     audit(&op, "ban", &r.id, true, "");
     Ok(Json(json!({ "ok": true })))
 }
-async fn unban(State(st): State<AppState>, headers: axum::http::HeaderMap, Json(r): Json<IdReq>) -> Result<Json<Value>, StatusCode> {
+async fn unban(
+    State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(r): Json<IdReq>,
+) -> Result<Json<Value>, StatusCode> {
     let op = operator(&headers);
-    let id = parse_id(&r.id).ok_or_else(|| { audit(&op, "unban", &r.id, false, "bad id"); StatusCode::BAD_REQUEST })?;
+    let id = parse_id(&r.id).ok_or_else(|| {
+        audit(&op, "unban", &r.id, false, "bad id");
+        StatusCode::BAD_REQUEST
+    })?;
     st.node.unban(id);
     audit(&op, "unban", &r.id, true, "");
     Ok(Json(json!({ "ok": true })))
 }
-async fn kick(State(st): State<AppState>, headers: axum::http::HeaderMap, Json(r): Json<IdReq>) -> Result<Json<Value>, StatusCode> {
+async fn kick(
+    State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(r): Json<IdReq>,
+) -> Result<Json<Value>, StatusCode> {
     let op = operator(&headers);
-    let id = parse_id(&r.id).ok_or_else(|| { audit(&op, "kick", &r.id, false, "bad id"); StatusCode::BAD_REQUEST })?;
+    let id = parse_id(&r.id).ok_or_else(|| {
+        audit(&op, "kick", &r.id, false, "bad id");
+        StatusCode::BAD_REQUEST
+    })?;
     let cut = st.node.kick(id);
-    audit(&op, "kick", &r.id, true, if cut { "cut live session" } else { "no live session" });
+    audit(
+        &op,
+        "kick",
+        &r.id,
+        true,
+        if cut {
+            "cut live session"
+        } else {
+            "no live session"
+        },
+    );
     Ok(Json(json!({ "ok": true, "cut": cut })))
 }
 
 /// P0-2 在线备份：把当前 nmd.redb 一致快照拷到 `dest`（绝对路径或相对 nmd 工作目录）。
 #[derive(serde::Deserialize)]
-struct BackupReq { dest: String }
+struct BackupReq {
+    dest: String,
+}
 
-async fn backup(State(st): State<AppState>, headers: axum::http::HeaderMap, Json(r): Json<BackupReq>) -> Result<Json<Value>, StatusCode> {
+async fn backup(
+    State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(r): Json<BackupReq>,
+) -> Result<Json<Value>, StatusCode> {
     let op = operator(&headers);
     let dest = std::path::PathBuf::from(&r.dest);
     match st.node.backup_db(&dest) {
-        Ok(n) => { audit(&op, "backup", &r.dest, true, &format!("{n} bytes")); Ok(Json(json!({ "ok": true, "bytes": n, "dest": r.dest }))) }
-        Err(e) => { audit(&op, "backup", &r.dest, false, &e); Err(StatusCode::INTERNAL_SERVER_ERROR) }
+        Ok(n) => {
+            audit(&op, "backup", &r.dest, true, &format!("{n} bytes"));
+            Ok(Json(json!({ "ok": true, "bytes": n, "dest": r.dest })))
+        }
+        Err(e) => {
+            audit(&op, "backup", &r.dest, false, &e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
     }
 }
 
@@ -554,10 +758,26 @@ async fn admission_issue(
         audit(&op, "admission.issue", &r.subject, false, "bad subject id");
         StatusCode::BAD_REQUEST
     })?;
-    let federation = if r.federation.trim().is_empty() { "nmspace".to_string() } else { r.federation.trim().to_string() };
-    let expires_ms = if r.ttl_secs == 0 { 0 } else { nm_proto::now_ms() + r.ttl_secs * 1000 };
-    let (grant_hex, issuer_hex) = st.node.issue_admission_hex(subject, &federation, expires_ms);
-    audit(&op, "admission.issue", &r.subject, true, &format!("fed={federation} exp={expires_ms}"));
+    let federation = if r.federation.trim().is_empty() {
+        "nmspace".to_string()
+    } else {
+        r.federation.trim().to_string()
+    };
+    let expires_ms = if r.ttl_secs == 0 {
+        0
+    } else {
+        nm_proto::now_ms() + r.ttl_secs * 1000
+    };
+    let (grant_hex, issuer_hex) = st
+        .node
+        .issue_admission_hex(subject, &federation, expires_ms);
+    audit(
+        &op,
+        "admission.issue",
+        &r.subject,
+        true,
+        &format!("fed={federation} exp={expires_ms}"),
+    );
     Ok(Json(json!({
         "ok": true,
         "grant": grant_hex,   // 下发给 subject 节点：其 set_admission_grant(此 hex) 后出示
@@ -591,7 +811,10 @@ async fn add_peer(
     Json(r): Json<PeerReq>,
 ) -> Result<Json<Value>, StatusCode> {
     let op = operator(&headers);
-    let node_id = parse_id(&r.id).ok_or_else(|| { audit(&op, "add-peer", &r.id, false, "bad id"); StatusCode::BAD_REQUEST })?;
+    let node_id = parse_id(&r.id).ok_or_else(|| {
+        audit(&op, "add-peer", &r.id, false, "bad id");
+        StatusCode::BAD_REQUEST
+    })?;
     let info = nm_node::PeerInfo {
         name: r.name,
         address: r.address,
@@ -602,9 +825,10 @@ async fn add_peer(
         last_seen: 0,
         federation: st.federation.clone(),
     };
-    st.node
-        .add_peer_full(node_id, info)
-        .map_err(|_| { audit(&op, "add-peer", &r.id, false, "add failed"); StatusCode::BAD_REQUEST })?;
+    st.node.add_peer_full(node_id, info).map_err(|_| {
+        audit(&op, "add-peer", &r.id, false, "add failed");
+        StatusCode::BAD_REQUEST
+    })?;
     audit(&op, "add-peer", &r.id, true, "");
     Ok(Json(json!({ "ok": true, "peers": st.node.peer_count() })))
 }
@@ -615,10 +839,21 @@ async fn remove_peer(
     Json(r): Json<IdReq>,
 ) -> Result<Json<Value>, StatusCode> {
     let op = operator(&headers);
-    let id = parse_id(&r.id).ok_or_else(|| { audit(&op, "remove-peer", &r.id, false, "bad id"); StatusCode::BAD_REQUEST })?;
+    let id = parse_id(&r.id).ok_or_else(|| {
+        audit(&op, "remove-peer", &r.id, false, "bad id");
+        StatusCode::BAD_REQUEST
+    })?;
     let existed = st.node.remove_peer(id);
-    audit(&op, "remove-peer", &r.id, true, if existed { "removed" } else { "not present" });
-    Ok(Json(json!({ "ok": true, "existed": existed, "peers": st.node.peer_count() })))
+    audit(
+        &op,
+        "remove-peer",
+        &r.id,
+        true,
+        if existed { "removed" } else { "not present" },
+    );
+    Ok(Json(
+        json!({ "ok": true, "existed": existed, "peers": st.node.peer_count() }),
+    ))
 }
 
 // ── 去中心命名：本节点域名 + 域内命名 CRUD（注册商）──
@@ -636,14 +871,24 @@ struct DecisionReq {
     domain: String,
     approved: bool,
 }
-async fn names_domain_decision(State(st): State<AppState>, headers: axum::http::HeaderMap, Json(r): Json<DecisionReq>) -> Json<Value> {
+async fn names_domain_decision(
+    State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(r): Json<DecisionReq>,
+) -> Json<Value> {
     let op = operator(&headers);
     let Some(id) = parse_id(&r.node_id) else {
         audit(&op, "domain-decision", &r.domain, false, "bad node id");
         return Json(json!({ "ok": false, "error": "node id 须为 64 位十六进制" }));
     };
     st.node.publish_domain_decision(id, &r.domain, r.approved);
-    audit(&op, "domain-decision", &r.domain, true, if r.approved { "approved" } else { "rejected" });
+    audit(
+        &op,
+        "domain-decision",
+        &r.domain,
+        true,
+        if r.approved { "approved" } else { "rejected" },
+    );
     Json(json!({ "ok": true }))
 }
 async fn names_domain_notices(State(st): State<AppState>) -> Json<Value> {
@@ -656,11 +901,27 @@ async fn names_domain_notices(State(st): State<AppState>) -> Json<Value> {
     notices.sort_by(|a, b| b["at_ms"].as_u64().cmp(&a["at_ms"].as_u64()));
     Json(json!({ "notices": notices }))
 }
-async fn names_domain_add(State(st): State<AppState>, headers: axum::http::HeaderMap, Json(r): Json<DomainReq>) -> Json<Value> {
+async fn names_domain_add(
+    State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(r): Json<DomainReq>,
+) -> Json<Value> {
     let op = operator(&headers);
     match st.node.add_domain(&r.domain) {
-        Ok(added) => { audit(&op, "domain-add", &r.domain, true, if added { "claimed" } else { "already owned" }); Json(json!({ "ok": true, "added": added, "domains": st.node.owned_domains() })) }
-        Err(e) => { audit(&op, "domain-add", &r.domain, false, &e); Json(json!({ "ok": false, "error": e })) }
+        Ok(added) => {
+            audit(
+                &op,
+                "domain-add",
+                &r.domain,
+                true,
+                if added { "claimed" } else { "already owned" },
+            );
+            Json(json!({ "ok": true, "added": added, "domains": st.node.owned_domains() }))
+        }
+        Err(e) => {
+            audit(&op, "domain-add", &r.domain, false, &e);
+            Json(json!({ "ok": false, "error": e }))
+        }
     }
 }
 
@@ -689,16 +950,29 @@ struct NameSetReq {
     local_part: String,
     pubkey: String,
 }
-async fn names_set(State(st): State<AppState>, headers: axum::http::HeaderMap, Json(r): Json<NameSetReq>) -> Json<Value> {
+async fn names_set(
+    State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(r): Json<NameSetReq>,
+) -> Json<Value> {
     let op = operator(&headers);
     let full = format!("{}@{}", r.local_part, r.domain);
     let pk = match parse_id(&r.pubkey) {
         Some(x) => x,
-        None => { audit(&op, "name-set", &full, false, "bad pubkey"); return Json(json!({ "ok": false, "error": "非法公钥（需 64 位 hex）" })); }
+        None => {
+            audit(&op, "name-set", &full, false, "bad pubkey");
+            return Json(json!({ "ok": false, "error": "非法公钥（需 64 位 hex）" }));
+        }
     };
     match st.node.admin_set_name(&r.domain, &r.local_part, pk) {
-        Ok(rec) => { audit(&op, "name-set", &full, true, ""); Json(json!({ "ok": true, "name": format!("{}@{}", rec.local_part, rec.domain) })) }
-        Err(e) => { audit(&op, "name-set", &full, false, &e); Json(json!({ "ok": false, "error": e })) }
+        Ok(rec) => {
+            audit(&op, "name-set", &full, true, "");
+            Json(json!({ "ok": true, "name": format!("{}@{}", rec.local_part, rec.domain) }))
+        }
+        Err(e) => {
+            audit(&op, "name-set", &full, false, &e);
+            Json(json!({ "ok": false, "error": e }))
+        }
     }
 }
 
@@ -716,11 +990,20 @@ async fn names_del(State(st): State<AppState>, Json(r): Json<NameDelReq>) -> Jso
 
 /// P1-10 配置热加载：重读配置文件，热应用可运行时变更的子集（黑名单/对等/per_topic/pkarr/域名）；
 /// 需重绑的项（relay URL/端口/身份/db/max_connections）在返回 detail 里提示需重启。
-async fn reload(State(st): State<AppState>, headers: axum::http::HeaderMap) -> Result<Json<Value>, StatusCode> {
+async fn reload(
+    State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<Value>, StatusCode> {
     let op = operator(&headers);
     match crate::reload_config_from(&st.config_path, &st.node) {
-        Ok(summary) => { audit(&op, "reload", &st.config_path, true, &summary); Ok(Json(json!({ "ok": true, "summary": summary }))) }
-        Err(e) => { audit(&op, "reload", &st.config_path, false, &e.to_string()); Err(StatusCode::INTERNAL_SERVER_ERROR) }
+        Ok(summary) => {
+            audit(&op, "reload", &st.config_path, true, &summary);
+            Ok(Json(json!({ "ok": true, "summary": summary })))
+        }
+        Err(e) => {
+            audit(&op, "reload", &st.config_path, false, &e.to_string());
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
     }
 }
 
@@ -733,7 +1016,8 @@ fn spawn_proc_sampler(slot: Arc<Mutex<ProcMetrics>>) {
         loop {
             sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
             if let Some(p) = sys.process(pid)
-                && let Ok(mut m) = slot.lock() {
+                && let Ok(mut m) = slot.lock()
+            {
                 m.rss_bytes = p.memory();
                 m.cpu_pct = p.cpu_usage();
             }

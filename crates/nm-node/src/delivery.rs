@@ -1,11 +1,13 @@
 use nm_core::Directory;
-use nm_proto::{now_ms, Gram, Group, GroupGossip};
-use nm_transport::{write_gram, IrohConnection};
+use nm_proto::{Gram, Group, GroupGossip, now_ms};
+use nm_transport::{IrohConnection, write_gram};
 use prost::Message;
 
 use crate::retire::inbox_retireable;
 use crate::s2s::fed_relay;
-use crate::{Ctx, Devices, Principals, Sessions, LIVE_TTL_MS, PENDING_FWD_CAP};
+use crate::{Ctx, Devices, LIVE_TTL_MS, PENDING_FWD_CAP, Principals, Sessions};
+
+const INBOX_DRAIN_PAGE_LIMIT: usize = 256;
 
 /// 某群主题的 bootstrap 对端：群归属节点(锚点) + 本节点已知对等 + F2 pkarr 解析到的 seed（无锚/兜底）。
 pub(crate) fn group_bootstrap(group: &Group, ctx: &Ctx) -> Vec<[u8; 32]> {
@@ -93,7 +95,12 @@ pub(crate) fn names_bootstrap(domain: &str, ctx: &Ctx) -> Vec<[u8; 32]> {
 
 /// 把群消息投递给「本节点负责的成员」：在线设备直投；本节点是其 home 则离线设备入库。
 /// 发送方自己的其它设备也会收到（已发同步），只跳过发出这条消息的连接 `skip_rid`。
-pub(crate) async fn deliver_group_here(gram: &Gram, members: &[Vec<u8>], skip_rid: &[u8], ctx: &Ctx) {
+pub(crate) async fn deliver_group_here(
+    gram: &Gram,
+    members: &[Vec<u8>],
+    skip_rid: &[u8],
+    ctx: &Ctx,
+) {
     for m in members {
         let home_here = is_home_here(ctx, m);
         deliver_account(m, gram, ctx, home_here, Some(skip_rid)).await;
@@ -114,7 +121,9 @@ pub(crate) fn is_home_here(ctx: &Ctx, account: &[u8]) -> bool {
     }
     // 仅当 directory 无该账号的 home_node 记录时（老数据/entity 尚未同步），才回退到
     // "本节点有其设备" —— 此时无更好的单一权威可依。
-    ctx.devices.iter().any(|d| d.cert.as_ref().is_some_and(|c| c.account == account))
+    ctx.devices
+        .iter()
+        .any(|d| d.cert.as_ref().is_some_and(|c| c.account == account))
 }
 
 /// 账号当前在本节点的在线连接：账号公钥直连（老客户端）+ hello 过的设备连接
@@ -170,7 +179,10 @@ fn inbox_targets(ctx: &Ctx, account: &[u8]) -> Vec<Vec<u8>> {
     let devs: Vec<Vec<u8>> = ctx
         .devices
         .iter()
-        .filter(|d| d.cert.as_ref().is_some_and(|c| c.account == account) && !ctx.revoked.contains_key(d.key()))
+        .filter(|d| {
+            d.cert.as_ref().is_some_and(|c| c.account == account)
+                && !ctx.revoked.contains_key(d.key())
+        })
         .map(|d| d.key().clone())
         .collect();
     if devs.is_empty() {
@@ -221,11 +233,14 @@ pub(crate) async fn deliver_account(
                 })
                 .collect();
             if !targets.is_empty() {
-                let items: Vec<(&[u8], &Gram)> = targets.iter().map(|d| (d.as_slice(), gram)).collect();
+                let items: Vec<(&[u8], &Gram)> =
+                    targets.iter().map(|d| (d.as_slice(), gram)).collect();
                 if let Err(e) = s.push_inbox_batch(&items) {
                     // 补偿：批量(None durability)失败 → 逐条用 push_inbox(Immediate)重试，提高落库成功率，
                     // 不静默丢消息。逐条仍失败才告警（redb 真故障，需运维介入）。
-                    tracing::warn!("push_inbox_batch failed: {e}; falling back to per-device insert");
+                    tracing::warn!(
+                        "push_inbox_batch failed: {e}; falling back to per-device insert"
+                    );
                     for d in &targets {
                         if let Err(e2) = s.push_inbox(d, gram) {
                             tracing::error!(device = %crate::records::hex_encode(&d[..d.len().min(4)]),
@@ -260,17 +275,43 @@ pub(crate) async fn deliver_account(
 /// 待收到该连接(设备)回送的 Receipt 再由 clear_inbox_on_receipt 逐条删除（at-least-once 可靠补投）。
 pub(crate) fn drain_inbox_to(ctx: &Ctx, rid: &[u8], conn: &IrohConnection) {
     let Some(store) = &ctx.store else { return };
-    let Ok(pending) = store.peek_inbox(rid) else { return };
-    if pending.is_empty() {
+    let Ok(total) = store.inbox_len(rid) else {
+        return;
+    };
+    if total == 0 {
         return;
     }
+    let store = store.clone();
+    let rid = rid.to_vec();
     let c = conn.clone();
-    tracing::info!(count = pending.len(), "delivering offline inbox");
+    tracing::info!(
+        count = total,
+        page_limit = INBOX_DRAIN_PAGE_LIMIT,
+        "delivering offline inbox"
+    );
     ctx.tracker.spawn(async move {
-        for g in pending {
-            if let Ok(mut s) = c.open_uni().await {
-                let _ = write_gram(&mut s, &g).await;
-                let _ = s.finish();
+        let mut after = None;
+        loop {
+            let page = match store.peek_inbox_page(&rid, after, INBOX_DRAIN_PAGE_LIMIT) {
+                Ok(page) => page,
+                Err(e) => {
+                    tracing::warn!("paged inbox read failed: {e}");
+                    break;
+                }
+            };
+            if page.is_empty() {
+                break;
+            }
+            let page_len = page.len();
+            for g in page {
+                after = Some(g.gram_id);
+                if let Ok(mut s) = c.open_uni().await {
+                    let _ = write_gram(&mut s, &g).await;
+                    let _ = s.finish();
+                }
+            }
+            if page_len < INBOX_DRAIN_PAGE_LIMIT {
+                break;
             }
         }
     });
@@ -279,7 +320,12 @@ pub(crate) fn drain_inbox_to(ctx: &Ctx, rid: &[u8], conn: &IrohConnection) {
 /// 送达回执到达后，清理该设备/账号在本节点的离线副本（Tier2 best-effort）。
 /// 只删发来回执的那台设备(rid)的副本 + 老账号级 key 兜底；不删该账号其它设备的副本
 /// ——它们各自收到并各自回执后再删，保证每台设备都可靠补投。
-pub(crate) fn clear_inbox_on_receipt(ctx: &Ctx, acking_rid: &[u8], acking_account: &[u8], gram_id: u64) {
+pub(crate) fn clear_inbox_on_receipt(
+    ctx: &Ctx,
+    acking_rid: &[u8],
+    acking_account: &[u8],
+    gram_id: u64,
+) {
     let Some(store) = &ctx.store else { return };
     let _ = store.del_inbox_one(acking_rid, gram_id);
     let _ = store.del_inbox_one(acking_account, gram_id);
@@ -289,11 +335,20 @@ pub(crate) fn clear_inbox_on_receipt(ctx: &Ctx, acking_rid: &[u8], acking_accoun
 /// 客户端据 `ref_gram_id` 把对应气泡标记为未送达"!"；在线直推 + 离线入库（重连可见）。best-effort。
 pub(crate) const DELIVERY_FAILED_TYPE: &str = "nmspace.v1/delivery.failed";
 
-pub(crate) async fn notify_delivery_failed(ctx: &Ctx, sender: &[u8], receiver: &[u8], failed_gram_id: u64, reason: &str) {
+pub(crate) async fn notify_delivery_failed(
+    ctx: &Ctx,
+    sender: &[u8],
+    receiver: &[u8],
+    failed_gram_id: u64,
+    reason: &str,
+) {
     let value = format!(
         "{{\"to\":\"{}\",\"gram_id\":{},\"reason\":\"{}\"}}",
-        crate::records::hex_encode(receiver), failed_gram_id, reason
-    ).into_bytes();
+        crate::records::hex_encode(receiver),
+        failed_gram_id,
+        reason
+    )
+    .into_bytes();
     let fg = Gram {
         version: nm_proto::PROTOCOL_VERSION,
         kind: nm_proto::GramKind::Message as i32,
@@ -302,7 +357,10 @@ pub(crate) async fn notify_delivery_failed(ctx: &Ctx, sender: &[u8], receiver: &
         sender: ctx.node_id.to_vec(),      // 系统/home 节点署名
         receiver: sender.to_vec(),
         timestamp_ms: now_ms(),
-        payload: Some(nm_proto::Any { type_url: DELIVERY_FAILED_TYPE.into(), value }),
+        payload: Some(nm_proto::Any {
+            type_url: DELIVERY_FAILED_TYPE.into(),
+            value,
+        }),
         crc: Vec::new(),
     };
     // 发送方为本节点本地账号（outbox 在其 home）→ 直投其在线设备 + 离线入库。
@@ -335,14 +393,22 @@ pub(crate) async fn deliver_direct(gram: &Gram, ctx: &Ctx, track: bool) {
         if let Some(s) = &ctx.store {
             let now = now_ms();
             let first_due = now + crate::OUTBOX_BACKOFF_MS[0];
-            if let Err(e) = s.outbox_put(&gram.sender, to, gram.gram_id, now, 0, first_due, &bytes) {
+            if let Err(e) = s.outbox_put(&gram.sender, to, gram.gram_id, now, 0, first_due, &bytes)
+            {
                 tracing::error!("outbox persist FAILED (cross-node delivery not guaranteed): {e}");
             }
         }
     }
     let per_topic = ctx.per_topic.load(std::sync::atomic::Ordering::Relaxed);
     let retire = per_topic
-        && inbox_retireable(to, &ctx.node_id, &ctx.dir.entities, &ctx.per_group_live, now_ms(), LIVE_TTL_MS);
+        && inbox_retireable(
+            to,
+            &ctx.node_id,
+            &ctx.dir.entities,
+            &ctx.per_group_live,
+            now_ms(),
+            LIVE_TTL_MS,
+        );
     let mut inbox_ok = false;
     if per_topic {
         let _ = ctx.fed.join_inbox(to, inbox_bootstrap(to, ctx)).await;
@@ -427,12 +493,11 @@ pub(crate) async fn deliver_or_store(to: &[u8], gram: &Gram, ctx: &Ctx) {
     }
 }
 
-
 #[cfg(test)]
 mod home_here_tests {
     use super::*;
-    use nm_proto::pb::{DeviceCert, DeviceInfo, Entity};
     use crate::Node;
+    use nm_proto::pb::{DeviceCert, DeviceInfo, Entity};
 
     /// 回归：账号的 home 在**别的**节点，但其旧设备 cert 残留在本节点 devices 表时，
     /// is_home_here 必须返回 false——否则 deliver_direct 会把跨节点消息误投本地离线库并 return、
@@ -457,14 +522,20 @@ mod home_here_tests {
         ctx.devices.insert(
             dev_key.clone(),
             DeviceInfo {
-                cert: Some(DeviceCert { account: account.clone(), device: dev_key.clone(), ..Default::default() }),
+                cert: Some(DeviceCert {
+                    account: account.clone(),
+                    device: dev_key.clone(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         );
 
         // 修复前：devices.any() 命中 → 误判 true（消息困死本节点）。修复后：以 home_node 为准 → false。
-        assert!(!is_home_here(&ctx, &account),
-            "home_node 指向他节点时，本地残留设备 cert 不应让本节点误判为 home");
+        assert!(
+            !is_home_here(&ctx, &account),
+            "home_node 指向他节点时，本地残留设备 cert 不应让本节点误判为 home"
+        );
 
         // 对照：账号 home_node 正是本节点 → true（正常本地投递）。
         let local_acct = vec![50u8; 32];
@@ -474,7 +545,10 @@ mod home_here_tests {
             updated_at: 100,
             ..Default::default()
         });
-        assert!(is_home_here(&ctx, &local_acct), "home_node==本节点应为 home");
+        assert!(
+            is_home_here(&ctx, &local_acct),
+            "home_node==本节点应为 home"
+        );
 
         // 对照：directory 无 home_node 记录（老数据）但本地有设备 → 回退设备判定 true。
         let legacy_acct = vec![60u8; 32];
@@ -482,11 +556,18 @@ mod home_here_tests {
         ctx.devices.insert(
             legacy_dev.clone(),
             DeviceInfo {
-                cert: Some(DeviceCert { account: legacy_acct.clone(), device: legacy_dev, ..Default::default() }),
+                cert: Some(DeviceCert {
+                    account: legacy_acct.clone(),
+                    device: legacy_dev,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         );
-        assert!(is_home_here(&ctx, &legacy_acct), "无 entity 记录时回退到设备判定");
+        assert!(
+            is_home_here(&ctx, &legacy_acct),
+            "无 entity 记录时回退到设备判定"
+        );
     }
 
     /// 回归（C）：device.list 的 caller 退化为「设备 rid」（hello 未完成/首连时）时，
@@ -506,7 +587,11 @@ mod home_here_tests {
         ctx.devices.insert(
             dev_rid.clone(),
             DeviceInfo {
-                cert: Some(DeviceCert { account: account.clone(), device: dev_rid.clone(), ..Default::default() }),
+                cert: Some(DeviceCert {
+                    account: account.clone(),
+                    device: dev_rid.clone(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         );
@@ -515,9 +600,14 @@ mod home_here_tests {
         let (ok, result, _) = device_list(&ctx, &dev_rid, &dev_rid);
         assert!(ok);
         let list = DeviceList::decode(result.unwrap().value.as_slice()).unwrap();
-        assert_eq!(list.devices.len(), 1, "caller 退化为设备 rid 时也应解析出账号并列出其设备");
         assert_eq!(
-            list.devices[0].cert.as_ref().unwrap().account, account,
+            list.devices.len(),
+            1,
+            "caller 退化为设备 rid 时也应解析出账号并列出其设备"
+        );
+        assert_eq!(
+            list.devices[0].cert.as_ref().unwrap().account,
+            account,
             "列出的应是该设备所属账号的设备"
         );
 

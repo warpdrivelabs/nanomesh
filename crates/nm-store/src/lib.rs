@@ -6,7 +6,10 @@
 //!   前缀 range 扫描即可取某实体的全部离线消息，`gram_id` 单调保证 FIFO。
 //! - `ENTITIES`：key = `entity_id(32)`，value = prost 编码的 `Entity`（目录持久化）。
 
-use nm_proto::{now_ms, BlobData, Channel, ChannelMsg, DeviceInfo, DeviceRevoke, Entity, Gram, Group, NameRecord};
+use nm_proto::{
+    BlobData, Channel, ChannelMsg, DeviceInfo, DeviceRevoke, Entity, Gram, Group, NameRecord,
+    now_ms,
+};
 use prost::Message;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 
@@ -68,7 +71,8 @@ const CHANNEL_INTAKE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("chan
 /// val = first_ms(8)++retries(4)++next_due_ms(8)++pubreq_bytes。看到自己的 sequenced 消息/收 PubReject 即删。
 const CHANNEL_OUTBOX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("channel_outbox");
 /// CHANNEL_OUTBOX 到期索引：key = next_due_ms(8BE)++CHANNEL_OUTBOX.key，value=空。
-const CHANNEL_OUTBOX_DUE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("channel_outbox_due");
+const CHANNEL_OUTBOX_DUE: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("channel_outbox_due");
 /// P0-2 模式元信息：key = "version"(u32 BE) / "magic"(DB_MAGIC) / "last_backup_ms"(u64 BE)。
 /// 打开时据此判定新库/旧库并跑迁移链；版本高于本二进制即拒绝启动（防降级静默丢数据）。
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
@@ -215,12 +219,22 @@ impl RedbStore {
             ))),
             Some(mut v) => {
                 self.verify_magic()?;
-                while v < SCHEMA_VERSION { self.migrate(v, v + 1)?; v += 1; }
+                while v < SCHEMA_VERSION {
+                    self.migrate(v, v + 1)?;
+                    v += 1;
+                }
                 self.stamp_schema()
             }
             None => {
-                let mut v = if self.looks_empty()? { SCHEMA_VERSION } else { 0 };
-                while v < SCHEMA_VERSION { self.migrate(v, v + 1)?; v += 1; }
+                let mut v = if self.looks_empty()? {
+                    SCHEMA_VERSION
+                } else {
+                    0
+                };
+                while v < SCHEMA_VERSION {
+                    self.migrate(v, v + 1)?;
+                    v += 1;
+                }
                 self.stamp_schema()
             }
         }
@@ -229,7 +243,9 @@ impl RedbStore {
     fn meta_get_u32(&self, key: &str) -> Result<Option<u32>> {
         let rtx = self.db.begin_read().map_err(db_err)?;
         let t = rtx.open_table(META).map_err(db_err)?;
-        Ok(t.get(key).map_err(db_err)?.and_then(|v| v.value().try_into().ok().map(u32::from_be_bytes)))
+        Ok(t.get(key)
+            .map_err(db_err)?
+            .and_then(|v| v.value().try_into().ok().map(u32::from_be_bytes)))
     }
 
     fn verify_magic(&self) -> Result<()> {
@@ -237,7 +253,9 @@ impl RedbStore {
         let t = rtx.open_table(META).map_err(db_err)?;
         match t.get("magic").map_err(db_err)? {
             Some(m) if m.value() == DB_MAGIC => Ok(()),
-            Some(_) => Err(StoreError::Db("db magic 不符：这不是 nmspace nmd 存储文件".into())),
+            Some(_) => Err(StoreError::Db(
+                "db magic 不符：这不是 nmspace nmd 存储文件".into(),
+            )),
             None => Ok(()), // 迁移中途尚未写 magic，容忍
         }
     }
@@ -246,7 +264,8 @@ impl RedbStore {
         let wtx = self.db.begin_write().map_err(db_err)?;
         {
             let mut t = wtx.open_table(META).map_err(db_err)?;
-            t.insert("version", SCHEMA_VERSION.to_be_bytes().as_slice()).map_err(db_err)?;
+            t.insert("version", SCHEMA_VERSION.to_be_bytes().as_slice())
+                .map_err(db_err)?;
             t.insert("magic", DB_MAGIC).map_err(db_err)?;
         }
         wtx.commit().map_err(db_err)?;
@@ -257,7 +276,9 @@ impl RedbStore {
     fn looks_empty(&self) -> Result<bool> {
         let rtx = self.db.begin_read().map_err(db_err)?;
         for td in [ENTITIES, INBOX, DEVICES, CHANNELS, GROUPS, NAMES] {
-            if rtx.open_table(td).map_err(db_err)?.len().map_err(db_err)? > 0 { return Ok(false); }
+            if rtx.open_table(td).map_err(db_err)?.len().map_err(db_err)? > 0 {
+                return Ok(false);
+            }
         }
         Ok(true)
     }
@@ -280,19 +301,26 @@ impl RedbStore {
             let rtx = self.db.begin_read().map_err(db_err)?;
             let t = rtx.open_table(INBOX).map_err(db_err)?;
             let mut v = Vec::new();
-            for it in t.iter().map_err(db_err)? { let (k, val) = it.map_err(db_err)?; v.push((k.value().to_vec(), val.value().to_vec())); }
+            for it in t.iter().map_err(db_err)? {
+                let (k, val) = it.map_err(db_err)?;
+                v.push((k.value().to_vec(), val.value().to_vec()));
+            }
             v
         };
         if !rows.is_empty() {
             let wtx = self.db.begin_write().map_err(db_err)?;
-            { let mut t = wtx.open_table(INBOX).map_err(db_err)?;
-              for (k, raw) in &rows {
-                  let recv = Gram::decode(raw.as_slice()).map(|g| g.timestamp_ms.min(now)).unwrap_or(now);
-                  let mut nv = Vec::with_capacity(8 + raw.len());
-                  nv.extend_from_slice(&recv.to_be_bytes());
-                  nv.extend_from_slice(raw);
-                  t.insert(k.as_slice(), nv.as_slice()).map_err(db_err)?;
-              } }
+            {
+                let mut t = wtx.open_table(INBOX).map_err(db_err)?;
+                for (k, raw) in &rows {
+                    let recv = Gram::decode(raw.as_slice())
+                        .map(|g| g.timestamp_ms.min(now))
+                        .unwrap_or(now);
+                    let mut nv = Vec::with_capacity(8 + raw.len());
+                    nv.extend_from_slice(&recv.to_be_bytes());
+                    nv.extend_from_slice(raw);
+                    t.insert(k.as_slice(), nv.as_slice()).map_err(db_err)?;
+                }
+            }
             wtx.commit().map_err(db_err)?;
         }
         // CHANNEL_INTAKE：seq(8) → seq(8)++ts(8)（ts=now，自升级起计龄）。
@@ -300,20 +328,31 @@ impl RedbStore {
             let rtx = self.db.begin_read().map_err(db_err)?;
             let t = rtx.open_table(CHANNEL_INTAKE).map_err(db_err)?;
             let mut v = Vec::new();
-            for it in t.iter().map_err(db_err)? { let (k, val) = it.map_err(db_err)?; v.push((k.value().to_vec(), val.value().to_vec())); }
+            for it in t.iter().map_err(db_err)? {
+                let (k, val) = it.map_err(db_err)?;
+                v.push((k.value().to_vec(), val.value().to_vec()));
+            }
             v
         };
         if !irows.is_empty() {
             let wtx = self.db.begin_write().map_err(db_err)?;
-            { let mut t = wtx.open_table(CHANNEL_INTAKE).map_err(db_err)?;
-              for (k, val) in &irows {
-                  if val.len() >= 16 { continue; }
-                  let seq = u64::from_be_bytes(val.get(..8).and_then(|s| s.try_into().ok()).unwrap_or([0u8; 8]));
-                  let mut nv = Vec::with_capacity(16);
-                  nv.extend_from_slice(&seq.to_be_bytes());
-                  nv.extend_from_slice(&now.to_be_bytes());
-                  t.insert(k.as_slice(), nv.as_slice()).map_err(db_err)?;
-              } }
+            {
+                let mut t = wtx.open_table(CHANNEL_INTAKE).map_err(db_err)?;
+                for (k, val) in &irows {
+                    if val.len() >= 16 {
+                        continue;
+                    }
+                    let seq = u64::from_be_bytes(
+                        val.get(..8)
+                            .and_then(|s| s.try_into().ok())
+                            .unwrap_or([0u8; 8]),
+                    );
+                    let mut nv = Vec::with_capacity(16);
+                    nv.extend_from_slice(&seq.to_be_bytes());
+                    nv.extend_from_slice(&now.to_be_bytes());
+                    t.insert(k.as_slice(), nv.as_slice()).map_err(db_err)?;
+                }
+            }
             wtx.commit().map_err(db_err)?;
         }
         Ok(())
@@ -356,10 +395,15 @@ impl RedbStore {
     /// 在线一致备份（P0-2）：先 Immediate 提交一次把 `Durability::None` 的批量写落盘，
     /// 再持写锁拷贝整个 db 文件 → 已提交态的一致快照（redb 崩溃安全，拷贝可直接打开）。返回拷贝字节数。
     pub fn backup(&self, dest: impl AsRef<std::path::Path>) -> Result<u64> {
-        { let wtx = self.db.begin_write().map_err(db_err)?;
-          { let mut t = wtx.open_table(META).map_err(db_err)?;
-            t.insert("last_backup_ms", now_ms().to_be_bytes().as_slice()).map_err(db_err)?; }
-          wtx.commit().map_err(db_err)?; }
+        {
+            let wtx = self.db.begin_write().map_err(db_err)?;
+            {
+                let mut t = wtx.open_table(META).map_err(db_err)?;
+                t.insert("last_backup_ms", now_ms().to_be_bytes().as_slice())
+                    .map_err(db_err)?;
+            }
+            wtx.commit().map_err(db_err)?;
+        }
         let guard = self.db.begin_write().map_err(db_err)?; // 持写锁防拷贝期间并发提交
         let n = std::fs::copy(&self.path, dest.as_ref()).map_err(db_err)?;
         drop(guard); // 未 commit → abort，不改动数据
@@ -421,7 +465,42 @@ impl RedbStore {
         let mut out = Vec::new();
         for item in t.range(lo.as_slice()..hi.as_slice()).map_err(db_err)? {
             let (_k, v) = item.map_err(db_err)?;
-            if let Some((_recv, g)) = inbox_decode(v.value()) { out.push(g); }
+            if let Some((_recv, g)) = inbox_decode(v.value()) {
+                out.push(g);
+            }
+        }
+        Ok(out)
+    }
+
+    /// 分页读取某实体的离线消息（按 gram_id 升序），不删除。
+    ///
+    /// `after_gram_id` 为上一页最后一条的 `gram_id`；`None` 表示从该收件人的第一条开始。
+    /// 这是大离线信箱的冷数据 range/page 入口，避免重连补投时把整个 inbox 一次性解码到内存。
+    pub fn peek_inbox_page(
+        &self,
+        receiver: &[u8],
+        after_gram_id: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<Gram>> {
+        if limit == 0 || after_gram_id == Some(u64::MAX) {
+            return Ok(Vec::new());
+        }
+        let (lo, hi) = inbox_prefix_range(receiver);
+        let start = match after_gram_id {
+            Some(id) => inbox_key(receiver, id.saturating_add(1)),
+            None => lo,
+        };
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(INBOX).map_err(db_err)?;
+        let mut out = Vec::with_capacity(limit.min(1024));
+        for item in t.range(start.as_slice()..hi.as_slice()).map_err(db_err)? {
+            let (_k, v) = item.map_err(db_err)?;
+            if let Some((_recv, g)) = inbox_decode(v.value()) {
+                out.push(g);
+                if out.len() >= limit {
+                    break;
+                }
+            }
         }
         Ok(out)
     }
@@ -438,7 +517,9 @@ impl RedbStore {
                 .map_err(db_err)?
             {
                 let (_k, v) = item.map_err(db_err)?;
-                if let Some((_recv, g)) = inbox_decode(v.value()) { out.push(g); }
+                if let Some((_recv, g)) = inbox_decode(v.value()) {
+                    out.push(g);
+                }
             }
         }
         wtx.commit().map_err(db_err)?;
@@ -470,7 +551,9 @@ impl RedbStore {
     }
 
     fn outbox_row_from(k: &[u8], v: &[u8]) -> Option<OutboxRow> {
-        if k.len() != 72 || v.len() < 20 { return None; }
+        if k.len() != 72 || v.len() < 20 {
+            return None;
+        }
         Some(OutboxRow {
             sender: k[0..32].to_vec(),
             receiver: k[32..64].to_vec(),
@@ -490,8 +573,16 @@ impl RedbStore {
 
     /// 存/覆盖一条待确认条目（Immediate 落盘，崩溃不丢）。
     #[allow(clippy::too_many_arguments)]
-    pub fn outbox_put(&self, sender: &[u8], receiver: &[u8], gram_id: u64,
-                      first_ms: u64, retries: u32, next_due_ms: u64, gram_bytes: &[u8]) -> Result<()> {
+    pub fn outbox_put(
+        &self,
+        sender: &[u8],
+        receiver: &[u8],
+        gram_id: u64,
+        first_ms: u64,
+        retries: u32,
+        next_due_ms: u64,
+        gram_bytes: &[u8],
+    ) -> Result<()> {
         let key = Self::outbox_key(sender, receiver, gram_id);
         let mut val = Vec::with_capacity(20 + gram_bytes.len());
         val.extend_from_slice(&first_ms.to_be_bytes());
@@ -513,7 +604,8 @@ impl RedbStore {
             if let Some(old) = old_due {
                 due.remove(due_key(old, &key).as_slice()).map_err(db_err)?;
             }
-            due.insert(due_key(next_due_ms, &key).as_slice(), [].as_slice()).map_err(db_err)?;
+            due.insert(due_key(next_due_ms, &key).as_slice(), [].as_slice())
+                .map_err(db_err)?;
         }
         wtx.commit().map_err(db_err)?;
         Ok(())
@@ -527,7 +619,10 @@ impl RedbStore {
         let existed;
         {
             let mut tb = wtx.open_table(OUTBOX).map_err(db_err)?;
-            let old = tb.get(key.as_slice()).map_err(db_err)?.map(|v| v.value().to_vec());
+            let old = tb
+                .get(key.as_slice())
+                .map_err(db_err)?
+                .map(|v| v.value().to_vec());
             old_due = old.as_deref().and_then(Self::outbox_next_due);
             existed = tb.remove(key.as_slice()).map_err(db_err)?.is_some();
         }
@@ -540,12 +635,21 @@ impl RedbStore {
     }
 
     /// 读一条 DM 待确认条目的 first_ms（入发件箱时刻），用于 ack 到达时算 send→ack 时延（P1-9）。只读。
-    pub fn outbox_first_ms(&self, sender: &[u8], receiver: &[u8], gram_id: u64) -> Result<Option<u64>> {
+    pub fn outbox_first_ms(
+        &self,
+        sender: &[u8],
+        receiver: &[u8],
+        gram_id: u64,
+    ) -> Result<Option<u64>> {
         let key = Self::outbox_key(sender, receiver, gram_id);
         let rtx = self.db.begin_read().map_err(db_err)?;
         let tb = rtx.open_table(OUTBOX).map_err(db_err)?;
-        Ok(tb.get(key.as_slice()).map_err(db_err)?
-            .and_then(|v| v.value().get(..8).and_then(|s| s.try_into().ok()).map(u64::from_be_bytes)))
+        Ok(tb.get(key.as_slice()).map_err(db_err)?.and_then(|v| {
+            v.value()
+                .get(..8)
+                .and_then(|s| s.try_into().ok())
+                .map(u64::from_be_bytes)
+        }))
     }
 
     /// 全量加载待确认条目（重传任务每 tick 扫；稳态近空）。key 后 72 字节=sender32+recv32+gram8。
@@ -574,9 +678,13 @@ impl RedbStore {
         for item in due.range(lo.as_slice()..hi.as_slice()).map_err(db_err)? {
             let (dk, _v) = item.map_err(db_err)?;
             let dk = dk.value();
-            if dk.len() < 8 { continue; }
+            if dk.len() < 8 {
+                continue;
+            }
             let pk = &dk[8..];
-            let Some(v) = tb.get(pk).map_err(db_err)? else { continue };
+            let Some(v) = tb.get(pk).map_err(db_err)? else {
+                continue;
+            };
             if let Some(row) = Self::outbox_row_from(pk, v.value()) {
                 out.push(row);
             }
@@ -595,26 +703,48 @@ impl RedbStore {
         k
     }
     /// 落一条死信（放弃投递时）。
-    pub fn dead_letter_put(&self, sender: &[u8], receiver: &[u8], gram_id: u64, first_ms: u64, gram_bytes: &[u8]) -> Result<()> {
+    pub fn dead_letter_put(
+        &self,
+        sender: &[u8],
+        receiver: &[u8],
+        gram_id: u64,
+        first_ms: u64,
+        gram_bytes: &[u8],
+    ) -> Result<()> {
         let key = Self::dead_key(sender, receiver, gram_id, first_ms);
         let wtx = self.db.begin_write().map_err(db_err)?;
-        { let mut t = wtx.open_table(DEAD_LETTER).map_err(db_err)?;
-          t.insert(key.as_slice(), gram_bytes).map_err(db_err)?; }
+        {
+            let mut t = wtx.open_table(DEAD_LETTER).map_err(db_err)?;
+            t.insert(key.as_slice(), gram_bytes).map_err(db_err)?;
+        }
         wtx.commit().map_err(db_err)?;
         Ok(())
     }
     /// 死信当前条数（admin/指标）。
     pub fn dead_letter_count(&self) -> Result<usize> {
         let rtx = self.db.begin_read().map_err(db_err)?;
-        Ok(rtx.open_table(DEAD_LETTER).map_err(db_err)?.len().map_err(db_err)? as usize)
+        Ok(rtx
+            .open_table(DEAD_LETTER)
+            .map_err(db_err)?
+            .len()
+            .map_err(db_err)? as usize)
     }
     /// 裁剪 first_ms < before_ms 的死信（key 尾 8 字节为 first_ms），返回删除条数。
     pub fn dead_letter_prune(&self, before_ms: u64) -> Result<usize> {
         let wtx = self.db.begin_write().map_err(db_err)?;
         let mut n = 0usize;
-        { let mut t = wtx.open_table(DEAD_LETTER).map_err(db_err)?;
-          for item in t.extract_if(|k, _| k.len() >= 80 && u64::from_be_bytes(k[72..80].try_into().unwrap()) < before_ms).map_err(db_err)? {
-              item.map_err(db_err)?; n += 1; } }
+        {
+            let mut t = wtx.open_table(DEAD_LETTER).map_err(db_err)?;
+            for item in t
+                .extract_if(|k, _| {
+                    k.len() >= 80 && u64::from_be_bytes(k[72..80].try_into().unwrap()) < before_ms
+                })
+                .map_err(db_err)?
+            {
+                item.map_err(db_err)?;
+                n += 1;
+            }
+        }
         wtx.commit().map_err(db_err)?;
         Ok(n)
     }
@@ -640,8 +770,11 @@ impl RedbStore {
     pub fn dedup_mark(&self, sender: &[u8], gram_id: u64, crc: &[u8], now_ms: u64) -> Result<()> {
         let key = Self::dedup_key(sender, gram_id, crc);
         let wtx = self.db.begin_write().map_err(db_err)?;
-        { let mut tb = wtx.open_table(DEDUP_DIRECT).map_err(db_err)?;
-          tb.insert(key.as_slice(), now_ms.to_be_bytes().as_slice()).map_err(db_err)?; }
+        {
+            let mut tb = wtx.open_table(DEDUP_DIRECT).map_err(db_err)?;
+            tb.insert(key.as_slice(), now_ms.to_be_bytes().as_slice())
+                .map_err(db_err)?;
+        }
         wtx.commit().map_err(db_err)?;
         Ok(())
     }
@@ -650,10 +783,18 @@ impl RedbStore {
     pub fn dedup_prune(&self, before_ms: u64) -> Result<usize> {
         let wtx = self.db.begin_write().map_err(db_err)?;
         let mut n = 0usize;
-        { let mut tb = wtx.open_table(DEDUP_DIRECT).map_err(db_err)?;
-          for item in tb.extract_if(|_, v| {
-              v.len() >= 8 && u64::from_be_bytes(v[0..8].try_into().unwrap()) < before_ms
-          }).map_err(db_err)? { item.map_err(db_err)?; n += 1; } }
+        {
+            let mut tb = wtx.open_table(DEDUP_DIRECT).map_err(db_err)?;
+            for item in tb
+                .extract_if(|_, v| {
+                    v.len() >= 8 && u64::from_be_bytes(v[0..8].try_into().unwrap()) < before_ms
+                })
+                .map_err(db_err)?
+            {
+                item.map_err(db_err)?;
+                n += 1;
+            }
+        }
         wtx.commit().map_err(db_err)?;
         Ok(n)
     }
@@ -668,36 +809,52 @@ impl RedbStore {
         k
     }
 
-    fn group_outbox_encode(first_ms: u64, retries: u32, next_due_ms: u64,
-                           pending: &[Vec<u8>], gram_bytes: &[u8]) -> Vec<u8> {
+    fn group_outbox_encode(
+        first_ms: u64,
+        retries: u32,
+        next_due_ms: u64,
+        pending: &[Vec<u8>],
+        gram_bytes: &[u8],
+    ) -> Vec<u8> {
         let mut v = Vec::with_capacity(22 + pending.len() * 32 + gram_bytes.len());
         v.extend_from_slice(&first_ms.to_be_bytes());
         v.extend_from_slice(&retries.to_be_bytes());
         v.extend_from_slice(&next_due_ms.to_be_bytes());
         v.extend_from_slice(&(pending.len() as u16).to_be_bytes());
-        for n in pending { v.extend_from_slice(n); } // 每个节点 id 定长 32
+        for n in pending {
+            v.extend_from_slice(n);
+        } // 每个节点 id 定长 32
         v.extend_from_slice(gram_bytes);
         v
     }
 
     /// 解出 (first_ms, retries, next_due_ms, pending_nodes, gram_bytes)；格式不符返回 None。
     fn group_outbox_decode(v: &[u8]) -> Option<GroupOutboxDecoded> {
-        if v.len() < 22 { return None; }
+        if v.len() < 22 {
+            return None;
+        }
         let first_ms = u64::from_be_bytes(v[0..8].try_into().ok()?);
         let retries = u32::from_be_bytes(v[8..12].try_into().ok()?);
         let next_due_ms = u64::from_be_bytes(v[12..20].try_into().ok()?);
         let n = u16::from_be_bytes(v[20..22].try_into().ok()?) as usize;
         let nodes_end = 22 + n * 32;
-        if v.len() < nodes_end { return None; }
+        if v.len() < nodes_end {
+            return None;
+        }
         let mut pending = Vec::with_capacity(n);
-        for i in 0..n { pending.push(v[22 + i * 32..22 + (i + 1) * 32].to_vec()); }
+        for i in 0..n {
+            pending.push(v[22 + i * 32..22 + (i + 1) * 32].to_vec());
+        }
         let gram_bytes = v[nodes_end..].to_vec();
         Some((first_ms, retries, next_due_ms, pending, gram_bytes))
     }
 
     fn group_outbox_row_from(k: &[u8], v: &[u8]) -> Option<GroupOutboxRow> {
-        if k.len() != 72 { return None; }
-        let (first_ms, retries, next_due_ms, pending_nodes, gram_bytes) = Self::group_outbox_decode(v)?;
+        if k.len() != 72 {
+            return None;
+        }
+        let (first_ms, retries, next_due_ms, pending_nodes, gram_bytes) =
+            Self::group_outbox_decode(v)?;
         Some(GroupOutboxRow {
             gid: k[0..32].to_vec(),
             sender: k[32..64].to_vec(),
@@ -712,18 +869,26 @@ impl RedbStore {
 
     /// 存/覆盖一条群待确认条目（Immediate 落盘）。`pending_nodes`=期望回 ack 的成员 home 节点集。
     #[allow(clippy::too_many_arguments)]
-    pub fn group_outbox_put(&self, gid: &[u8], sender: &[u8], gram_id: u64, first_ms: u64,
-                            retries: u32, next_due_ms: u64, pending_nodes: &[Vec<u8>],
-                            gram_bytes: &[u8]) -> Result<()> {
+    pub fn group_outbox_put(
+        &self,
+        gid: &[u8],
+        sender: &[u8],
+        gram_id: u64,
+        first_ms: u64,
+        retries: u32,
+        next_due_ms: u64,
+        pending_nodes: &[Vec<u8>],
+        gram_bytes: &[u8],
+    ) -> Result<()> {
         let key = Self::group_outbox_key(gid, sender, gram_id);
-        let val = Self::group_outbox_encode(first_ms, retries, next_due_ms, pending_nodes, gram_bytes);
+        let val =
+            Self::group_outbox_encode(first_ms, retries, next_due_ms, pending_nodes, gram_bytes);
         let wtx = self.db.begin_write().map_err(db_err)?;
         let old_due = {
             let mut tb = wtx.open_table(GROUP_OUTBOX).map_err(db_err)?;
-            let old_due = tb
-                .get(key.as_slice())
-                .map_err(db_err)?
-                .and_then(|old| Self::group_outbox_decode(old.value()).map(|(_, _, due, _, _)| due));
+            let old_due = tb.get(key.as_slice()).map_err(db_err)?.and_then(|old| {
+                Self::group_outbox_decode(old.value()).map(|(_, _, due, _, _)| due)
+            });
             tb.insert(key.as_slice(), val.as_slice()).map_err(db_err)?;
             old_due
         };
@@ -732,7 +897,8 @@ impl RedbStore {
             if let Some(old) = old_due {
                 due.remove(due_key(old, &key).as_slice()).map_err(db_err)?;
             }
-            due.insert(due_key(next_due_ms, &key).as_slice(), [].as_slice()).map_err(db_err)?;
+            due.insert(due_key(next_due_ms, &key).as_slice(), [].as_slice())
+                .map_err(db_err)?;
         }
         wtx.commit().map_err(db_err)?;
         Ok(())
@@ -740,7 +906,13 @@ impl RedbStore {
 
     /// 收到某成员节点的 GroupAck：从待 ack 集移除该 node；集合空则删条目。
     /// 返回 (found=条目存在, cleared=移除后已全清并删除)。幂等（node 不在集中也不报错）。
-    pub fn group_outbox_ack_node(&self, gid: &[u8], sender: &[u8], gram_id: u64, node: &[u8]) -> Result<(bool, bool)> {
+    pub fn group_outbox_ack_node(
+        &self,
+        gid: &[u8],
+        sender: &[u8],
+        gram_id: u64,
+        node: &[u8],
+    ) -> Result<(bool, bool)> {
         let key = Self::group_outbox_key(gid, sender, gram_id);
         // 读预检：ack 经火管到达全联邦，绝大多数节点本地无此条目（非发送方）。先只读点查，
         // 未命中直接返回——省掉一个写事务 fsync（高并发群 ack 风暴的主要写放大来源）。
@@ -756,7 +928,10 @@ impl RedbStore {
         let mut cleared = false;
         {
             let mut tb = wtx.open_table(GROUP_OUTBOX).map_err(db_err)?;
-            let existing = tb.get(key.as_slice()).map_err(db_err)?.map(|g| g.value().to_vec());
+            let existing = tb
+                .get(key.as_slice())
+                .map_err(db_err)?
+                .map(|g| g.value().to_vec());
             if let Some(bytes) = existing {
                 found = true;
                 if let Some((first_ms, retries, next_due_ms, mut pending, gram_bytes)) =
@@ -766,10 +941,17 @@ impl RedbStore {
                     if pending.is_empty() {
                         tb.remove(key.as_slice()).map_err(db_err)?;
                         let mut due = wtx.open_table(GROUP_OUTBOX_DUE).map_err(db_err)?;
-                        due.remove(due_key(next_due_ms, &key).as_slice()).map_err(db_err)?;
+                        due.remove(due_key(next_due_ms, &key).as_slice())
+                            .map_err(db_err)?;
                         cleared = true;
                     } else {
-                        let val = Self::group_outbox_encode(first_ms, retries, next_due_ms, &pending, &gram_bytes);
+                        let val = Self::group_outbox_encode(
+                            first_ms,
+                            retries,
+                            next_due_ms,
+                            &pending,
+                            &gram_bytes,
+                        );
                         tb.insert(key.as_slice(), val.as_slice()).map_err(db_err)?;
                     }
                 }
@@ -783,24 +965,36 @@ impl RedbStore {
     /// 两阶段：(1) 只读点查收集本节点确有的候选键——全未命中则零写事务返回（非发送方快路径）；
     /// (2) 一个写事务内对每个候选**重新 get+decode**（读新值，防并发）→ 从待 ack 集移除 `node`，空则删条目。
     /// 返回 (acked=真的移除了 node 的条目数, cleared=因此清空删除的条目数)。幂等；node 不在集中不计 acked。
-    pub fn group_outbox_ack_batch(&self, node: &[u8], entries: &[(Vec<u8>, Vec<u8>, u64)]) -> Result<(usize, usize)> {
+    pub fn group_outbox_ack_batch(
+        &self,
+        node: &[u8],
+        entries: &[(Vec<u8>, Vec<u8>, u64)],
+    ) -> Result<(usize, usize)> {
         // 候选键去重（防御：累加器已按 (gid,sender,gram_id) 去重，这里再兜一层）。
         let mut keys: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
         for (gid, sender, gram_id) in entries {
             let k = Self::group_outbox_key(gid, sender, *gram_id);
-            if !keys.iter().any(|e| e == &k) { keys.push(k); }
+            if !keys.iter().any(|e| e == &k) {
+                keys.push(k);
+            }
         }
-        if keys.is_empty() { return Ok((0, 0)); }
+        if keys.is_empty() {
+            return Ok((0, 0));
+        }
         // 读阶段：筛出本地确有的键。全无 → 零写事务返回。
         let mut candidates: Vec<Vec<u8>> = Vec::new();
         {
             let rtx = self.db.begin_read().map_err(db_err)?;
             let tb = rtx.open_table(GROUP_OUTBOX).map_err(db_err)?;
             for k in &keys {
-                if tb.get(k.as_slice()).map_err(db_err)?.is_some() { candidates.push(k.clone()); }
+                if tb.get(k.as_slice()).map_err(db_err)?.is_some() {
+                    candidates.push(k.clone());
+                }
             }
         }
-        if candidates.is_empty() { return Ok((0, 0)); }
+        if candidates.is_empty() {
+            return Ok((0, 0));
+        }
         // 写阶段：仅处理候选，事务内重新读值再改。
         let mut acked = 0usize;
         let mut cleared = 0usize;
@@ -808,21 +1002,36 @@ impl RedbStore {
         {
             let mut tb = wtx.open_table(GROUP_OUTBOX).map_err(db_err)?;
             for k in &candidates {
-                let existing = tb.get(k.as_slice()).map_err(db_err)?.map(|g| g.value().to_vec());
+                let existing = tb
+                    .get(k.as_slice())
+                    .map_err(db_err)?
+                    .map(|g| g.value().to_vec());
                 let Some(bytes) = existing else { continue }; // 并发删 → 跳过
                 let Some((first_ms, retries, next_due_ms, mut pending, gram_bytes)) =
-                    Self::group_outbox_decode(&bytes) else { continue };
+                    Self::group_outbox_decode(&bytes)
+                else {
+                    continue;
+                };
                 let before = pending.len();
                 pending.retain(|n| n.as_slice() != node);
-                if pending.len() == before { continue; } // node 不在集中 → 不计 acked（幂等）
+                if pending.len() == before {
+                    continue;
+                } // node 不在集中 → 不计 acked（幂等）
                 acked += 1;
                 if pending.is_empty() {
                     tb.remove(k.as_slice()).map_err(db_err)?;
                     let mut due = wtx.open_table(GROUP_OUTBOX_DUE).map_err(db_err)?;
-                    due.remove(due_key(next_due_ms, k).as_slice()).map_err(db_err)?;
+                    due.remove(due_key(next_due_ms, k).as_slice())
+                        .map_err(db_err)?;
                     cleared += 1;
                 } else {
-                    let val = Self::group_outbox_encode(first_ms, retries, next_due_ms, &pending, &gram_bytes);
+                    let val = Self::group_outbox_encode(
+                        first_ms,
+                        retries,
+                        next_due_ms,
+                        &pending,
+                        &gram_bytes,
+                    );
                     tb.insert(k.as_slice(), val.as_slice()).map_err(db_err)?;
                 }
             }
@@ -832,11 +1041,18 @@ impl RedbStore {
     }
 
     /// 读一条群待确认条目的 first_ms（建发件箱时刻），用于末个 GroupAck 清条目时算扇出 send→last-ack 时延（P1-9）。只读。
-    pub fn group_outbox_first_ms(&self, gid: &[u8], sender: &[u8], gram_id: u64) -> Result<Option<u64>> {
+    pub fn group_outbox_first_ms(
+        &self,
+        gid: &[u8],
+        sender: &[u8],
+        gram_id: u64,
+    ) -> Result<Option<u64>> {
         let key = Self::group_outbox_key(gid, sender, gram_id);
         let rtx = self.db.begin_read().map_err(db_err)?;
         let tb = rtx.open_table(GROUP_OUTBOX).map_err(db_err)?;
-        Ok(tb.get(key.as_slice()).map_err(db_err)?
+        Ok(tb
+            .get(key.as_slice())
+            .map_err(db_err)?
             .and_then(|v| Self::group_outbox_decode(v.value()).map(|(first_ms, ..)| first_ms)))
     }
 
@@ -848,8 +1064,14 @@ impl RedbStore {
         let existed;
         {
             let mut tb = wtx.open_table(GROUP_OUTBOX).map_err(db_err)?;
-            let old = tb.get(key.as_slice()).map_err(db_err)?.map(|v| v.value().to_vec());
-            old_due = old.as_deref().and_then(Self::group_outbox_decode).map(|(_, _, due, _, _)| due);
+            let old = tb
+                .get(key.as_slice())
+                .map_err(db_err)?
+                .map(|v| v.value().to_vec());
+            old_due = old
+                .as_deref()
+                .and_then(Self::group_outbox_decode)
+                .map(|(_, _, due, _, _)| due);
             existed = tb.remove(key.as_slice()).map_err(db_err)?.is_some();
         }
         if let Some(old) = old_due {
@@ -885,9 +1107,13 @@ impl RedbStore {
         for item in due.range(lo.as_slice()..hi.as_slice()).map_err(db_err)? {
             let (dk, _v) = item.map_err(db_err)?;
             let dk = dk.value();
-            if dk.len() < 8 { continue; }
+            if dk.len() < 8 {
+                continue;
+            }
             let pk = &dk[8..];
-            let Some(v) = tb.get(pk).map_err(db_err)? else { continue };
+            let Some(v) = tb.get(pk).map_err(db_err)? else {
+                continue;
+            };
             if let Some(row) = Self::group_outbox_row_from(pk, v.value()) {
                 out.push(row);
             }
@@ -900,8 +1126,11 @@ impl RedbStore {
     /// 存/覆盖频道元信息。
     pub fn put_channel(&self, c: &Channel) -> Result<()> {
         let wtx = self.db.begin_write().map_err(db_err)?;
-        { let mut t = wtx.open_table(CHANNELS).map_err(db_err)?;
-          t.insert(c.channel_id.as_slice(), c.encode_to_vec().as_slice()).map_err(db_err)?; }
+        {
+            let mut t = wtx.open_table(CHANNELS).map_err(db_err)?;
+            t.insert(c.channel_id.as_slice(), c.encode_to_vec().as_slice())
+                .map_err(db_err)?;
+        }
         wtx.commit().map_err(db_err)?;
         Ok(())
     }
@@ -910,7 +1139,9 @@ impl RedbStore {
         let rtx = self.db.begin_read().map_err(db_err)?;
         let t = rtx.open_table(CHANNELS).map_err(db_err)?;
         match t.get(channel_id).map_err(db_err)? {
-            Some(v) => Ok(Some(Channel::decode(v.value()).map_err(|e| StoreError::Decode(e.to_string()))?)),
+            Some(v) => Ok(Some(
+                Channel::decode(v.value()).map_err(|e| StoreError::Decode(e.to_string()))?,
+            )),
             None => Ok(None),
         }
     }
@@ -921,7 +1152,9 @@ impl RedbStore {
         let mut out = Vec::new();
         for item in t.iter().map_err(db_err)? {
             let (_k, v) = item.map_err(db_err)?;
-            if let Ok(c) = Channel::decode(v.value()) { out.push(c); }
+            if let Ok(c) = Channel::decode(v.value()) {
+                out.push(c);
+            }
         }
         Ok(out)
     }
@@ -936,8 +1169,11 @@ impl RedbStore {
     pub fn channel_sub_put(&self, account: &[u8], channel_id: &[u8], ts_ms: u64) -> Result<()> {
         let key = Self::chan_sub_key(account, channel_id);
         let wtx = self.db.begin_write().map_err(db_err)?;
-        { let mut t = wtx.open_table(CHANNEL_SUBS).map_err(db_err)?;
-          t.insert(key.as_slice(), ts_ms.to_be_bytes().as_slice()).map_err(db_err)?; }
+        {
+            let mut t = wtx.open_table(CHANNEL_SUBS).map_err(db_err)?;
+            t.insert(key.as_slice(), ts_ms.to_be_bytes().as_slice())
+                .map_err(db_err)?;
+        }
         wtx.commit().map_err(db_err)?;
         Ok(())
     }
@@ -946,8 +1182,10 @@ impl RedbStore {
         let key = Self::chan_sub_key(account, channel_id);
         let wtx = self.db.begin_write().map_err(db_err)?;
         let existed;
-        { let mut t = wtx.open_table(CHANNEL_SUBS).map_err(db_err)?;
-          existed = t.remove(key.as_slice()).map_err(db_err)?.is_some(); }
+        {
+            let mut t = wtx.open_table(CHANNEL_SUBS).map_err(db_err)?;
+            existed = t.remove(key.as_slice()).map_err(db_err)?.is_some();
+        }
         wtx.commit().map_err(db_err)?;
         Ok(existed)
     }
@@ -960,7 +1198,9 @@ impl RedbStore {
         for item in t.range(lo.as_slice()..hi.as_slice()).map_err(db_err)? {
             let (k, _v) = item.map_err(db_err)?;
             let k = k.value();
-            if k.len() == account.len() + 32 { out.push(k[account.len()..].to_vec()); }
+            if k.len() == account.len() + 32 {
+                out.push(k[account.len()..].to_vec());
+            }
         }
         Ok(out)
     }
@@ -975,7 +1215,9 @@ impl RedbStore {
             let k = k.value();
             if k.len() >= 32 {
                 let cid = k[k.len() - 32..].to_vec();
-                if seen.insert(cid.clone()) { out.push(cid); }
+                if seen.insert(cid.clone()) {
+                    out.push(cid);
+                }
             }
         }
         Ok(out)
@@ -991,8 +1233,11 @@ impl RedbStore {
     pub fn channel_log_put(&self, m: &ChannelMsg) -> Result<()> {
         let key = Self::chan_log_key(&m.channel_id, m.seq);
         let wtx = self.db.begin_write().map_err(db_err)?;
-        { let mut t = wtx.open_table(CHANNEL_LOG).map_err(db_err)?;
-          t.insert(key.as_slice(), m.encode_to_vec().as_slice()).map_err(db_err)?; }
+        {
+            let mut t = wtx.open_table(CHANNEL_LOG).map_err(db_err)?;
+            t.insert(key.as_slice(), m.encode_to_vec().as_slice())
+                .map_err(db_err)?;
+        }
         wtx.commit().map_err(db_err)?;
         Ok(())
     }
@@ -1004,7 +1249,12 @@ impl RedbStore {
         Ok(t.get(key.as_slice()).map_err(db_err)?.is_some())
     }
     /// 回填：取 seq 在 (since_seq, ∞) 的消息，最多 limit 条（按 seq 升序）。
-    pub fn channel_log_since(&self, channel_id: &[u8], since_seq: u64, limit: usize) -> Result<Vec<ChannelMsg>> {
+    pub fn channel_log_since(
+        &self,
+        channel_id: &[u8],
+        since_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<ChannelMsg>> {
         let lo = Self::chan_log_key(channel_id, since_seq.saturating_add(1));
         let (_p, hi) = prefix_range(channel_id);
         let rtx = self.db.begin_read().map_err(db_err)?;
@@ -1012,8 +1262,12 @@ impl RedbStore {
         let mut out = Vec::new();
         for item in t.range(lo.as_slice()..hi.as_slice()).map_err(db_err)? {
             let (_k, v) = item.map_err(db_err)?;
-            if let Ok(m) = ChannelMsg::decode(v.value()) { out.push(m); }
-            if out.len() >= limit { break; }
+            if let Ok(m) = ChannelMsg::decode(v.value()) {
+                out.push(m);
+            }
+            if out.len() >= limit {
+                break;
+            }
         }
         Ok(out)
     }
@@ -1023,8 +1277,14 @@ impl RedbStore {
         let rtx = self.db.begin_read().map_err(db_err)?;
         let t = rtx.open_table(CHANNEL_LOG).map_err(db_err)?;
         let mut rng = t.range(lo.as_slice()..hi.as_slice()).map_err(db_err)?;
-        let first = match rng.next() { Some(it) => it.map_err(db_err)?.0.value().to_vec(), None => return Ok(None) };
-        let last = match rng.next_back() { Some(it) => it.map_err(db_err)?.0.value().to_vec(), None => first.clone() };
+        let first = match rng.next() {
+            Some(it) => it.map_err(db_err)?.0.value().to_vec(),
+            None => return Ok(None),
+        };
+        let last = match rng.next_back() {
+            Some(it) => it.map_err(db_err)?.0.value().to_vec(),
+            None => first.clone(),
+        };
         let seq_of = |k: &[u8]| u64::from_be_bytes(k[k.len() - 8..].try_into().unwrap());
         Ok(Some((seq_of(&first), seq_of(&last))))
     }
@@ -1054,9 +1314,16 @@ impl RedbStore {
         let hi = Self::chan_log_key(channel_id, floor_seq); // 半开上界：删 [0, floor_seq)
         let wtx = self.db.begin_write().map_err(db_err)?;
         let mut n = 0usize;
-        { let mut t = wtx.open_table(CHANNEL_LOG).map_err(db_err)?;
-          for item in t.extract_from_if(lo.as_slice()..hi.as_slice(), |_, _| true).map_err(db_err)? {
-              item.map_err(db_err)?; n += 1; } }
+        {
+            let mut t = wtx.open_table(CHANNEL_LOG).map_err(db_err)?;
+            for item in t
+                .extract_from_if(lo.as_slice()..hi.as_slice(), |_, _| true)
+                .map_err(db_err)?
+            {
+                item.map_err(db_err)?;
+                n += 1;
+            }
+        }
         wtx.commit().map_err(db_err)?;
         Ok(n)
     }
@@ -1067,11 +1334,14 @@ impl RedbStore {
         let assigned;
         {
             let mut t = wtx.open_table(CHANNEL_SEQ).map_err(db_err)?;
-            let cur = t.get(channel_id).map_err(db_err)?
+            let cur = t
+                .get(channel_id)
+                .map_err(db_err)?
                 .map(|v| u64::from_be_bytes(v.value().try_into().unwrap_or([0u8; 8])))
                 .unwrap_or(1); // 从 1 起
             assigned = cur;
-            t.insert(channel_id, (cur + 1).to_be_bytes().as_slice()).map_err(db_err)?;
+            t.insert(channel_id, (cur + 1).to_be_bytes().as_slice())
+                .map_err(db_err)?;
         }
         wtx.commit().map_err(db_err)?;
         Ok(assigned)
@@ -1080,7 +1350,8 @@ impl RedbStore {
     pub fn channel_seq_peek(&self, channel_id: &[u8]) -> Result<u64> {
         let rtx = self.db.begin_read().map_err(db_err)?;
         let t = rtx.open_table(CHANNEL_SEQ).map_err(db_err)?;
-        Ok(t.get(channel_id).map_err(db_err)?
+        Ok(t.get(channel_id)
+            .map_err(db_err)?
             .map(|v| u64::from_be_bytes(v.value().try_into().unwrap_or([0u8; 8])))
             .unwrap_or(1))
     }
@@ -1088,8 +1359,10 @@ impl RedbStore {
     /// 存频道私钥（仅 home）。
     pub fn put_channel_secret(&self, channel_id: &[u8], secret: &[u8]) -> Result<()> {
         let wtx = self.db.begin_write().map_err(db_err)?;
-        { let mut t = wtx.open_table(CHANNEL_SECRETS).map_err(db_err)?;
-          t.insert(channel_id, secret).map_err(db_err)?; }
+        {
+            let mut t = wtx.open_table(CHANNEL_SECRETS).map_err(db_err)?;
+            t.insert(channel_id, secret).map_err(db_err)?;
+        }
         wtx.commit().map_err(db_err)?;
         Ok(())
     }
@@ -1097,7 +1370,9 @@ impl RedbStore {
     pub fn channel_secret(&self, channel_id: &[u8]) -> Result<Option<Vec<u8>>> {
         let rtx = self.db.begin_read().map_err(db_err)?;
         let t = rtx.open_table(CHANNEL_SECRETS).map_err(db_err)?;
-        Ok(t.get(channel_id).map_err(db_err)?.map(|v| v.value().to_vec()))
+        Ok(t.get(channel_id)
+            .map_err(db_err)?
+            .map(|v| v.value().to_vec()))
     }
 
     fn chan_intake_key(channel_id: &[u8], sender: &[u8], nonce: &[u8]) -> Vec<u8> {
@@ -1109,22 +1384,36 @@ impl RedbStore {
     }
     /// 定序幂等：若 (cid,sender,nonce) 已分配过 seq 返回 Some(seq)，否则记入 now_ms 占位并返回 None。
     /// 注意：真正的 seq 在 home 单事务里与 LOG/SEQ 一起写；此表仅记「nonce→seq」供重传命中重广播。
-    pub fn channel_intake_get(&self, channel_id: &[u8], sender: &[u8], nonce: &[u8]) -> Result<Option<u64>> {
+    pub fn channel_intake_get(
+        &self,
+        channel_id: &[u8],
+        sender: &[u8],
+        nonce: &[u8],
+    ) -> Result<Option<u64>> {
         let key = Self::chan_intake_key(channel_id, sender, nonce);
         let rtx = self.db.begin_read().map_err(db_err)?;
         let t = rtx.open_table(CHANNEL_INTAKE).map_err(db_err)?;
-        Ok(t.get(key.as_slice()).map_err(db_err)?
+        Ok(t.get(key.as_slice())
+            .map_err(db_err)?
             .map(|v| u64::from_be_bytes(v.value()[..8].try_into().unwrap_or([0u8; 8]))))
     }
     /// 定序提交（home 专用，单事务三写之一不便合并时的独立入口；正常由 channel_sequence 原子完成）。
-    pub fn channel_intake_put(&self, channel_id: &[u8], sender: &[u8], nonce: &[u8], seq: u64) -> Result<()> {
+    pub fn channel_intake_put(
+        &self,
+        channel_id: &[u8],
+        sender: &[u8],
+        nonce: &[u8],
+        seq: u64,
+    ) -> Result<()> {
         let key = Self::chan_intake_key(channel_id, sender, nonce);
         let mut iv = Vec::with_capacity(16);
         iv.extend_from_slice(&seq.to_be_bytes());
         iv.extend_from_slice(&now_ms().to_be_bytes());
         let wtx = self.db.begin_write().map_err(db_err)?;
-        { let mut t = wtx.open_table(CHANNEL_INTAKE).map_err(db_err)?;
-          t.insert(key.as_slice(), iv.as_slice()).map_err(db_err)?; }
+        {
+            let mut t = wtx.open_table(CHANNEL_INTAKE).map_err(db_err)?;
+            t.insert(key.as_slice(), iv.as_slice()).map_err(db_err)?;
+        }
         wtx.commit().map_err(db_err)?;
         Ok(())
     }
@@ -1134,9 +1423,18 @@ impl RedbStore {
     pub fn channel_intake_prune(&self, before_ms: u64) -> Result<usize> {
         let wtx = self.db.begin_write().map_err(db_err)?;
         let mut n = 0usize;
-        { let mut t = wtx.open_table(CHANNEL_INTAKE).map_err(db_err)?;
-          for item in t.extract_if(|_, v| v.len() >= 16 && u64::from_be_bytes(v[8..16].try_into().unwrap()) < before_ms).map_err(db_err)? {
-              item.map_err(db_err)?; n += 1; } }
+        {
+            let mut t = wtx.open_table(CHANNEL_INTAKE).map_err(db_err)?;
+            for item in t
+                .extract_if(|_, v| {
+                    v.len() >= 16 && u64::from_be_bytes(v[8..16].try_into().unwrap()) < before_ms
+                })
+                .map_err(db_err)?
+            {
+                item.map_err(db_err)?;
+                n += 1;
+            }
+        }
         wtx.commit().map_err(db_err)?;
         Ok(n)
     }
@@ -1163,24 +1461,34 @@ impl RedbStore {
                 let lk = Self::chan_log_key(channel_id, seq);
                 let log = wtx.open_table(CHANNEL_LOG).map_err(db_err)?;
                 let msg = match log.get(lk.as_slice()).map_err(db_err)? {
-                    Some(mv) => ChannelMsg::decode(mv.value()).map_err(|e| StoreError::Decode(e.to_string()))?,
+                    Some(mv) => ChannelMsg::decode(mv.value())
+                        .map_err(|e| StoreError::Decode(e.to_string()))?,
                     None => return Err(StoreError::Db("intake without log entry".into())),
                 };
                 result = (seq, msg, false);
             } else {
                 // 首见 → 分配 seq、构造签名消息、三写（SEQ+LOG+INTAKE）同一事务。
                 let mut seqt = wtx.open_table(CHANNEL_SEQ).map_err(db_err)?;
-                let seq = seqt.get(channel_id).map_err(db_err)?
-                    .map(|v| u64::from_be_bytes(v.value().try_into().unwrap_or([0u8; 8]))).unwrap_or(1);
-                seqt.insert(channel_id, (seq + 1).to_be_bytes().as_slice()).map_err(db_err)?;
+                let seq = seqt
+                    .get(channel_id)
+                    .map_err(db_err)?
+                    .map(|v| u64::from_be_bytes(v.value().try_into().unwrap_or([0u8; 8])))
+                    .unwrap_or(1);
+                seqt.insert(channel_id, (seq + 1).to_be_bytes().as_slice())
+                    .map_err(db_err)?;
                 let msg = make_msg(seq);
                 let lk = Self::chan_log_key(channel_id, seq);
-                { let mut log = wtx.open_table(CHANNEL_LOG).map_err(db_err)?;
-                  log.insert(lk.as_slice(), msg.encode_to_vec().as_slice()).map_err(db_err)?; }
+                {
+                    let mut log = wtx.open_table(CHANNEL_LOG).map_err(db_err)?;
+                    log.insert(lk.as_slice(), msg.encode_to_vec().as_slice())
+                        .map_err(db_err)?;
+                }
                 let mut iv = Vec::with_capacity(16); // seq(8)++ts(8)：ts 供 channel_intake_prune 按龄裁剪
                 iv.extend_from_slice(&seq.to_be_bytes());
                 iv.extend_from_slice(&now_ms().to_be_bytes());
-                intake.insert(ik.as_slice(), iv.as_slice()).map_err(db_err)?;
+                intake
+                    .insert(ik.as_slice(), iv.as_slice())
+                    .map_err(db_err)?;
                 result = (seq, msg, true);
             }
         }
@@ -1194,7 +1502,9 @@ impl RedbStore {
     }
 
     fn channel_outbox_row_from(k: &[u8], v: &[u8]) -> Option<ChannelOutboxRow> {
-        if k.len() < 64 || v.len() < 20 { return None; }
+        if k.len() < 64 || v.len() < 20 {
+            return None;
+        }
         Some(ChannelOutboxRow {
             channel_id: k[0..32].to_vec(),
             sender: k[32..64].to_vec(),
@@ -1207,8 +1517,16 @@ impl RedbStore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn channel_outbox_put(&self, channel_id: &[u8], sender: &[u8], nonce: &[u8],
-                              first_ms: u64, retries: u32, next_due_ms: u64, pubreq_bytes: &[u8]) -> Result<()> {
+    pub fn channel_outbox_put(
+        &self,
+        channel_id: &[u8],
+        sender: &[u8],
+        nonce: &[u8],
+        first_ms: u64,
+        retries: u32,
+        next_due_ms: u64,
+        pubreq_bytes: &[u8],
+    ) -> Result<()> {
         let key = Self::chan_outbox_key(channel_id, sender, nonce);
         let mut val = Vec::with_capacity(20 + pubreq_bytes.len());
         val.extend_from_slice(&first_ms.to_be_bytes());
@@ -1230,19 +1548,28 @@ impl RedbStore {
             if let Some(old) = old_due {
                 due.remove(due_key(old, &key).as_slice()).map_err(db_err)?;
             }
-            due.insert(due_key(next_due_ms, &key).as_slice(), [].as_slice()).map_err(db_err)?;
+            due.insert(due_key(next_due_ms, &key).as_slice(), [].as_slice())
+                .map_err(db_err)?;
         }
         wtx.commit().map_err(db_err)?;
         Ok(())
     }
-    pub fn channel_outbox_del(&self, channel_id: &[u8], sender: &[u8], nonce: &[u8]) -> Result<bool> {
+    pub fn channel_outbox_del(
+        &self,
+        channel_id: &[u8],
+        sender: &[u8],
+        nonce: &[u8],
+    ) -> Result<bool> {
         let key = Self::chan_outbox_key(channel_id, sender, nonce);
         let wtx = self.db.begin_write().map_err(db_err)?;
         let old_due;
         let existed;
         {
             let mut t = wtx.open_table(CHANNEL_OUTBOX).map_err(db_err)?;
-            let old = t.get(key.as_slice()).map_err(db_err)?.map(|v| v.value().to_vec());
+            let old = t
+                .get(key.as_slice())
+                .map_err(db_err)?
+                .map(|v| v.value().to_vec());
             old_due = old.as_deref().and_then(Self::outbox_next_due);
             existed = t.remove(key.as_slice()).map_err(db_err)?.is_some();
         }
@@ -1278,9 +1605,13 @@ impl RedbStore {
         for item in due.range(lo.as_slice()..hi.as_slice()).map_err(db_err)? {
             let (dk, _v) = item.map_err(db_err)?;
             let dk = dk.value();
-            if dk.len() < 8 { continue; }
+            if dk.len() < 8 {
+                continue;
+            }
             let pk = &dk[8..];
-            let Some(v) = tb.get(pk).map_err(db_err)? else { continue };
+            let Some(v) = tb.get(pk).map_err(db_err)? else {
+                continue;
+            };
             if let Some(row) = Self::channel_outbox_row_from(pk, v.value()) {
                 out.push(row);
             }
@@ -1288,13 +1619,14 @@ impl RedbStore {
         Ok(out)
     }
 
-
     /// 某实体离线消息条数。range 直接计数，不解码 value（避免 O(n) prost 解码）。
     pub fn inbox_len(&self, receiver: &[u8]) -> Result<usize> {
         let (lo, hi) = inbox_prefix_range(receiver);
         let rtx = self.db.begin_read().map_err(db_err)?;
         let t = rtx.open_table(INBOX).map_err(db_err)?;
-        Ok(t.range(lo.as_slice()..hi.as_slice()).map_err(db_err)?.count())
+        Ok(t.range(lo.as_slice()..hi.as_slice())
+            .map_err(db_err)?
+            .count())
     }
 
     /// 删除所有收件人中**入库时间**（recv_ms）早于 `before_ms` 的离线消息（P0-1：不信发送方可伪造的时钟），返回删除条数。
@@ -1304,7 +1636,11 @@ impl RedbStore {
         {
             let mut t = wtx.open_table(INBOX).map_err(db_err)?;
             for item in t
-                .extract_if(|_, v| inbox_decode(v).map(|(recv, _)| recv < before_ms).unwrap_or(true))
+                .extract_if(|_, v| {
+                    inbox_decode(v)
+                        .map(|(recv, _)| recv < before_ms)
+                        .unwrap_or(true)
+                })
                 .map_err(db_err)?
             {
                 item.map_err(db_err)?;
@@ -1325,7 +1661,8 @@ impl RedbStore {
         let wtx = self.db.begin_write().map_err(db_err)?;
         {
             let mut t = wtx.open_table(DEVICES).map_err(db_err)?;
-            t.insert(cert.device.as_slice(), val.as_slice()).map_err(db_err)?;
+            t.insert(cert.device.as_slice(), val.as_slice())
+                .map_err(db_err)?;
         }
         wtx.commit().map_err(db_err)?;
         Ok(())
@@ -1347,7 +1684,8 @@ impl RedbStore {
         let wtx = self.db.begin_write().map_err(db_err)?;
         {
             let mut t = wtx.open_table(REVOKED).map_err(db_err)?;
-            t.insert(r.device.as_slice(), val.as_slice()).map_err(db_err)?;
+            t.insert(r.device.as_slice(), val.as_slice())
+                .map_err(db_err)?;
         }
         wtx.commit().map_err(db_err)?;
         Ok(())
@@ -1359,7 +1697,9 @@ impl RedbStore {
         let mut out = Vec::new();
         for item in t.iter().map_err(db_err)? {
             let (_k, v) = item.map_err(db_err)?;
-            out.push(DeviceRevoke::decode(v.value()).map_err(|e| StoreError::Decode(e.to_string()))?);
+            out.push(
+                DeviceRevoke::decode(v.value()).map_err(|e| StoreError::Decode(e.to_string()))?,
+            );
         }
         Ok(out)
     }
@@ -1371,7 +1711,8 @@ impl RedbStore {
         let wtx = self.db.begin_write().map_err(db_err)?;
         {
             let mut t = wtx.open_table(ENTITIES).map_err(db_err)?;
-            t.insert(entity.entity_id.as_slice(), val.as_slice()).map_err(db_err)?;
+            t.insert(entity.entity_id.as_slice(), val.as_slice())
+                .map_err(db_err)?;
         }
         wtx.commit().map_err(db_err)?;
         Ok(())
@@ -1411,10 +1752,12 @@ impl RedbStore {
         let wtx = self.db.begin_write().map_err(db_err)?;
         {
             let mut t = wtx.open_table(BLOBS).map_err(db_err)?;
-            t.insert(blob.hash.as_slice(), val.as_slice()).map_err(db_err)?;
+            t.insert(blob.hash.as_slice(), val.as_slice())
+                .map_err(db_err)?;
             let mut m = wtx.open_table(BLOB_META).map_err(db_err)?;
             if m.get(blob.hash.as_slice()).map_err(db_err)?.is_none() {
-                m.insert(blob.hash.as_slice(), now_ms().to_be_bytes().as_slice()).map_err(db_err)?;
+                m.insert(blob.hash.as_slice(), now_ms().to_be_bytes().as_slice())
+                    .map_err(db_err)?;
             }
         }
         wtx.commit().map_err(db_err)?;
@@ -1443,15 +1786,24 @@ impl RedbStore {
             for it in m.iter().map_err(db_err)? {
                 let (k, val) = it.map_err(db_err)?;
                 let ts = u64::from_be_bytes(val.value().try_into().unwrap_or([0u8; 8]));
-                if ts < before_ms { v.push(k.value().to_vec()); }
+                if ts < before_ms {
+                    v.push(k.value().to_vec());
+                }
             }
             v
         };
-        if expired.is_empty() { return Ok(0); }
+        if expired.is_empty() {
+            return Ok(0);
+        }
         let wtx = self.db.begin_write().map_err(db_err)?;
-        { let mut b = wtx.open_table(BLOBS).map_err(db_err)?;
-          let mut m = wtx.open_table(BLOB_META).map_err(db_err)?;
-          for h in &expired { b.remove(h.as_slice()).map_err(db_err)?; m.remove(h.as_slice()).map_err(db_err)?; } }
+        {
+            let mut b = wtx.open_table(BLOBS).map_err(db_err)?;
+            let mut m = wtx.open_table(BLOB_META).map_err(db_err)?;
+            for h in &expired {
+                b.remove(h.as_slice()).map_err(db_err)?;
+                m.remove(h.as_slice()).map_err(db_err)?;
+            }
+        }
         wtx.commit().map_err(db_err)?;
         Ok(expired.len())
     }
@@ -1463,7 +1815,8 @@ impl RedbStore {
         let wtx = self.db.begin_write().map_err(db_err)?;
         {
             let mut t = wtx.open_table(GROUPS).map_err(db_err)?;
-            t.insert(g.group_id.as_slice(), val.as_slice()).map_err(db_err)?;
+            t.insert(g.group_id.as_slice(), val.as_slice())
+                .map_err(db_err)?;
         }
         wtx.commit().map_err(db_err)?;
         Ok(())
@@ -1486,8 +1839,10 @@ impl RedbStore {
     pub fn del_group_secret(&self, group_id: &[u8]) -> Result<bool> {
         let wtx = self.db.begin_write().map_err(db_err)?;
         let existed;
-        { let mut t = wtx.open_table(GROUP_SECRETS).map_err(db_err)?;
-          existed = t.remove(group_id).map_err(db_err)?.is_some(); }
+        {
+            let mut t = wtx.open_table(GROUP_SECRETS).map_err(db_err)?;
+            existed = t.remove(group_id).map_err(db_err)?.is_some();
+        }
         wtx.commit().map_err(db_err)?;
         Ok(existed)
     }
@@ -1585,7 +1940,8 @@ impl RedbStore {
         let wtx = self.db.begin_write().map_err(db_err)?;
         {
             let mut t = wtx.open_table(DOMAINS).map_err(db_err)?;
-            t.insert(domain.as_bytes(), b"1".as_slice()).map_err(db_err)?;
+            t.insert(domain.as_bytes(), b"1".as_slice())
+                .map_err(db_err)?;
         }
         wtx.commit().map_err(db_err)?;
         Ok(())
@@ -1692,21 +2048,29 @@ impl RedbStore {
     /// Write or replace one roster entry.
     pub fn put_roster(&self, account: &[u8], entry_id: &[u8], json: &str) -> Result<()> {
         let mut key = Vec::with_capacity(account.len() + entry_id.len());
-        key.extend_from_slice(account); key.extend_from_slice(entry_id);
+        key.extend_from_slice(account);
+        key.extend_from_slice(entry_id);
         let wtx = self.db.begin_write().map_err(db_err)?;
-        { let mut t = wtx.open_table(ROSTER).map_err(db_err)?;
-          t.insert(key.as_slice(), json.as_bytes()).map_err(db_err)?; }
-        wtx.commit().map_err(db_err)?; Ok(())
+        {
+            let mut t = wtx.open_table(ROSTER).map_err(db_err)?;
+            t.insert(key.as_slice(), json.as_bytes()).map_err(db_err)?;
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
     }
 
     /// Remove one roster entry (idempotent).
     pub fn del_roster(&self, account: &[u8], entry_id: &[u8]) -> Result<()> {
         let mut key = Vec::with_capacity(account.len() + entry_id.len());
-        key.extend_from_slice(account); key.extend_from_slice(entry_id);
+        key.extend_from_slice(account);
+        key.extend_from_slice(entry_id);
         let wtx = self.db.begin_write().map_err(db_err)?;
-        { let mut t = wtx.open_table(ROSTER).map_err(db_err)?;
-          t.remove(key.as_slice()).map_err(db_err)?; }
-        wtx.commit().map_err(db_err)?; Ok(())
+        {
+            let mut t = wtx.open_table(ROSTER).map_err(db_err)?;
+            t.remove(key.as_slice()).map_err(db_err)?;
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
     }
 
     /// Return all roster entries for an account as JSON strings.
@@ -1716,10 +2080,18 @@ impl RedbStore {
         let lo = account.to_vec();
         let mut hi = lo.clone();
         for i in (0..hi.len()).rev() {
-            if hi[i] < 0xFF { hi[i] += 1; break; } else { hi[i] = 0; }
+            if hi[i] < 0xFF {
+                hi[i] += 1;
+                break;
+            } else {
+                hi[i] = 0;
+            }
         }
         let mut out = Vec::new();
-        for item in t.range::<&[u8]>(lo.as_slice()..hi.as_slice()).map_err(db_err)? {
+        for item in t
+            .range::<&[u8]>(lo.as_slice()..hi.as_slice())
+            .map_err(db_err)?
+        {
             let (_, v) = item.map_err(db_err)?;
             out.push(String::from_utf8_lossy(v.value()).into_owned());
         }
@@ -1742,11 +2114,19 @@ impl RedbStore {
         let advanced;
         {
             let mut t = wtx.open_table(READ_STATE).map_err(db_err)?;
-            let cur = t.get(key.as_slice()).map_err(db_err)?
-                .and_then(|v| v.value().get(..8).and_then(|s| s.try_into().ok()).map(u64::from_be_bytes))
+            let cur = t
+                .get(key.as_slice())
+                .map_err(db_err)?
+                .and_then(|v| {
+                    v.value()
+                        .get(..8)
+                        .and_then(|s| s.try_into().ok())
+                        .map(u64::from_be_bytes)
+                })
                 .unwrap_or(0);
             if ms > cur {
-                t.insert(key.as_slice(), ms.to_be_bytes().as_slice()).map_err(db_err)?;
+                t.insert(key.as_slice(), ms.to_be_bytes().as_slice())
+                    .map_err(db_err)?;
                 advanced = true;
             } else {
                 advanced = false;
@@ -1767,7 +2147,12 @@ impl RedbStore {
             let k = k.value();
             if k.len() == account.len() + 32 {
                 let conv = k[account.len()..].to_vec();
-                let ms = u64::from_be_bytes(v.value().get(..8).and_then(|s| s.try_into().ok()).unwrap_or([0u8; 8]));
+                let ms = u64::from_be_bytes(
+                    v.value()
+                        .get(..8)
+                        .and_then(|s| s.try_into().ok())
+                        .unwrap_or([0u8; 8]),
+                );
                 out.push((conv, ms));
             }
         }
@@ -1786,7 +2171,9 @@ fn inbox_encode(recv_ms: u64, gram: &Gram) -> Vec<u8> {
 
 /// 解 INBOX value → (入库时间 recv_ms, Gram)；长度不足/解码失败返回 None（损坏行按"可裁剪"处理）。
 fn inbox_decode(v: &[u8]) -> Option<(u64, Gram)> {
-    if v.len() < 8 { return None; }
+    if v.len() < 8 {
+        return None;
+    }
     let recv = u64::from_be_bytes(v[..8].try_into().ok()?);
     let g = Gram::decode(&v[8..]).ok()?;
     Some((recv, g))
@@ -1826,7 +2213,12 @@ fn prefix_range(prefix: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let lo = prefix.to_vec();
     let mut hi = prefix.to_vec();
     for i in (0..hi.len()).rev() {
-        if hi[i] == 0xFF { hi[i] = 0; } else { hi[i] += 1; return (lo, hi); }
+        if hi[i] == 0xFF {
+            hi[i] = 0;
+        } else {
+            hi[i] += 1;
+            return (lo, hi);
+        }
     }
     // 前缀全 0xFF：上界加一字节兜底。
     let mut hi = prefix.to_vec();
@@ -1837,7 +2229,7 @@ fn prefix_range(prefix: &[u8]) -> (Vec<u8>, Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nm_proto::{now_ms, GramKind};
+    use nm_proto::{GramKind, now_ms};
 
     fn msg(receiver: [u8; 32], id: u64, text: &str) -> Gram {
         Gram {
@@ -1881,6 +2273,36 @@ mod tests {
     }
 
     #[test]
+    fn inbox_page_reads_by_receiver_and_gram_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = RedbStore::open(dir.path().join("t.redb")).unwrap();
+        let r = [7u8; 32];
+        let other = [8u8; 32];
+        s.push_inbox(&r, &msg(r, 2, "second")).unwrap();
+        s.push_inbox(&r, &msg(r, 1, "first")).unwrap();
+        s.push_inbox(&r, &msg(r, 3, "third")).unwrap();
+        s.push_inbox(&other, &msg(other, 1, "other")).unwrap();
+
+        let page1 = s.peek_inbox_page(&r, None, 2).unwrap();
+        assert_eq!(
+            page1.iter().map(|g| g.gram_id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        let page2 = s
+            .peek_inbox_page(&r, page1.last().map(|g| g.gram_id), 2)
+            .unwrap();
+        assert_eq!(page2.iter().map(|g| g.gram_id).collect::<Vec<_>>(), vec![3]);
+
+        let page3 = s
+            .peek_inbox_page(&r, page2.last().map(|g| g.gram_id), 2)
+            .unwrap();
+        assert!(page3.is_empty());
+        assert_eq!(s.peek_inbox_page(&r, None, 0).unwrap().len(), 0);
+        assert_eq!(s.inbox_len(&other).unwrap(), 1);
+    }
+
+    #[test]
     fn inbox_prune_by_recv_time() {
         let dir = tempfile::tempdir().unwrap();
         let s = RedbStore::open(dir.path().join("t.redb")).unwrap();
@@ -1894,7 +2316,11 @@ mod tests {
         s.push_inbox(&r, &forged).unwrap();
         // 阈值 0：无一早于 → 不删；伪造旧时间戳那条也安全。
         assert_eq!(s.prune_inbox(0).unwrap(), 0);
-        assert_eq!(s.prune_inbox(10_000).unwrap(), 0, "按入库时间裁剪，不被伪造的旧 timestamp 提前删除");
+        assert_eq!(
+            s.prune_inbox(10_000).unwrap(),
+            0,
+            "按入库时间裁剪，不被伪造的旧 timestamp 提前删除"
+        );
         // 未来阈值：三条入库时间均早于它 → 全删。
         assert_eq!(s.prune_inbox(now_ms() + 60_000).unwrap(), 3);
         assert_eq!(s.inbox_len(&r).unwrap(), 0);
@@ -1934,9 +2360,11 @@ mod tests {
             let wtx = db.begin_write().unwrap();
             {
                 let mut t = wtx.open_table(INBOX).unwrap();
-                t.insert(inbox_key(&r, 1).as_slice(), raw.as_slice()).unwrap(); // 裸 Gram（旧格式）
+                t.insert(inbox_key(&r, 1).as_slice(), raw.as_slice())
+                    .unwrap(); // 裸 Gram（旧格式）
                 let mut it = wtx.open_table(CHANNEL_INTAKE).unwrap();
-                it.insert(ik.as_slice(), 42u64.to_be_bytes().as_slice()).unwrap(); // 8 字节 seq（旧格式）
+                it.insert(ik.as_slice(), 42u64.to_be_bytes().as_slice())
+                    .unwrap(); // 8 字节 seq（旧格式）
             }
             wtx.commit().unwrap();
             let _ = db; // drop → 释放文件锁
@@ -1948,7 +2376,11 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].gram_id, 1);
         // CHANNEL_INTAKE 行扩成 16 字节：get 仍返回 seq，且现在可按龄裁剪。
-        assert_eq!(s.channel_intake_get(&[9u8; 32], &[8u8; 32], b"nonce").unwrap(), Some(42));
+        assert_eq!(
+            s.channel_intake_get(&[9u8; 32], &[8u8; 32], b"nonce")
+                .unwrap(),
+            Some(42)
+        );
         assert_eq!(s.channel_intake_prune(now_ms() + 60_000).unwrap(), 1);
         // 迁移后版本已戳为当前，二次打开不再迁移。
         drop(s);
@@ -1963,14 +2395,21 @@ mod tests {
         let conv_a = [2u8; 32];
         let conv_b = [3u8; 32];
         assert!(s.read_state_set(&acct, &conv_a, 100).unwrap(), "首写推进");
-        assert!(!s.read_state_set(&acct, &conv_a, 50).unwrap(), "更小值不推进(单调)");
+        assert!(
+            !s.read_state_set(&acct, &conv_a, 50).unwrap(),
+            "更小值不推进(单调)"
+        );
         assert!(s.read_state_set(&acct, &conv_a, 200).unwrap(), "更大值推进");
         assert!(s.read_state_set(&acct, &conv_b, 77).unwrap());
-        let m: std::collections::HashMap<Vec<u8>, u64> = s.read_state_all(&acct).unwrap().into_iter().collect();
+        let m: std::collections::HashMap<Vec<u8>, u64> =
+            s.read_state_all(&acct).unwrap().into_iter().collect();
         assert_eq!(m.len(), 2);
         assert_eq!(m[&conv_a.to_vec()], 200);
         assert_eq!(m[&conv_b.to_vec()], 77);
-        assert!(s.read_state_all(&[9u8; 32]).unwrap().is_empty(), "别的账号不串");
+        assert!(
+            s.read_state_all(&[9u8; 32]).unwrap().is_empty(),
+            "别的账号不串"
+        );
     }
 
     #[test]
@@ -1986,7 +2425,10 @@ mod tests {
         assert_eq!(s.outbox_due(99).unwrap().len(), 0);
         assert_eq!(s.outbox_due(100).unwrap().len(), 1);
         s.outbox_put(&a, &b, 1, 10, 1, 700, b"dm2").unwrap();
-        assert!(s.outbox_due(100).unwrap().is_empty(), "覆盖写应移走旧 due 索引");
+        assert!(
+            s.outbox_due(100).unwrap().is_empty(),
+            "覆盖写应移走旧 due 索引"
+        );
         let moved = s
             .outbox_due(700)
             .unwrap()
@@ -1995,29 +2437,64 @@ mod tests {
             .unwrap();
         assert_eq!(moved.retries, 1);
         assert!(s.outbox_del(&a, &b, 1).unwrap());
-        assert_eq!(s.outbox_due(700).unwrap().len(), 1, "删除后只剩另一条未来 DM");
+        assert_eq!(
+            s.outbox_due(700).unwrap().len(),
+            1,
+            "删除后只剩另一条未来 DM"
+        );
 
-        s.group_outbox_put(&a, &b, 7, 10, 0, 100, &[c.to_vec()], b"group").unwrap();
+        s.group_outbox_put(&a, &b, 7, 10, 0, 100, &[c.to_vec()], b"group")
+            .unwrap();
         assert_eq!(s.group_outbox_due(100).unwrap().len(), 1);
-        assert_eq!(s.group_outbox_ack_node(&a, &b, 7, &c).unwrap(), (true, true));
-        assert!(s.group_outbox_due(100).unwrap().is_empty(), "GroupAck 清空时应删除 due 索引");
+        assert_eq!(
+            s.group_outbox_ack_node(&a, &b, 7, &c).unwrap(),
+            (true, true)
+        );
+        assert!(
+            s.group_outbox_due(100).unwrap().is_empty(),
+            "GroupAck 清空时应删除 due 索引"
+        );
 
-        s.channel_outbox_put(&a, &b, b"nonce", 10, 0, 100, b"pub").unwrap();
+        s.channel_outbox_put(&a, &b, b"nonce", 10, 0, 100, b"pub")
+            .unwrap();
         assert_eq!(s.channel_outbox_due(100).unwrap().len(), 1);
         assert!(s.channel_outbox_del(&a, &b, b"nonce").unwrap());
-        assert!(s.channel_outbox_due(100).unwrap().is_empty(), "频道 outbox 删除应清 due 索引");
+        assert!(
+            s.channel_outbox_due(100).unwrap().is_empty(),
+            "频道 outbox 删除应清 due 索引"
+        );
     }
 
     #[test]
     fn devices_and_revokes_persist() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.redb");
-        let cert = nm_proto::DeviceCert { account: vec![1; 32], device: vec![2; 32], role: "member".into(), ..Default::default() };
+        let cert = nm_proto::DeviceCert {
+            account: vec![1; 32],
+            device: vec![2; 32],
+            role: "member".into(),
+            ..Default::default()
+        };
         {
             let s = RedbStore::open(&path).unwrap();
-            s.put_device(&DeviceInfo { cert: Some(cert.clone()), label: "a".into(), ..Default::default() }).unwrap();
-            s.put_device(&DeviceInfo { cert: Some(cert.clone()), label: "b".into(), ..Default::default() }).unwrap();
-            s.put_revoke(&DeviceRevoke { account: vec![1; 32], device: vec![2; 32], ..Default::default() }).unwrap();
+            s.put_device(&DeviceInfo {
+                cert: Some(cert.clone()),
+                label: "a".into(),
+                ..Default::default()
+            })
+            .unwrap();
+            s.put_device(&DeviceInfo {
+                cert: Some(cert.clone()),
+                label: "b".into(),
+                ..Default::default()
+            })
+            .unwrap();
+            s.put_revoke(&DeviceRevoke {
+                account: vec![1; 32],
+                device: vec![2; 32],
+                ..Default::default()
+            })
+            .unwrap();
         }
         let s = RedbStore::open(&path).unwrap();
         let devs = s.all_devices().unwrap();
@@ -2043,7 +2520,10 @@ mod tests {
         // 重新打开 → 数据仍在（持久化）。
         let s = RedbStore::open(&path).unwrap();
         assert_eq!(s.all_entities().unwrap().len(), 1);
-        assert_eq!(s.get_entity(&[9u8; 32]).unwrap().unwrap().kind, "agent.assistant");
+        assert_eq!(
+            s.get_entity(&[9u8; 32]).unwrap().unwrap().kind,
+            "agent.assistant"
+        );
     }
 
     #[test]
@@ -2077,12 +2557,19 @@ mod blob_tests {
         let _ = std::fs::remove_file(&path);
         let store = RedbStore::open(&path).unwrap();
         let hash = vec![7u8; 32];
-        let blob = BlobData { hash: hash.clone(), data: b"hello-avatar".to_vec(), mime: "image/jpeg".into() };
+        let blob = BlobData {
+            hash: hash.clone(),
+            data: b"hello-avatar".to_vec(),
+            mime: "image/jpeg".into(),
+        };
         store.put_blob(&blob).unwrap();
         let got = store.get_blob(&hash).unwrap().expect("blob present");
         assert_eq!(got.data, b"hello-avatar");
         assert_eq!(got.mime, "image/jpeg");
-        assert!(store.get_blob(&[9u8; 32]).unwrap().is_none(), "未知 hash 应 None");
+        assert!(
+            store.get_blob(&[9u8; 32]).unwrap().is_none(),
+            "未知 hash 应 None"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }
