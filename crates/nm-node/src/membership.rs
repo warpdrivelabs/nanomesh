@@ -327,7 +327,7 @@ impl Node {
             let ttl_secs = cfg.ttl_secs.max(announce_iv.as_secs() * 3);
             // 重试 join：serve() 的 Router 起来后 gossip 才能收发。
             let mut topic = loop {
-                match self.join_channel(channel, self.peers_list()).await {
+                match self.join_channel(channel, self.gossip_bootstrap()).await {
                     Ok(t) => break t,
                     Err(e) => {
                         tracing::debug!("membership join retry: {e}");
@@ -345,13 +345,16 @@ impl Node {
             // 换网 epoch：换网后 gossip 订阅可能失效但 neighbor_count 非 0(和种子还连着)→ ==0 自愈不触发。
             // epoch 变化 = 确实换过网 → 无条件硬重 join(换新 topic),彻底重建 mesh、重新广播+收播发现。
             let mut seen_epoch = self.net_epoch();
+            // 0-邻居自愈重注入的退避(2s→30s,收到消息即重置)：防正反馈冲垮 mesh（镜像火管）。
+            let mut rejoin_backoff = std::time::Duration::from_secs(2);
+            let mut last_rejoin: Option<tokio::time::Instant> = None;
             loop {
                 let ep = self.net_epoch();
                 if ep != seen_epoch {
                     seen_epoch = ep;
                     tracing::info!("membership 换网(epoch 变) → 强制重 join gossip 以恢复动态发现");
                     self.notify_network_change().await;
-                    if let Ok(t) = self.join_channel(channel, self.peers_list()).await {
+                    if let Ok(t) = self.join_channel(channel, self.gossip_bootstrap()).await {
                         topic = t;
                         let _ = topic.publish(self.membership_card(&cfg.card)).await; // 立即广播本节点,加速被重新发现
                     }
@@ -367,10 +370,14 @@ impl Node {
                     biased;
                     _ = self.shutdown.cancelled() => break,
                     r = tokio::time::timeout(std::time::Duration::from_secs(1), topic.recv()) => match r {
-                        Ok(Some(msg)) => self.on_membership_msg(&msg.content, &cfg.federation),
+                        Ok(Some(msg)) => {
+                            rejoin_backoff = std::time::Duration::from_secs(2);
+                            last_rejoin = None;
+                            self.on_membership_msg(&msg.content, &cfg.federation)
+                        }
                         Ok(None) => {
                             // 频道关闭：重新加入。
-                            match self.join_channel(channel, self.peers_list()).await {
+                            match self.join_channel(channel, self.gossip_bootstrap()).await {
                                 Ok(t) => topic = t,
                                 Err(_) => {
                                     tokio::time::sleep(std::time::Duration::from_secs(2)).await
@@ -379,7 +386,7 @@ impl Node {
                         }
                         Err(_) => {
                             // 超时(1s 无消息)：若悄悄掉到 0 邻居(休眠唤醒/换网后连接全死但订阅流未关闭,
-                            // 不会走 Ok(None) 重 join)→ 用【最新】peers_list 重连,否则动态发现永久失联,
+                            // 不会走 Ok(None) 重 join)→ 用【收敛】bootstrap 重连,否则动态发现永久失联,
                             // 只剩手动种子,其他节点再也学不到。镜像 presence 的自愈。
                             if topic.neighbor_count() == 0 {
                                 // 同 IP 唤醒不触发换网回调 → iroh 可能还抱着死的 relay 连接。
@@ -389,7 +396,15 @@ impl Node {
                                     self.notify_network_change().await;
                                     last_net_nudge = Some(now);
                                 }
-                                let _ = topic.rejoin(self.peers_list()).await;
+                                // 退避(2s→30s)重注入:斩断「0 邻居→每 1s 重灌全部 peers」正反馈;邻居恢复即重置。
+                                if last_rejoin.map_or(true, |t| now.duration_since(t) >= rejoin_backoff) {
+                                    let _ = topic.rejoin(self.gossip_bootstrap()).await;
+                                    last_rejoin = Some(now);
+                                    rejoin_backoff = (rejoin_backoff * 2).min(std::time::Duration::from_secs(30));
+                                }
+                            } else {
+                                rejoin_backoff = std::time::Duration::from_secs(2);
+                                last_rejoin = None;
                             }
                         }
                     }

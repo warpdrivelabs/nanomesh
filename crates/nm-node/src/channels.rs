@@ -141,16 +141,33 @@ fn channel_topic(channel_id: &[u8]) -> [u8; 32] {
     nm_crypto::content_hash(format!("nmspace:channel:{}", hex_encode(channel_id)).as_bytes())
 }
 
+/// gossip 引导集合（Ctx 版，供频道 join）：ctx.peers 打散后取至多 `GOSSIP_BOOTSTRAP_K` 个，避免用
+/// 【全部】peers 做 bootstrap 造成连接风暴（根治「建/订阅频道冲垮单播 mesh」）。peers<=K 时取全部。
+fn gossip_bootstrap(ctx: &Ctx) -> Vec<[u8; 32]> {
+    let mut all: Vec<[u8; 32]> = ctx
+        .peers
+        .iter()
+        .filter_map(|e| <[u8; 32]>::try_from(e.key().as_slice()).ok())
+        .collect();
+    let k = crate::GOSSIP_BOOTSTRAP_K;
+    if all.len() > k {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as usize)
+            .unwrap_or(0);
+        let n = all.len();
+        all.rotate_left(seed % n);
+        all.truncate(k);
+    }
+    all
+}
+
 /// 确保频道已 join gossip 并起收播任务（幂等）。首次订阅时调用。
 async fn ensure_channel(ctx: &Ctx, channel_id: &[u8], meta: Option<Channel>) -> bool {
     if ctx.channels.contains_key(channel_id) {
         return true;
     }
-    let mut bootstrap: Vec<[u8; 32]> = ctx
-        .peers
-        .iter()
-        .filter_map(|e| <[u8; 32]>::try_from(e.key().as_slice()).ok())
-        .collect();
+    let mut bootstrap = gossip_bootstrap(ctx);
     // pkarr 发现兜底：无锚的晚加入者据频道 id 解析到的 seed（由 spawn_channel_pkarr 周期填充）。
     if let Some(seeds) = ctx.pkarr_seeds.get(channel_id) {
         for s in seeds.value() {
@@ -595,8 +612,11 @@ pub(crate) async fn handle_channel_firehose(ctx: &Ctx, cg: &ChannelGram) {
             // home 经火管收到发布意图 → 定序 + 经火管回广播 Msg（也会被频道专属主题的本地任务接住）。
             match sequence_pubreq(ctx, req) {
                 Ok(m) => {
-                    if let Some(e) = ctx.channels.get(cid) {
-                        channel_deliver(ctx, &m, &e.subs).await;
+                    // 克隆 subs 并先释放 DashMap 守卫、再 await（避免跨 await 持 ctx.channels 守卫→运行时冻结，
+                    // 镜像下方 Msg 臂 `let subs = e.subs.clone(); drop(e);` 的写法）。
+                    let subs = ctx.channels.get(cid).map(|e| e.subs.clone());
+                    if let Some(subs) = subs {
+                        channel_deliver(ctx, &m, &subs).await;
                     }
                     broadcast_channel_firehose(ctx, &ChannelGram { kind: Some(Kind::Msg(m)) });
                 }

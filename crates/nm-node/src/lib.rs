@@ -123,6 +123,11 @@ const CONN_GATE_CAP: usize = 65_536;   // conn_gate 表容量上限（满则整�
 // 公钥 → (当前窗口起点 Unix 秒, 窗口内计数)：单来源重连速率的滑动计数窗口。
 type ConnGate = DashMap<[u8; 32], (u64, u32)>;
 
+// gossip 引导集合上限：频道/火管/membership 等「全网主题」的 join/rejoin 不再用【全部】peers 做 bootstrap，
+// 而是打散后取至多 K 个——HyParView 只需少量引导点即可成型。退「单一 gossip actor + 共享 socket 连接风暴」
+// (根治「建/订阅频道冲垮单播 mesh」)。小集群(peers<=K)等价于全部、行为不变；大集群据此封顶、退 O(N)。
+pub(crate) const GOSSIP_BOOTSTRAP_K: usize = 16;
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -353,7 +353,7 @@ impl Node {
         tokio::spawn(async move {
             let channel = Self::group_channel(&federation);
             let mut topic = loop {
-                match self.join_channel(channel, self.peers_list()).await {
+                match self.join_channel(channel, self.gossip_bootstrap()).await {
                     Ok(t) => break t,
                     Err(e) => {
                         tracing::debug!("group sync join retry: {e}");
@@ -410,13 +410,16 @@ impl Node {
             let mut last_pkarr = tokio::time::Instant::now() - std::time::Duration::from_secs(120);
             // 换网 epoch：变化即硬重 join 火管主题(neighbor_count 可能非0但订阅已失效),恢复群/频道/presence兜底扇出。
             let mut seen_epoch = self.net_epoch();
+            // 0-邻居自愈重注入的退避(2s→30s,收到消息即重置)：防「0 邻居→无退避重灌全部 peers」正反馈冲垮 mesh。
+            let mut rejoin_backoff = std::time::Duration::from_secs(2);
+            let mut last_rejoin: Option<tokio::time::Instant> = None;
             loop {
                 let ep = self.net_epoch();
                 if ep != seen_epoch {
                     seen_epoch = ep;
                     tracing::info!("group firehose 换网(epoch 变) → 强制重 join gossip");
                     self.notify_network_change().await;
-                    if let Ok(t) = self.join_channel(channel, self.peers_list()).await {
+                    if let Ok(t) = self.join_channel(channel, self.gossip_bootstrap()).await {
                         topic = t;
                     }
                 }
@@ -551,15 +554,28 @@ impl Node {
                     biased;
                     _ = self.shutdown.cancelled() => break,
                     r = tokio::time::timeout(std::time::Duration::from_millis(300), topic.recv()) => match r {
-                        Ok(Some(msg)) => self.on_group_gossip(&msg.content).await,
-                        Ok(None) => match self.join_channel(channel, self.peers_list()).await {
+                        Ok(Some(msg)) => {
+                            rejoin_backoff = std::time::Duration::from_secs(2);
+                            last_rejoin = None;
+                            self.on_group_gossip(&msg.content).await
+                        }
+                        Ok(None) => match self.join_channel(channel, self.gossip_bootstrap()).await {
                             Ok(t) => topic = t,
                             Err(_) => tokio::time::sleep(std::time::Duration::from_secs(2)).await,
                         },
-                        // 超时:火管主题悄悄掉到 0 邻居 → 重注入 bootstrap 自愈(直连/换网 churn 下必需)。
+                        // 超时:火管主题悄悄掉到 0 邻居 → 退避重注入【收敛】bootstrap 自愈(直连/换网 churn 下必需)。
+                        // 退避(2s→30s)斩断「0 邻居→每 300ms 重灌全部 peers」正反馈;邻居恢复即重置。
                         Err(_) => {
                             if topic.neighbor_count() == 0 {
-                                let _ = topic.rejoin(self.peers_list()).await;
+                                let now = tokio::time::Instant::now();
+                                if last_rejoin.map_or(true, |t| now.duration_since(t) >= rejoin_backoff) {
+                                    let _ = topic.rejoin(self.gossip_bootstrap()).await;
+                                    last_rejoin = Some(now);
+                                    rejoin_backoff = (rejoin_backoff * 2).min(std::time::Duration::from_secs(30));
+                                }
+                            } else {
+                                rejoin_backoff = std::time::Duration::from_secs(2);
+                                last_rejoin = None;
                             }
                         }
                     }

@@ -226,7 +226,13 @@ impl Node {
             per_group_live: Arc::new(GroupLive::new()),
             pkarr_url: Arc::new(std::sync::RwLock::new(None)),
             pkarr_seeds: Arc::new(DashMap::new()),
-            http: reqwest::Client::new(),
+            // 带超时:4 处后台 pkarr/member-index HTTP 均用此 client；无超时时黑洞 relay 会永久挂起
+            // spawn_group_sync 循环(该循环也维护群火管/inbox 主题)→间接拖垮跨节点 DM。10s 请求 / 5s 连接。
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             pkarr_stat: Arc::new(crate::pkarr_runtime::PkarrStat::default()),
             group_pub,
             group_pub_rx: std::sync::Mutex::new(Some(group_pub_rx)),

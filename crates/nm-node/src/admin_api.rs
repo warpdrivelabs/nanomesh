@@ -259,6 +259,24 @@ impl Node {
             .collect()
     }
 
+    /// gossip 引导集合：对等打散后取至多 `GOSSIP_BOOTSTRAP_K` 个，供「全网主题」(火管/membership)的
+    /// join/rejoin 使用——避免用【全部】peers 做 bootstrap 造成单一 gossip actor + 共享 socket 连接风暴。
+    /// peers<=K 时等价于 peers_list()（小集群行为不变）。见 `crate::GOSSIP_BOOTSTRAP_K`。
+    pub(crate) fn gossip_bootstrap(&self) -> Vec<[u8; 32]> {
+        let mut all = self.peers_list();
+        let k = crate::GOSSIP_BOOTSTRAP_K;
+        if all.len() > k {
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as usize)
+                .unwrap_or(0);
+            let n = all.len();
+            all.rotate_left(seed % n);
+            all.truncate(k);
+        }
+        all
+    }
+
     /// 添加/更新一个带元数据的对等（名称/物理地址/email/mobile/gps）——运行时生效 + 持久化。
     /// 连接一律按 node id（公钥）发现；`info.address` 仅为物理位置元数据。重复 id 即为编辑(覆盖)。
     pub fn add_peer_full(&self, node_id: [u8; 32], info: PeerInfo) -> Result<(), NodeError> {
