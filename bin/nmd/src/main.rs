@@ -622,6 +622,10 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // 后端管理控制 API（若配置了 [admin] api_addr + api_token）：供 nm-admind 取数/下发控制。
+    // P1-8：legacy token 放 RwLock cell —— reload（SIGHUP / POST /reload）可热轮换，无需重启。
+    let admin_token_cell: std::sync::Arc<std::sync::RwLock<String>> = std::sync::Arc::new(
+        std::sync::RwLock::new(cfg.admin.api_token.clone().unwrap_or_default()),
+    );
     if let (Some(api_addr), Some(api_token)) =
         (cfg.admin.api_addr.clone(), cfg.admin.api_token.clone())
         && !api_addr.trim().is_empty()
@@ -631,8 +635,9 @@ async fn async_main() -> anyhow::Result<()> {
         let db_path = cfg.db.clone();
         let admin_fed = cfg.membership.federation.clone();
         let cfg_path = args.config.clone();
+        let token_cell = admin_token_cell.clone();
         tokio::spawn(async move {
-            if let Err(e) = admin::serve(node_admin, api_addr, api_token, db_path, admin_fed, cfg_path).await {
+            if let Err(e) = admin::serve(node_admin, api_addr, token_cell, db_path, admin_fed, cfg_path).await {
                 tracing::warn!("admin api exited: {e}");
             }
         });
@@ -728,6 +733,7 @@ async fn async_main() -> anyhow::Result<()> {
     {
         let node = node.clone();
         let cfg_path = args.config.clone();
+        let token_cell = admin_token_cell.clone();
         tokio::spawn(async move {
             use tokio::signal::unix::{signal, SignalKind};
             let mut hup = match signal(SignalKind::hangup()) {
@@ -736,7 +742,7 @@ async fn async_main() -> anyhow::Result<()> {
             };
             while hup.recv().await.is_some() {
                 tracing::info!("SIGHUP → 重载配置");
-                match reload_config_from(&cfg_path, &node) {
+                match reload_config_from(&cfg_path, &node, &token_cell) {
                     Ok(summary) => tracing::info!(audit = true, actor = "signal", action = "reload", ok = true, detail = %summary, "ADMIN AUDIT"),
                     Err(e) => tracing::warn!(audit = true, actor = "signal", action = "reload", ok = false, detail = %e, "ADMIN AUDIT"),
                 }
@@ -752,7 +758,11 @@ async fn async_main() -> anyhow::Result<()> {
 /// P1-10 热加载：读配置文件并把**可运行时变更**的子集应用到活动节点。返回变更摘要（审计用）。
 /// 热应用：黑名单(diff ban/unban)、手动对等(diff add/remove)、per_topic、pkarr/dns url、域名。
 /// 需重绑（仅告警、不改）：relay URL、bind_port、identity、db、mode、max_connections、membership.*。
-pub(crate) fn reload_config_from(cfg_path: &str, node: &std::sync::Arc<nm_node::Node>) -> anyhow::Result<String> {
+pub(crate) fn reload_config_from(
+    cfg_path: &str,
+    node: &std::sync::Arc<nm_node::Node>,
+    admin_token: &std::sync::Arc<std::sync::RwLock<String>>,
+) -> anyhow::Result<String> {
     let raw = std::fs::read_to_string(cfg_path)?;
     let cfg: Config = toml::from_str(&raw)?;
     let mut changes: Vec<String> = Vec::new();
@@ -776,7 +786,18 @@ pub(crate) fn reload_config_from(cfg_path: &str, node: &std::sync::Arc<nm_node::
     changes.push(format!("per_topic={}", cfg.federation.per_topic));
     changes.push(format!("presence_scoped={}", cfg.federation.presence_scoped));
 
-    // ③ 需重绑项：检测到与进程启动时不同则告警（此处只提示；真正生效需重启/自重启）。
+    // ③ P1-8：legacy admin token 热轮换（改 nmd.toml [admin] api_token 后 SIGHUP / POST /reload 即生效，
+    // 免重启）。不把 token 值写进变更摘要（机密）。
+    {
+        let newtok = cfg.admin.api_token.clone().unwrap_or_default();
+        let mut g = admin_token.write().unwrap();
+        if *g != newtok {
+            *g = newtok;
+            changes.push("admin_token(已热轮换)".into());
+        }
+    }
+
+    // ④ 需重绑项：检测到与进程启动时不同则告警（此处只提示；真正生效需重启/自重启）。
     if !cfg.relay.all().is_empty() {
         changes.push("relay(需重启生效)".into());
     }

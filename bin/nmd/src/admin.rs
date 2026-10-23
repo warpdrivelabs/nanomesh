@@ -1,13 +1,13 @@
 //! nmd 后端管理控制 API：axum，绑定本机地址 + 共享 token，供独立的 `nm-admind` 取数/下发控制。
 //! 只读端点返回实时指标（连接/用户/存储/流量/系统）；控制端点做拉黑/解黑/踢下线。
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use axum::{
     Json, Router,
     extract::{Query, State},
-    http::StatusCode,
+    http::{HeaderValue, Method, StatusCode},
     response::IntoResponse,
     routing::{get, post},
 };
@@ -126,7 +126,8 @@ struct ProcMetrics {
 struct AppState {
     node: Arc<Node>,
     db_path: String,
-    token: String,
+    /// P1-8：legacy 共享 token（RwLock → 可经 reload 热轮换）。空串=禁用 legacy 通道、仅操作员凭据可用。
+    legacy: Arc<RwLock<String>>,
     start: Instant,
     proc: Arc<Mutex<ProcMetrics>>,
     /// 本节点所属联邦（成员频道名）。展示用：peers 面板与新增对等归属此联邦。
@@ -139,7 +140,7 @@ struct AppState {
 pub async fn serve(
     node: Arc<Node>,
     addr: String,
-    token: String,
+    token: Arc<RwLock<String>>,
     db_path: String,
     federation: String,
     config_path: String,
@@ -150,7 +151,7 @@ pub async fn serve(
     let state = AppState {
         node,
         db_path,
-        token,
+        legacy: token,
         start: Instant::now(),
         proc,
         federation,
@@ -182,6 +183,7 @@ pub async fn serve(
         .route("/names/list", get(names_list))
         .route("/names/set", post(names_set))
         .route("/names/del", post(names_del))
+        .route("/operators", get(operators_list).post(operators_set))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth))
         // 健康探针 + 指标：免鉴权（供 systemd/容器探针、Prometheus 抓取），merge 在 auth layer 之外。
         // /healthz 存活（进程能响应即 200，不依赖后端，避免误杀）；/readyz 就绪（redb 可写 + endpoint 有地址，否则 503）；
@@ -203,22 +205,52 @@ pub async fn serve(
     Ok(())
 }
 
-/// token 校验中间件。
+/// 鉴权中间件（P1-8）。两种凭据，二选一：
+/// 1) `x-admin-token`＝legacy 共享 token（常量时间比较；持有者視同 control 全权——向后兼容 admind/脚本）；
+/// 2) `x-admin-operator` + `x-admin-key`＝具名操作员凭据（Argon2 校验 → 其作用域）。
+/// 作用域统一在此判：**POST=control、GET=read**（control ⊇ read）——天然覆盖所有变更路由（含 names/del），
+/// 新增 POST 默认即受控。拒绝均入审计。验证通过后把**已验证的操作员名写回请求头**，下游 `operator()` 零改动。
 async fn auth(
     State(st): State<AppState>,
-    req: axum::extract::Request,
+    mut req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, StatusCode> {
-    let ok = req
-        .headers()
-        .get("x-admin-token")
-        .and_then(|v| v.to_str().ok())
-        == Some(st.token.as_str());
-    if ok {
-        Ok(next.run(req).await)
+    let path = req.uri().path().to_string();
+    let hdr = |req: &axum::extract::Request, n: &str| {
+        req.headers().get(n).and_then(|v| v.to_str().ok()).map(str::to_string)
+    };
+    let (who, scope): (String, &str) = if let Some(tok) = hdr(&req, "x-admin-token") {
+        let legacy = st.legacy.read().unwrap().clone();
+        if !legacy.is_empty() && Node::token_eq(&tok, &legacy) {
+            // legacy 通道：操作员名按来访者声明（admind 已转发真实登录名），缺省 token-holder。
+            (hdr(&req, "x-admin-operator").unwrap_or_else(|| "token-holder".into()), "control")
+        } else {
+            audit("?", "auth-denied", &path, false, "bad token");
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    } else if let (Some(name), Some(key)) = (hdr(&req, "x-admin-operator"), hdr(&req, "x-admin-key")) {
+        match st.node.operator_verify(&name, &key) {
+            Some(scope) => {
+                // 写回已验证身份（覆盖来访者可能伪造的头），下游 operator()/audit 读到的即真实身份。
+                if let Ok(v) = HeaderValue::from_str(&name) {
+                    req.headers_mut().insert("x-admin-operator", v);
+                }
+                let scope: &'static str = if scope == "control" { "control" } else { "read" };
+                (name, scope)
+            }
+            None => {
+                audit(&name, "auth-denied", &path, false, "bad operator credentials");
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+        }
     } else {
-        Err(StatusCode::UNAUTHORIZED)
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    if req.method() == Method::POST && scope != "control" {
+        audit(&who, "scope-denied", &path, false, "需要 control 作用域");
+        return Err(StatusCode::FORBIDDEN);
     }
+    Ok(next.run(req).await)
 }
 
 /// 存活探针：进程能响应 HTTP 即健康。**不依赖**后端状态（redb/网络），避免依赖抖动误杀进程。
@@ -981,10 +1013,86 @@ struct NameDelReq {
     domain: String,
     local_part: String,
 }
-async fn names_del(State(st): State<AppState>, Json(r): Json<NameDelReq>) -> Json<Value> {
+async fn names_del(
+    State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(r): Json<NameDelReq>,
+) -> Json<Value> {
+    let op = operator(&headers);
+    let target = format!("{}@{}", r.local_part, r.domain);
     match st.node.admin_del_name(&r.domain, &r.local_part) {
-        Ok(()) => Json(json!({ "ok": true })),
-        Err(e) => Json(json!({ "ok": false, "error": e })),
+        Ok(()) => {
+            audit(&op, "names-del", &target, true, "");
+            Json(json!({ "ok": true }))
+        }
+        Err(e) => {
+            audit(&op, "names-del", &target, false, &e);
+            Json(json!({ "ok": false, "error": e }))
+        }
+    }
+}
+
+// ── P1-8 操作员管理（control 作用域；legacy token 持有者亦可）──
+
+#[derive(serde::Deserialize)]
+struct OperatorReq {
+    name: String,
+    /// 设/改密码（新建必填；与 scope 一起 upsert）。
+    password: Option<String>,
+    /// read | control（随 password 一起生效；缺省 read）。
+    scope: Option<String>,
+    /// 启/禁用既有操作员。
+    disabled: Option<bool>,
+    /// 删除操作员。
+    delete: Option<bool>,
+}
+
+async fn operators_list(State(st): State<AppState>) -> Json<Value> {
+    let rows: Vec<Value> = st
+        .node
+        .operators_list()
+        .into_iter()
+        .map(|(name, scope, disabled)| json!({ "name": name, "scope": scope, "disabled": disabled }))
+        .collect();
+    Json(json!({ "operators": rows }))
+}
+
+async fn operators_set(
+    State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(r): Json<OperatorReq>,
+) -> Json<Value> {
+    let op = operator(&headers);
+    let outcome: Result<&str, String> = if r.delete.unwrap_or(false) {
+        match st.node.operator_del(&r.name) {
+            Ok(true) => Ok("deleted"),
+            Ok(false) => Err("不存在".into()),
+            Err(e) => Err(e.to_string()),
+        }
+    } else if let Some(d) = r.disabled {
+        match st.node.operator_set_disabled(&r.name, d) {
+            Ok(true) => Ok(if d { "disabled" } else { "enabled" }),
+            Ok(false) => Err("不存在".into()),
+            Err(e) => Err(e.to_string()),
+        }
+    } else if let Some(pw) = &r.password {
+        let scope = r.scope.as_deref().unwrap_or("read");
+        match st.node.operator_set(&r.name, pw, scope) {
+            Ok(()) => Ok("upserted"),
+            Err(e) => Err(e.to_string()),
+        }
+    } else {
+        Err("需要 password（新建/改密）、disabled 或 delete 之一".into())
+    };
+    match outcome {
+        Ok(what) => {
+            audit(&op, "operator-set", &r.name, true, what);
+            Json(json!({ "ok": true, "action": what }))
+        }
+        Err(e) => {
+            audit(&op, "operator-set", &r.name, false, &e);
+            Json(json!({ "ok": false, "error": e }))
+        }
     }
 }
 
@@ -995,7 +1103,7 @@ async fn reload(
     headers: axum::http::HeaderMap,
 ) -> Result<Json<Value>, StatusCode> {
     let op = operator(&headers);
-    match crate::reload_config_from(&st.config_path, &st.node) {
+    match crate::reload_config_from(&st.config_path, &st.node, &st.legacy) {
         Ok(summary) => {
             audit(&op, "reload", &st.config_path, true, &summary);
             Ok(Json(json!({ "ok": true, "summary": summary })))

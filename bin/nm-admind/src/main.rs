@@ -680,6 +680,7 @@ async fn proxy_get(s: State<AppState>, headers: HeaderMap, path: &str) -> Respon
         .http
         .get(format!("{}{}", s.nmd_api, path))
         .header("x-admin-token", &s.nmd_token)
+        .header("x-admin-operator", s.auth.username())
         .send()
         .await
     {
@@ -726,7 +727,7 @@ async fn proxy_post(
         .post(format!("{}{}", s.nmd_api, path))
         .header("x-admin-token", &s.nmd_token)
         // P1-8：把已登录操作员身份转发给 nmd，使 nmd 审计日志能归因到具名操作员(而非匿名 token 持有者)。
-        .header("x-admin-operator", "admin")
+        .header("x-admin-operator", s.auth.username())
         .json(&body.0)
         .send()
         .await

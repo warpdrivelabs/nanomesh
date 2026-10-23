@@ -29,6 +29,9 @@ const NAME_SECRETS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("name_s
 /// F2：本节点为「群 home」时持有的群签名私钥：key = group_id(群公钥,32)，value = 群私钥(32)。
 /// 仅本地、绝不广播；用于 pkarr 发布 `群公钥 → seed 节点` 发现记录。
 const GROUP_SECRETS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("group_secrets");
+/// P1-8 管理操作员凭据：key = 操作员名(utf8)，value = JSON {phc, scope:"read"|"control", disabled}。
+/// 只存 Argon2 PHC 哈希(非明文)，可随 /backup 入快照；镜像 NAME_SECRETS 的 KV 形状。
+const OPERATORS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("operators");
 // 本节点拥有的域名（N1，TOFU）：key = 域名字节，value = 占位（申请时间戳字符串）。
 const DOMAINS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("domains");
 const ROSTER: TableDefinition<&[u8], &[u8]> = TableDefinition::new("roster");
@@ -180,6 +183,7 @@ impl RedbStore {
             wtx.open_table(BLOBS).map_err(db_err)?;
             wtx.open_table(NAMES).map_err(db_err)?;
             wtx.open_table(NAME_SECRETS).map_err(db_err)?;
+            wtx.open_table(OPERATORS).map_err(db_err)?;
             wtx.open_table(DOMAINS).map_err(db_err)?;
             wtx.open_table(DEVICES).map_err(db_err)?;
             wtx.open_table(REVOKED).map_err(db_err)?;
@@ -1908,6 +1912,49 @@ impl RedbStore {
             None => Ok(None),
         }
     }
+    /// P1-8：存/覆盖一个管理操作员凭据（value=JSON 串，含 Argon2 PHC；镜像 [`Self::put_name_secret`]）。
+    pub fn put_operator(&self, name: &str, rec_json: &str) -> Result<()> {
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        {
+            let mut t = wtx.open_table(OPERATORS).map_err(db_err)?;
+            t.insert(name.as_bytes(), rec_json.as_bytes()).map_err(db_err)?;
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(())
+    }
+    pub fn operator(&self, name: &str) -> Result<Option<String>> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(OPERATORS).map_err(db_err)?;
+        match t.get(name.as_bytes()).map_err(db_err)? {
+            Some(v) => Ok(Some(String::from_utf8_lossy(v.value()).into_owned())),
+            None => Ok(None),
+        }
+    }
+    pub fn del_operator(&self, name: &str) -> Result<bool> {
+        let wtx = self.db.begin_write().map_err(db_err)?;
+        let existed;
+        {
+            let mut t = wtx.open_table(OPERATORS).map_err(db_err)?;
+            existed = t.remove(name.as_bytes()).map_err(db_err)?.is_some();
+        }
+        wtx.commit().map_err(db_err)?;
+        Ok(existed)
+    }
+    /// 全部操作员 (name, rec_json)。供启动回填/管理台列表（调用方剥离 phc 再外显）。
+    pub fn all_operators(&self) -> Result<Vec<(String, String)>> {
+        let rtx = self.db.begin_read().map_err(db_err)?;
+        let t = rtx.open_table(OPERATORS).map_err(db_err)?;
+        let mut v = Vec::new();
+        for it in t.iter().map_err(db_err)? {
+            let (k, val) = it.map_err(db_err)?;
+            v.push((
+                String::from_utf8_lossy(k.value()).into_owned(),
+                String::from_utf8_lossy(val.value()).into_owned(),
+            ));
+        }
+        Ok(v)
+    }
+
     /// F2：存本节点为 home 的群签名私钥（32 字节）。仅本地、绝不广播；镜像 [`Self::name_secret`]。
     pub fn put_group_secret(&self, group_id: &[u8], secret: &[u8]) -> Result<()> {
         let wtx = self.db.begin_write().map_err(db_err)?;

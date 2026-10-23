@@ -68,6 +68,11 @@ impl Auth {
         Ok(())
     }
 
+    /// 当前登录用户名（单用户 admin；供代理层把真实操作员身份转发给 nmd 审计）。
+    pub fn username(&self) -> String {
+        self.cred.lock().unwrap().username.clone()
+    }
+
     /// 登录：校验通过则发一个会话 token，返回 (token, must_change)。
     /// P1-8：失败滑动窗口限流(挡暴力破解) + 成功/失败/锁定均记审计日志。`src` 为来源标识(IP/直连)。
     pub fn login(&self, username: &str, password: &str, src: &str) -> Option<(String, bool)> {

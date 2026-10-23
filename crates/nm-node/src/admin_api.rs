@@ -277,6 +277,92 @@ impl Node {
         all
     }
 
+    // ── P1-8 管理操作员凭据：redb OPERATORS 表存 {Argon2 PHC, scope, disabled}，供 nmd admin API
+    // 做「每操作员凭据 + 作用域 + 免重启轮换」。哈希/校验复用 naming.rs 的 Argon2 模式。──
+
+    /// 常量时间 token 比较：两侧先 blake3 成定长摘要再比对，规避变长明文 `==` 的时序泄露。
+    pub fn token_eq(a: &str, b: &str) -> bool {
+        nm_crypto::content_hash(a.as_bytes()) == nm_crypto::content_hash(b.as_bytes())
+    }
+
+    /// 新建/覆盖操作员。`name` 限 `[A-Za-z0-9_-]{1,32}`（可安全作 HTTP 头与审计字段）；
+    /// `scope` ∈ {"read","control"}；密码即时 Argon2-PHC 哈希，明文不落盘。
+    pub fn operator_set(&self, name: &str, password: &str, scope: &str) -> Result<(), NodeError> {
+        if name.is_empty()
+            || name.len() > 32
+            || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(NodeError::Other("操作员名须为 [A-Za-z0-9_-]{1,32}".into()));
+        }
+        if scope != "read" && scope != "control" {
+            return Err(NodeError::Other("scope 须为 read 或 control".into()));
+        }
+        if password.len() < 6 {
+            return Err(NodeError::Other("密码至少 6 位".into()));
+        }
+        let Some(store) = &self.store else {
+            return Err(NodeError::Other("no store".into()));
+        };
+        let phc = crate::naming::hash_account_password(password).map_err(NodeError::Other)?;
+        let rec = serde_json::json!({ "phc": phc, "scope": scope, "disabled": false });
+        store.put_operator(name, &rec.to_string())?;
+        Ok(())
+    }
+
+    /// 校验操作员凭据：存在、未禁用、Argon2 校验通过 → 返回其 scope；否则 None（不区分原因，防枚举）。
+    pub fn operator_verify(&self, name: &str, password: &str) -> Option<String> {
+        let store = self.store.as_ref()?;
+        let rec: serde_json::Value =
+            serde_json::from_str(&store.operator(name).ok().flatten()?).ok()?;
+        if rec.get("disabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return None;
+        }
+        let phc = rec.get("phc")?.as_str()?;
+        if !crate::naming::verify_account_password(phc, password) {
+            return None;
+        }
+        Some(rec.get("scope").and_then(|v| v.as_str()).unwrap_or("read").to_string())
+    }
+
+    /// 启/禁用操作员（禁用=保留凭据但拒绝鉴权）。返回是否存在。
+    pub fn operator_set_disabled(&self, name: &str, disabled: bool) -> Result<bool, NodeError> {
+        let Some(store) = &self.store else {
+            return Err(NodeError::Other("no store".into()));
+        };
+        let Some(raw) = store.operator(name)? else { return Ok(false) };
+        let mut rec: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|e| NodeError::Other(e.to_string()))?;
+        rec["disabled"] = serde_json::Value::Bool(disabled);
+        store.put_operator(name, &rec.to_string())?;
+        Ok(true)
+    }
+
+    /// 删除操作员。返回是否存在过。
+    pub fn operator_del(&self, name: &str) -> Result<bool, NodeError> {
+        let Some(store) = &self.store else {
+            return Err(NodeError::Other("no store".into()));
+        };
+        Ok(store.del_operator(name)?)
+    }
+
+    /// 操作员列表 (name, scope, disabled)——**不含** PHC（哈希绝不外显）。
+    pub fn operators_list(&self) -> Vec<(String, String, bool)> {
+        let Some(store) = &self.store else { return Vec::new() };
+        store
+            .all_operators()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(name, raw)| {
+                let rec: serde_json::Value = serde_json::from_str(&raw).ok()?;
+                Some((
+                    name,
+                    rec.get("scope").and_then(|v| v.as_str()).unwrap_or("read").to_string(),
+                    rec.get("disabled").and_then(|v| v.as_bool()).unwrap_or(false),
+                ))
+            })
+            .collect()
+    }
+
     /// 添加/更新一个带元数据的对等（名称/物理地址/email/mobile/gps）——运行时生效 + 持久化。
     /// 连接一律按 node id（公钥）发现；`info.address` 仅为物理位置元数据。重复 id 即为编辑(覆盖)。
     pub fn add_peer_full(&self, node_id: [u8; 32], info: PeerInfo) -> Result<(), NodeError> {
