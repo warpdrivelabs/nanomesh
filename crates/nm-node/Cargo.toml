@@ -25,6 +25,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 prost = "0.14"
 argon2 = { workspace = true }
+pkarr = { version = "8.1.0", default-features = false, features = ["dht"] }  # P2-12 Phase B：真 Mainline DHT(trustless 发现叠加层)
+bytes = { workspace = true }  # pkarr SignedPacket relay-payload 桥(Bytes)
 
 [dev-dependencies]
 nm-client = { workspace = true }
@@ -32,3 +34,4 @@ nm-entity = { workspace = true }
 tempfile = "3"
 tracing-subscriber = { workspace = true }
 axum = { workspace = true }   # F2：pkarr mock relay（本地验证 publish/resolve）
+mainline = "8"                # P2-12 Phase B：本地 DHT Testnet(#[ignore] e2e)

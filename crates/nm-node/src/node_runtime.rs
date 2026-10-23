@@ -15,7 +15,7 @@ use crate::{
     Ctx, Devices, GossipGate, ImspaceProto, MemDirectory, Node, NodeError, PeerInfo, Revoked, Sessions,
     SessionsMeta, INBOX_RETENTION_MS,
 };
-
+ 
 impl Node {
     pub async fn bind_local(seed: [u8; 32]) -> Result<Self, NodeError> {
         Self::from_ep(
@@ -238,6 +238,8 @@ impl Node {
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             pkarr_stat: Arc::new(crate::pkarr_runtime::PkarrStat::default()),
+            pkarr_dht_on: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pkarr_dht: Arc::new(tokio::sync::OnceCell::new()),
             group_pub,
             group_pub_rx: std::sync::Mutex::new(Some(group_pub_rx)),
             domains: Arc::new(std::sync::RwLock::new(owned_domains)),

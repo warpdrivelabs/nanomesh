@@ -93,7 +93,7 @@ impl Node {
     /// 新节点据带外配置的锚点公钥 GET 此记录即得入网 bootstrap。pub 便于运维/测试直接触发。
     pub async fn publish_member_index(&self) {
         let endpoints = self.pkarr_endpoints();
-        if endpoints.is_empty() {
+        if endpoints.is_empty() && !self.pkarr_dht_enabled() {
             return;
         }
         let me = self.ep.id_bytes();
@@ -127,13 +127,15 @@ impl Node {
                 Err(e) => tracing::debug!("member index publish failed ({url}): {e}"),
             }
         }
+        // P2-12 Phase B：best-effort 同发 Mainline DHT（关着即空操作;同一 relay-payload 包）。
+        self.pkarr_dht_publish(&z32, &payload, "member-index").await;
     }
 
     /// F6/M1：据锚点公钥从 relay 解析本联邦 bootstrap 成员集合（GET + 验签），并把解析到的节点喂入
     /// `peers`（满足 gossip bootstrap 契约）。返回学到的节点数。无 relay / 解析失败则 0。多 relay 时轮询，首个成功即用。
     pub async fn resolve_member_index(&self, anchor_pubkey: &[u8; 32]) -> usize {
         let endpoints = self.pkarr_endpoints();
-        if endpoints.is_empty() {
+        if endpoints.is_empty() && !self.pkarr_dht_enabled() {
             return 0;
         }
         let Ok(pk) = nm_transport::Id::from_bytes(anchor_pubkey) else { return 0 };
@@ -149,6 +151,10 @@ impl Node {
                     }
                 }
             }
+        }
+        // P2-12 Phase B：relay 全失败 → Mainline DHT 兜底（trustless;parse 同一验签路径）。
+        if payload.is_none() {
+            payload = self.pkarr_dht_resolve_payload(&z32).await;
         }
         let Some(payload) = payload else { return 0 };
         let members = match member_rec::parse(anchor_pubkey, &payload) {
@@ -429,7 +435,7 @@ impl Node {
         tokio::spawn(async move {
             let iv = std::time::Duration::from_secs(60);
             loop {
-                if !self.pkarr_endpoints().is_empty() {
+                if self.pkarr_any_sink() {
                     if anchor {
                         self.publish_member_index().await;
                     }

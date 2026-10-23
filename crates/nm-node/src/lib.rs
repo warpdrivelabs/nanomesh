@@ -224,6 +224,10 @@ pub struct Node {
     pkarr_seeds: Arc<DashMap<Vec<u8>, Vec<[u8; 32]>>>, // F2：pkarr 解析到的各群 seed 节点（join bootstrap 兜底/无锚发现）
     http: reqwest::Client,                  // F2：pkarr relay HTTP 客户端
     pkarr_stat: Arc<pkarr_runtime::PkarrStat>, // P2-12 Phase A：pkarr 多中继解析观测
+    // P2-12 Phase B：真 Mainline DHT(trustless 叠加层)。默认关(dht=false 行为中性)；开后
+    // resolve=relay 首成功、全失败落 DHT 兜底;publish=relay 全发 + DHT best-effort。客户端懒初始化。
+    pkarr_dht_on: Arc<std::sync::atomic::AtomicBool>,
+    pkarr_dht: Arc<tokio::sync::OnceCell<Option<pkarr::Client>>>,
     // 群联邦 gossip：fanout 把待广播的 GroupGossip 字节丢进 group_pub，由 spawn_group_sync 统一发布。
     group_pub: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     group_pub_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>>,

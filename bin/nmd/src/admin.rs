@@ -565,6 +565,7 @@ async fn system(State(st): State<AppState>) -> Json<Value> {
     let (presence_pulls, presence_pull_cache_hits, presence_pull_errors) =
         st.node.presence_stat_snapshot();
     let (pkarr_resolve_ok, pkarr_resolve_fail) = st.node.pkarr_stat_snapshot();
+    let (dht_on, dht_resolve_ok, dht_resolve_fail, dht_publish_ok) = st.node.pkarr_dht_snapshot();
     let (admission_enabled, admission_anchors) = st.node.admission_status();
     let tables: serde_json::Map<String, Value> = st
         .node
@@ -608,6 +609,11 @@ async fn system(State(st): State<AppState>) -> Json<Value> {
         "pkarr_relays": st.node.pkarr_relay_count(),
         "pkarr_resolve_ok": pkarr_resolve_ok,
         "pkarr_resolve_fail": pkarr_resolve_fail,
+        // P2-12 Phase B：Mainline DHT 叠加层（trustless）。
+        "pkarr_dht": dht_on,
+        "pkarr_dht_resolve_ok": dht_resolve_ok,
+        "pkarr_dht_resolve_fail": dht_resolve_fail,
+        "pkarr_dht_publish_ok": dht_publish_ok,
         // P2-13 成员准入观测：是否启用 + 本地信任锚点数。
         "admission_enabled": admission_enabled,
         "admission_anchors": admission_anchors,

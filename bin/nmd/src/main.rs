@@ -282,6 +282,10 @@ struct DnsCfg {
     /// 可选：额外走 DNS 查询解析的源域，如 `dns.example.com.`。
     #[serde(default)]
     origin: Option<String>,
+    /// P2-12 Phase B：真 Mainline DHT 叠加层（trustless 发现）。默认 false=行为中性；
+    /// 开后 群/频道/成员索引记录 解析在 relay 全失败时落 DHT 兜底、发布 best-effort 同发 DHT。可热加载。
+    #[serde(default)]
+    dht: bool,
 }
 
 impl DnsCfg {
@@ -585,6 +589,7 @@ async fn async_main() -> anyhow::Result<()> {
         node.clone().spawn_pending_flush(); // Defect C 冷启动补发 + 跨节点可靠投递 outbox 持久重传（2s 扫描）
         node.set_per_topic(cfg.federation.per_topic); // F1–F5：[federation] per_topic（缺省开）启停每主题；火管仍双写兜底、存活后退火管
         node.set_pkarr(cfg.dns.joined()); // F2/P2-12A：群/频道/成员发现 pkarr 中继（逗号多中继=弱锚多副本退单点；否则仅火管/home 锚点发现）
+        node.set_pkarr_dht(cfg.dns.dht); // P2-12B：Mainline DHT 叠加层（默认关；开=relay 失败落 DHT 兜底+发布双写）
         // P2-13 成员准入(anti-Sybil)：信任锚点 + 本节点 grant + 启停门（缺省关=行为中性）。
         node.set_admission_anchors(cfg.membership.admission_anchors.iter().filter_map(|h| parse_id_hex(h).ok()).collect());
         if !cfg.membership.admission_grant.is_empty() {
@@ -780,6 +785,7 @@ pub(crate) fn reload_config_from(
     node.set_per_topic(cfg.federation.per_topic);
     node.set_presence_scoped(cfg.federation.presence_scoped);
     node.set_pkarr(cfg.dns.joined());
+    node.set_pkarr_dht(cfg.dns.dht); // P2-12B：DHT 叠加层热开关（客户端懒初始化；关=立即停用兜底/双写）
     node.set_admission_anchors(cfg.membership.admission_anchors.iter().filter_map(|h| parse_id_hex(h).ok()).collect());
     node.set_admission_enabled(cfg.membership.admission); // P2-13：准入开关/锚点热加载；本节点 grant 换发需重启
     node.set_domain(cfg.domain.clone());

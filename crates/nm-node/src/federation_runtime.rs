@@ -474,9 +474,9 @@ impl Node {
                     last_fed = tokio::time::Instant::now();
                 }
                 // F2：pkarr 群发现（每 ~60s）——home 节点发布「群公钥 → seed」记录；非 home 成员节点解析缓存，
-                // 供 group_bootstrap 无锚/兜底入网。仅 per_topic 开 + 配置了 pkarr relay 时。
+                // 供 group_bootstrap 无锚/兜底入网。仅 per_topic 开 + 配置了 pkarr relay(或 Phase B DHT)时。
                 if self.per_topic.load(std::sync::atomic::Ordering::Relaxed)
-                    && self.pkarr_endpoint().is_some()
+                    && self.pkarr_any_sink()
                     && last_pkarr.elapsed() >= std::time::Duration::from_secs(60)
                 {
                     let ctx = self.ctx();
