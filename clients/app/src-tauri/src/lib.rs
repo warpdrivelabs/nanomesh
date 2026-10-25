@@ -26,6 +26,7 @@ mod connection;
 mod devices;
 mod directory;
 mod identity;
+mod llm_chat;
 mod llm_proxy;
 mod llm_share;
 mod local_store;

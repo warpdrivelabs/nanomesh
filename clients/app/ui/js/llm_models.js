@@ -151,12 +151,13 @@
             ? Profile.faceHtml(m.entityId || m.localId, m.displayName, 40, "", m.avatar)
             : `<span class="av">${esc((m.displayName || "?")[0])}</span>`;
         const on = SEL === m.localId ? " on" : "";
-        return `<div class="im-item${on}" data-kind="local" data-id="${esc(m.localId)}" title="${esc(statusLabel(m))}">
+        return `<div class="im-item${on}" data-kind="local" data-id="${esc(m.localId)}" data-eid="${esc(m.entityId || "")}" title="${esc(statusLabel(m))}">
           ${face}
           <span class="mid">
             <span class="r1"><span class="nm">${esc(m.displayName || m.model || "未命名")}</span></span>
             <span class="r2"><span class="msg">${esc(subtitle(m))}</span></span>
           </span>
+          <button type="button" class="ns-btn ns-ico llm-chat-btn" data-chat="${esc(m.entityId || "")}" title="对话" style="flex:none">${typeof nmIcon === "function" ? nmIcon("chat") : "💬"}</button>
           <span class="llm-dot ${m.online ? "on" : "off"}" title="${esc(statusLabel(m))}"></span>
         </div>`;
       })
@@ -200,6 +201,13 @@
     });
     box.querySelectorAll('.im-item[data-kind="local"]').forEach((el) => {
       el.onclick = () => openDetail(el.dataset.id);
+      const chat = el.querySelector(".llm-chat-btn");
+      if (chat)
+        chat.onclick = (ev) => {
+          ev.stopPropagation(); // 别触发行点击(进详情)
+          const eid = chat.dataset.chat;
+          if (eid && typeof selectContact === "function") selectContact(eid);
+        };
     });
     box.querySelectorAll('.im-item[data-kind="remote"]').forEach((el) => {
       el.onclick = () => {
@@ -926,6 +934,12 @@
   window.renderLlmModelList = renderList;
   window.renderModels = renderList;
   window.openLlmProvide = openCreate;
+  // 聊天直聊模型:按 entityId 查本地模型(sendMsg 分支判定 + 会话头显示名)。
+  window.LlmModels = window.LlmModels || {};
+  window.LlmModels.byEntity = function (eid) {
+    const k = (eid || "").toLowerCase();
+    return CACHE.find((m) => (m.entityId || "").toLowerCase() === k) || null;
+  };
   document.addEventListener("DOMContentLoaded", bind);
   if (document.readyState !== "loading") bind();
 

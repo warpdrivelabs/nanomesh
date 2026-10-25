@@ -1,8 +1,8 @@
 use tauri::Manager;
 
 use crate::{
-    AppState, auth_commands, connection, devices, directory, identity, llm_proxy, llm_share,
-    local_store, media, pairing, registry, social,
+    AppState, auth_commands, connection, devices, directory, identity, llm_chat, llm_proxy,
+    llm_share, local_store, media, pairing, registry, social,
 };
 
 #[cfg(desktop)]
@@ -143,6 +143,8 @@ pub(crate) fn run() {
             llm_proxy::llm_proxy_update,
             llm_proxy::llm_proxy_clear_stats,
             llm_proxy::llm_proxy_probe,
+            llm_chat::llm_chat_stream,
+            llm_chat::llm_chat_cancel,
             auth_commands::auth_status,
             auth_commands::setup_master,
             auth_commands::unlock,

@@ -186,6 +186,9 @@ function peerOf(id) {
   const last = window.ChatLog && ChatLog.meta ? (ChatLog.meta(id).last || null) : null;
   if (last && last.group) return { id, name: "群", kind: "group", avatar: "" };
   if (last && last.channel) return { id, name: "频道", kind: "channel", avatar: "" };
+  // 本地大模型会话:会话头显示模型名(模型不在 roster/目录,entityById 查不到)。
+  const lm = window.LlmModels && LlmModels.byEntity ? LlmModels.byEntity(id) : null;
+  if (lm) return { id, name: lm.displayName || lm.model || "本地模型", kind: "model.llm", avatar: lm.avatar || "" };
   return entityById(id) || { id, name: "", kind: "" };
 }
 function wireItems(box, handler) {
@@ -251,7 +254,7 @@ function renderEntityDetail(id) {
           <div class="detail-sub">${(window.Profile && c.presence) ? Profile.presenceLabel(c.presence) : "离线"}${c.statusText ? " · " + escapeHtml(c.statusText) : ""}</div>
         </div>
         <div class="detail-actions">
-          ${isCompute ? "" : `<button type="button" class="ns-btn ns-ico ns-primary" id="ed-msg" title="发消息">${nmIcon("chat")}</button>`}
+          <button type="button" class="ns-btn ns-ico ns-primary" id="ed-msg" title="${isCompute ? "对话" : "发消息"}">${nmIcon("chat")}</button>
           ${c.added ? `<button type="button" class="ns-btn ns-ico ns-danger" id="ed-del" title="从目录移除">${nmIcon("trash")}</button>` : ""}
         </div>
       </div>

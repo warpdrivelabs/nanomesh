@@ -28,7 +28,7 @@ pub(crate) struct Running {
 /// local_id → 子进程。
 pub(crate) type LlmRuntime = Mutex<HashMap<String, Running>>;
 
-fn models_dir(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn models_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = data_dir(app)?.join("llm_models");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
@@ -123,7 +123,7 @@ fn path_key(dir: &Path, id: &str) -> PathBuf {
     dir.join(format!("{id}.key.enc"))
 }
 
-fn load_share(dir: &Path, id: &str) -> Result<ModelShare, String> {
+pub(crate) fn load_share(dir: &Path, id: &str) -> Result<ModelShare, String> {
     let raw = std::fs::read_to_string(path_json(dir, id)).map_err(|e| e.to_string())?;
     serde_json::from_str(&raw).map_err(|e| e.to_string())
 }
@@ -145,7 +145,7 @@ fn load_seed(dir: &Path, vk: &[u8; 32], id: &str) -> Result<[u8; 32], String> {
     auth::decrypt_seed(vk, &data)
 }
 
-fn load_key(dir: &Path, vk: &[u8; 32], id: &str) -> Result<String, String> {
+pub(crate) fn load_key(dir: &Path, vk: &[u8; 32], id: &str) -> Result<String, String> {
     let data = std::fs::read(path_key(dir, id)).map_err(|_| "未配置 API Key".to_string())?;
     let pt = auth::decrypt_blob(vk, &data)?;
     String::from_utf8(pt).map_err(|_| "Key 不是合法 UTF-8".into())

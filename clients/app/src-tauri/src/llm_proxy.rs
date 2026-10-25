@@ -157,6 +157,15 @@ pub(crate) struct ProxyRunning {
 
 pub(crate) type LlmProxies = Mutex<HashMap<String, ProxyRunning>>; // key = provider_hex
 
+impl ProxyRunning {
+    /// 聊天直调复用:取该代理当前的 (grant, timeout, model_hint) 快照(llm_chat 远端分支用,
+    /// 避免聊天路径重复粘贴 Grant——代理面板配置过即生效)。
+    pub(crate) async fn chat_params(&self) -> (Option<Grant>, Duration, String) {
+        let l = self.live.read().await;
+        (l.grant.clone(), l.timeout, l.model_hint.clone())
+    }
+}
+
 #[derive(Clone)]
 struct ProxyHttpState {
     app: AppHandle,

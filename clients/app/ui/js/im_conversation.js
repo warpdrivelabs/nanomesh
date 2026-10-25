@@ -260,6 +260,39 @@ function failOptimistic(localId) {
   if (row) { row.status = -1; paintVirtual(false); }
   if (window.ChatLog && ChatLog.mark) ChatLog.mark(ACTIVE, { id: localId }, -1);
 }
+// ── 聊天直聊大模型 ──────────────────────────────────────────────
+// ACTIVE 是否为模型会话:命中本地模型表(entityId) 或 目录里的 compute 实体(远端 model.llm)。
+function modelTarget(id) {
+  if (window.LlmModels && LlmModels.byEntity && LlmModels.byEntity(id)) return "local";
+  const c = typeof mergedEntities === "function" ? mergedEntities().find((x) => x.id === id) : null;
+  if (c && typeof kindType === "function" && kindType(c.kind) === "compute") return "remote";
+  return null;
+}
+
+// 从本会话历史组装 OpenAI messages[](from===模型 → assistant,否则 user),按字符预算从旧到新裁剪。
+async function buildModelMessages(id, latest) {
+  let hist = [];
+  try { hist = (window.ChatLog && (await ChatLog.tail(id, 40))) || []; } catch (_) {}
+  const local = window.LlmModels && LlmModels.byEntity ? LlmModels.byEntity(id) : null;
+  const maxCtx = (local && local.maxContext) || 8192; // 词元
+  const budget = Math.max(2000, maxCtx * 3 - latest.length); // ≈3 字符/词元,给回复留量
+  const out = [];
+  let used = 0;
+  for (let i = hist.length - 1; i >= 0; i--) {
+    const m = hist[i];
+    const t = (m.text || m.body || "").trim();
+    if (!t || (m.kind && m.kind !== "text")) continue;
+    if (m.typeUrl === "nmspace.agent.delta.v1" && !String(m.body || "").startsWith("{")) {
+      // delta 落库后 body 即纯文本,照常收
+    }
+    if (used + t.length > budget) break;
+    used += t.length;
+    out.unshift({ role: m.from === id ? "assistant" : "user", content: t });
+  }
+  out.push({ role: "user", content: latest });
+  return out;
+}
+
 async function sendMsg(text) {
   text = (text || "").trim();
   if (!text || !ACTIVE) return;
@@ -282,6 +315,14 @@ async function sendMsg(text) {
         if (row) { row.gramId = g; row.status = 1; paintVirtual(false); }
         if (window.ChatLog && ChatLog.mark) ChatLog.mark(ACTIVE, { id: localId, gramId: g }, 1);
       }
+    } else if (modelTarget(ACTIVE)) {
+      // 模型会话:乐观用户气泡(本地调用无网络 ack,直接置✓),组装上下文 → llm_chat_stream;
+      // 回复以 agent delta 帧(nmspace.agent.delta.v1)回推,handleAgentDelta 原地长气泡+落库,零新渲染。
+      localId = "l" + Date.now();
+      await pushMsg(ACTIVE, { id: localId, from: MY_ID, body: text, ts: Date.now(), to: ACTIVE, status: 1 });
+      const messages = await buildModelMessages(ACTIVE, text);
+      const streamId = (crypto.randomUUID && crypto.randomUUID()) || "s" + Date.now() + Math.random().toString(16).slice(2);
+      await NM.inv("llm_chat_stream", { target: ACTIVE, messages, streamId });
     } else {
       // 乐观插入(status=0 发送中)；send_to 返回原 gram_id → 升单勾✓并写 gramId(后续双勾按它匹配)。
       // 必须 await pushMsg：agent 流式首包很快时，未入库的用户气泡会被回复抢跑到前面。

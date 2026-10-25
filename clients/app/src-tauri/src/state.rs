@@ -51,6 +51,8 @@ pub(crate) struct AppState {
     pub(crate) llm_runtime: crate::llm_share::LlmRuntime,
     /// 消费方：本机为远端模型启动的 OpenAI 兼容代理（provider_hex → 任务）。
     pub(crate) llm_proxies: crate::llm_proxy::LlmProxies,
+    /// 聊天直聊模型：进行中的流(streamId → 取消句柄)。
+    pub(crate) llm_chats: crate::llm_chat::LlmChats,
 }
 
 pub(crate) fn hex(b: &[u8]) -> String {

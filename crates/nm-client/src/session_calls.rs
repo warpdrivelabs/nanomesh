@@ -156,13 +156,26 @@ impl Session {
         method: &str,
         params: Option<Any>,
     ) -> Result<InferStream, ClientError> {
+        self.call_stream_with_grant(target, method, params, None, 0).await
+    }
+
+    /// 带 Grant/超时的流式路由命令（App 聊天直调需带运行中代理的 Grant；`timeout_ms` 仅作
+    /// 对端提示——流本身无客户端侧截止，取消由调用方 drop [`InferStream`]）。
+    pub async fn call_stream_with_grant(
+        &self,
+        target: [u8; 32],
+        method: &str,
+        params: Option<Any>,
+        grant: Option<nm_proto::Grant>,
+        timeout_ms: u32,
+    ) -> Result<InferStream, ClientError> {
         let n = self.next_corr.fetch_add(1, Ordering::SeqCst);
         let cmd = Command {
             method: method.to_string(),
             params,
             correlation_id: n,
-            timeout_ms: 0,
-            grant: None,
+            timeout_ms,
+            grant,
         };
         let gram = {
             let mut g = build_gram(
@@ -192,11 +205,22 @@ impl Session {
         provider: [u8; 32],
         openai_request_json: &[u8],
     ) -> Result<InferStream, ClientError> {
+        self.infer_stream_with_grant(provider, openai_request_json, None, 0).await
+    }
+
+    /// 带 Grant 的流式推理（App 聊天直调远端模型:要求 Grant 的 provider 须带其签发的 Grant）。
+    pub async fn infer_stream_with_grant(
+        &self,
+        provider: [u8; 32],
+        openai_request_json: &[u8],
+        grant: Option<nm_proto::Grant>,
+        timeout_ms: u32,
+    ) -> Result<InferStream, ClientError> {
         let params = Any {
             type_url: "openai.chat.v1".to_string(),
             value: openai_request_json.to_vec(),
         };
-        self.call_stream(provider, "model.infer", Some(params))
+        self.call_stream_with_grant(provider, "model.infer", Some(params), grant, timeout_ms)
             .await
     }
 }
