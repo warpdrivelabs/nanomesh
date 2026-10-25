@@ -50,6 +50,33 @@
   function lastAccount() {
     try { return JSON.parse(localStorage.getItem(LAST) || "null"); } catch (_) { return null; }
   }
+  /** 当前身份对应的联邦账号 ID（local@domain）；无则空串。 */
+  function federationId(pk) {
+    const id = (pk || "").trim();
+    if (!id) return "";
+    const m = map();
+    for (const [name, key] of Object.entries(m)) {
+      if (key === id && name.indexOf("@") > 0) return name;
+    }
+    if (window.Naming) {
+      const h = Naming.myHandle(id);
+      if (h) return h;
+    }
+    const last = lastAccount();
+    if (last && last.local && last.domain) {
+      const full = String(last.local).toLowerCase() + "@" + String(last.domain).toLowerCase();
+      if (!m[full] || m[full] === id) return full;
+    }
+    return "";
+  }
+  /** 所在联邦名（overlay，如 nmspace）；邀请落地或配置写入，默认 nmspace。 */
+  function federationName() {
+    try {
+      const v = (localStorage.getItem("nm-federation") || "").trim();
+      if (v) return v;
+    } catch (_) {}
+    return "nmspace";
+  }
   function fullName() {
     const local = document.getElementById("acct-local").value.trim().toLowerCase();
     const domain = (document.getElementById("acct-domain").value || "").trim().toLowerCase();
@@ -474,4 +501,5 @@
     }));
   }
   init();
+  window.Account = { lastAccount, federationId, federationName, fullName };
 })();

@@ -4,6 +4,42 @@ const AGENT_DELTA_TYPE = "nmspace.agent.delta.v1";
 // localId：落库/气泡 id；若 wire streamId 撞上历史消息则改用新 id，避免改旧气泡时间与位置。
 const STREAMS = {};
 
+// 群/频道消息先于目录到达时，去抖拉一次列表，把假「私聊」行纠正过来。
+let _roomDirTimer = null;
+const _roomDirPend = { group: new Set(), channel: new Set() };
+function ensureRoomDirectory(key, m) {
+  if (!key || !m) return;
+  if (m.group && !(window.Groups && Groups.byId && Groups.byId(key))) _roomDirPend.group.add(key);
+  if (m.channel && !(window.Channels && Channels.byId && Channels.byId(key))) _roomDirPend.channel.add(key);
+  if (!_roomDirPend.group.size && !_roomDirPend.channel.size) return;
+  clearTimeout(_roomDirTimer);
+  _roomDirTimer = setTimeout(async () => {
+    const gids = [..._roomDirPend.group];
+    const cids = [..._roomDirPend.channel];
+    _roomDirPend.group.clear();
+    _roomDirPend.channel.clear();
+    try {
+      if (gids.length && window.renderGroupsList) await renderGroupsList();
+      if (cids.length && window.renderChannelsList) await renderChannelsList();
+    } catch (_) {}
+    if (typeof renderPanels === "function") renderPanels();
+    if (window.Tabs) {
+      for (const id of gids) {
+        const g = window.Groups && Groups.byId && Groups.byId(id);
+        if (g) Tabs.retitle("c:" + id, g.name || "群", "groups");
+      }
+      for (const id of cids) {
+        const ch = window.Channels && Channels.byId && Channels.byId(id);
+        if (ch) Tabs.retitle("c:" + id, ch.name || "频道", "channels");
+      }
+    }
+    if (typeof renderConversation === "function" && (gids.includes(ACTIVE) || cids.includes(ACTIVE))) {
+      renderConversation();
+    }
+  }, 450);
+}
+window.ensureRoomDirectory = ensureRoomDirectory;
+
 function growStreamBubble(localId, peer, text, ts) {
   if (VIEW.id !== peer) return;                       // 该会话未在前台
   let row = VIEW.rows.find((r) => r.id === localId);
@@ -134,6 +170,8 @@ function onCoreEvent(ev) {
   if (m.typeUrl === AGENT_DELTA_TYPE) { handleAgentDelta(m); return; }
   const mine = m.from === MY_ID;
   const key = (m.group || m.channel || mine) ? m.to : m.from;
+  // 被动加群 / 刚订频道：消息可能先到，目录未刷 → 触发去抖刷新群/频道列表。
+  if ((m.group || m.channel) && typeof ensureRoomDirectory === "function") ensureRoomDirectory(key, m);
   pushMsg(key, m).then((fresh) => {
     // 「已读」只看主区是否正在显示该聊天框，不看消息列表残留选中。
     const seen = isChatOpen(key) && (!window.Tray || Tray.focused());

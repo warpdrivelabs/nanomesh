@@ -11,6 +11,8 @@
     try {
       if (Array.isArray(p.relayUrls) && p.relayUrls.length) localStorage.setItem("nm-relay-urls", p.relayUrls.join(","));
       if (p.pkarrUrl) localStorage.setItem("nm-pkarr-url", p.pkarrUrl);
+      const fed = (p.federation || "").trim();
+      if (fed) localStorage.setItem("nm-federation", fed);
     } catch (_) {}
     // 把签发节点(种子)存为一个 selfhost 节点服务，连接表单可直接选。
     if (window.NodeSvc && p.seedNode) {

@@ -182,6 +182,10 @@ function peerOf(id) {
   if (g) return { id, name: g.name || "群", kind: "group", avatar: g.avatar || "" };
   const ch = window.Channels && Channels.byId && Channels.byId(id);
   if (ch) return { id, name: ch.name || "频道", kind: "channel", avatar: ch.avatar || "" };
+  // 目录尚未刷到时：用已存消息的 group/channel 标志回退，避免被拉进群/刚订频道后看起来像私聊。
+  const last = window.ChatLog && ChatLog.meta ? (ChatLog.meta(id).last || null) : null;
+  if (last && last.group) return { id, name: "群", kind: "group", avatar: "" };
+  if (last && last.channel) return { id, name: "频道", kind: "channel", avatar: "" };
   return entityById(id) || { id, name: "", kind: "" };
 }
 function wireItems(box, handler) {
@@ -323,6 +327,10 @@ async function removeEntity(id) {
 function selectContact(id) {
   if (window.Groups && Groups.byId && Groups.byId(id)) { openGroupChat(id); return; }
   if (window.Channels && Channels.byId && Channels.byId(id)) { openChannel(id); return; }
+  // 目录滞后时仍按消息标志打开群/频道视图，避免误进私聊。
+  const hint = peerOf(id);
+  if (hint.kind === "group" && window.openGroupChat) { openGroupChat(id); return; }
+  if (hint.kind === "channel" && window.openChannel) { openChannel(id); return; }
   const c = entityById(id) || { id, name: "" };
   const title = c.name || shortId(id);
   const draw = () => { ACTIVE = id; DETAIL_ID = null; UNREAD[id] = 0; syncRead(id); scheduleUnread(); renderPanels(); renderConversation(); };

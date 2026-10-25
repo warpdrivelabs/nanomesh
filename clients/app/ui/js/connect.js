@@ -28,20 +28,35 @@ function paintHomeNode() {
     return;
   }
   if (dot) dot.classList.remove("reconnecting");
+  const cur = window.Identity ? Identity.current() : "";
+  const nick = cur && window.Identity ? Identity.label(cur) : "";
+  const fedId = (window.Account && Account.federationId(cur))
+    || (window.Naming && Naming.myHandle(cur))
+    || "";
+  const fedName = (window.Account && Account.federationName()) || "nmspace";
   const svc = window.CURRENT_SVC;
+  // 左侧：昵称 · 联邦账号ID · 所在联邦（如 nmspace）；不再显示 n0/lan/自建。
+  const line = [nick, fedId, fedName].filter(Boolean).join(" · ");
   if (!svc || !svc.node) {
-    text.textContent = "Home Node 未连接";
+    text.textContent = line || "未连接";
     if (dot) dot.classList.remove("on");
-    if (host) host.title = "";
+    if (host) host.title = [fedName && ("联邦：" + fedName), fedId, nick].filter(Boolean).join("\n");
     return;
   }
-  const pk = window.NodeSvc ? NodeSvc.pubkeyOf(svc.node) : "";
-  const short = pk ? pk.slice(0, 8) : "";
-  const mode = svc.mode === "nat" ? "穿透" : svc.mode === "lan" ? "同网" : svc.mode === "selfhost" ? "自建" : (svc.mode || "");
-  const who = svc.name || "Home Node";
-  text.textContent = [who, mode].filter(Boolean).join(" · ");
+  text.textContent = line || "已连接";
   if (dot) dot.classList.add("on");
-  if (host) host.title = [pk || String(svc.node), short].filter(Boolean).join("\n");
+  const nodePk = window.NodeSvc ? NodeSvc.pubkeyOf(svc.node) : "";
+  const mode = svc.mode === "nat" ? "n0" : svc.mode === "lan" ? "lan" : svc.mode === "selfhost" ? "自建" : (svc.mode || "");
+  if (host) {
+    host.title = [
+      fedName && ("联邦：" + fedName),
+      fedId && ("联邦 ID：" + fedId),
+      nick && ("昵称：" + nick),
+      cur && ("公钥：" + cur),
+      (svc.name || "Home Node") + (mode ? " · " + mode : ""),
+      nodePk || "",
+    ].filter(Boolean).join("\n");
+  }
 }
 window.paintHomeNode = paintHomeNode;
 

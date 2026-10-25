@@ -28,6 +28,7 @@ function updateUserChip() {
       avEl.insertAdjacentHTML("beforeend", Profile.presenceDot(Profile.get(cur).status || "online", 10));
     }
   }
+  if (typeof paintHomeNode === "function") paintHomeNode();
 }
 window.updateUserChip = updateUserChip;
 

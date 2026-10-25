@@ -181,8 +181,9 @@
     if (!inv) { if (window.toast) toast("请输入邀请链接或 64 位频道 id"); return; }
     try {
       await NM.inv("channel_sub", { channelId: inv.cid, name: inv.name });
-      await primeOne(inv.cid, inv.name);
+      // 先刷目录再回填，避免回填消息进列表时 peerOf 还当私聊。
       await renderChannelsList();
+      await primeOne(inv.cid, inv.name);
       if (window.openChannel) openChannel(inv.cid);
       if (window.toast) toast("已订阅");
     } catch (e) { if (window.toast) toast("订阅失败：" + (e && e.message ? e.message : e)); }

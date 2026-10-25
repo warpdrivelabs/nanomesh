@@ -19,6 +19,9 @@
   function convName(id) {
     if (window.Groups && Groups.byId(id)) return Groups.byId(id).name || "群聊";
     if (window.Channels && Channels.byId(id)) return Channels.byId(id).name || "频道";
+    const last = window.ChatLog && ChatLog.meta ? (ChatLog.meta(id).last || null) : null;
+    if (last && last.group) return "群聊";
+    if (last && last.channel) return "频道";
     return window.entityName ? entityName(id) : id.slice(0, 8);
   }
 
