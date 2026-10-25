@@ -5,12 +5,42 @@ use tauri::State;
 use crate::{AppState, dial, hex, session_of};
 
 /// 把一个目录 Entity 渲染为前端 JSON —— 含 P0 富属性：bio / 状态文本 / 头像引用 / 链接 / locale，
-/// 以及可发现标签 attributes["status"]。非 person 类型解不出 PersonProfile 时相应字段为空。
+/// 以及可发现标签 attributes["status"]。
+/// person → PersonProfile；model.llm / compute.* → InferenceProfile（展示字段对齐）。
 fn person_entity_json(e: &nm_proto::pb::Entity) -> Value {
     let pp = e
         .profile
         .as_ref()
         .and_then(|a| nm_entity::unpack_profile::<nm_entity::kinds::Person>(a).ok());
+    let ip = e
+        .profile
+        .as_ref()
+        .and_then(|a| nm_entity::unpack_profile::<nm_entity::kinds::ModelLlm>(a).ok());
+    let bio = pp
+        .as_ref()
+        .map(|p| p.bio.clone())
+        .or_else(|| ip.as_ref().map(|p| p.bio.clone()))
+        .unwrap_or_default();
+    let status_text = pp
+        .as_ref()
+        .map(|p| p.status_text.clone())
+        .or_else(|| ip.as_ref().map(|p| p.status_text.clone()))
+        .unwrap_or_default();
+    let avatar = pp
+        .as_ref()
+        .map(|p| p.avatar_url.clone())
+        .or_else(|| ip.as_ref().map(|p| p.avatar_url.clone()))
+        .unwrap_or_default();
+    let links = pp
+        .as_ref()
+        .map(|p| p.links.clone())
+        .or_else(|| ip.as_ref().map(|p| p.links.clone()))
+        .unwrap_or_default();
+    let locale = pp
+        .as_ref()
+        .map(|p| p.locale.clone())
+        .or_else(|| ip.as_ref().map(|p| p.locale.clone()))
+        .unwrap_or_default();
     json!({
         "id": hex(&e.entity_id),
         "homeNode": hex(&e.home_node),
@@ -18,13 +48,22 @@ fn person_entity_json(e: &nm_proto::pb::Entity) -> Value {
         "name": e.display_name,
         "status": e.attributes.get("status").cloned().unwrap_or_default(),
         "presence": e.attributes.get("presence").cloned().unwrap_or_default(),
-        "handle": e.attributes.get("name").cloned().unwrap_or_default(), // 去中心命名 local@domain（N1）
-        "model": e.attributes.get("model").cloned().unwrap_or_default(), // 模型 provider / agent 所用模型（智能体标签副标题）
-        "bio": pp.as_ref().map(|p| p.bio.clone()).unwrap_or_default(),
-        "statusText": pp.as_ref().map(|p| p.status_text.clone()).unwrap_or_default(),
-        "avatar": pp.as_ref().map(|p| p.avatar_url.clone()).unwrap_or_default(),
-        "links": pp.as_ref().map(|p| p.links.clone()).unwrap_or_default(),
-        "locale": pp.as_ref().map(|p| p.locale.clone()).unwrap_or_default(),
+        "handle": e.attributes.get("name").cloned().unwrap_or_default(),
+        "model": e.attributes.get("model").cloned()
+            .or_else(|| ip.as_ref().and_then(|p| p.models.first().cloned()))
+            .unwrap_or_default(),
+        "provider": e.attributes.get("provider").cloned().unwrap_or_default(),
+        "metering": e.attributes.get("metering").cloned().unwrap_or_default(),
+        "billing": e.attributes.get("billing").cloned().unwrap_or_default(),
+        "price": e.attributes.get("price").cloned()
+            .or_else(|| ip.as_ref().map(|p| p.price.clone()))
+            .unwrap_or_default(),
+        "auth": e.attributes.get("auth").cloned().unwrap_or_default(),
+        "bio": bio,
+        "statusText": status_text,
+        "avatar": avatar,
+        "links": links,
+        "locale": locale,
     })
 }
 

@@ -26,6 +26,8 @@ mod connection;
 mod devices;
 mod directory;
 mod identity;
+mod llm_proxy;
+mod llm_share;
 mod local_store;
 mod media;
 mod pair;

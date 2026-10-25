@@ -47,6 +47,10 @@ pub(crate) struct AppState {
     /// setup 里启动的重连驱动收到后主动重连，恢复入站推送——不必等用户下一次发送。
     /// 用通道而非在哨兵里直接重连：重连 future 含 tauri `State`（非 Send），不能进裸 spawn。
     pub(crate) roam_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<()>>,
+    /// 云模型共享：本机上线的 model.llm 运行表（local_id → 任务）。
+    pub(crate) llm_runtime: crate::llm_share::LlmRuntime,
+    /// 消费方：本机为远端模型启动的 OpenAI 兼容代理（provider_hex → 任务）。
+    pub(crate) llm_proxies: crate::llm_proxy::LlmProxies,
 }
 
 pub(crate) fn hex(b: &[u8]) -> String {

@@ -238,8 +238,16 @@ function paintVirtual(stick) {
   const painting = viewPainting;
   viewPainting = true;
   log.innerHTML = `<div class="log-flow">${renderLog(VIEW.rows, VIEW.sender)}</div>`;
-  if (window.Composer) Composer.hydrate(log);
+  // 先贴底再 hydrate：媒体异步撑高时 Composer.watchMediaSize 才能判断「原本贴底」。
   if (keepBottom) log.scrollTop = log.scrollHeight;
+  if (window.Composer) {
+    Promise.resolve(Composer.hydrate(log)).then(() => {
+      if (keepBottom) {
+        const el = document.getElementById("conv-log");
+        if (el) el.scrollTop = el.scrollHeight;
+      }
+    }).catch(() => {});
+  }
   viewPainting = painting;
 }
 // 发送失败：把乐观插入的那条消息标记为差号✗(status=-1)并持久化，不再一直转圈。

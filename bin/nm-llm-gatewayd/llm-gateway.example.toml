@@ -1,0 +1,37 @@
+# 复制到 ~/.config/nanomesh/llm-gateway.toml 后按需改。
+# Key 禁止写进本文件；每个 [[backends]] 用各自的环境变量。
+# 同一进程对外注册为一个 model.llm，按请求 JSON 的 model 字段路由到对应 Key。
+
+home_node = '{"node_id":"…","addrs":[…]}'   # 或启动时 --node '<NM_NODE_ADDR>'
+display_name = "cmxlinux-multi-llm"
+seed = 170
+
+# OpenAI 账号 Key → gpt-4o / gpt-4o-mini
+[[backends]]
+id = "openai-main"
+provider = "openai"
+base_url = "https://api.openai.com/v1"
+key_env = "OPENAI_API_KEY"
+models = ["gpt-4o", "gpt-4o-mini"]
+
+# DeepSeek 账号 Key → deepseek-chat（模型名不可与上面重复）
+[[backends]]
+id = "deepseek"
+provider = "deepseek"
+base_url = "https://api.deepseek.com/v1"
+key_env = "DEEPSEEK_API_KEY"
+models = ["deepseek-chat", "deepseek-reasoner"]
+
+# 可选：再挂一家兼容端点
+# [[backends]]
+# id = "custom"
+# provider = "custom"
+# base_url = "https://example.com/v1"
+# key_env = "CUSTOM_API_KEY"
+# models = ["my-finetune"]
+
+[policy]
+require_grant = true
+# allow_audiences = ["<friend_pubkey_hex>"]
+daily_token_budget = 2000000
+max_concurrent = 4

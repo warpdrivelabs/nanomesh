@@ -138,12 +138,30 @@ function attach(next) {
   input.focus();
 }
 
+function clickPathHas(e, test) {
+  const path = typeof e.composedPath === "function" ? e.composedPath() : [];
+  for (const n of path) {
+    if (!n || !n.nodeType) continue;
+    if (test(n)) return true;
+  }
+  // 回退：目标仍挂在树上时用 closest
+  const t = e.target;
+  if (t && t.closest) {
+    if (t.closest("#conv-pop") || t.closest(".im-tool") || t.closest(".im-caret")) return true;
+  }
+  return false;
+}
+
 function install() {
   if (installed) return;
   installed = true;
+  // 用 composedPath：点表情分类时 paintEmoji 会重绘 tabs，点击目标已脱离 DOM，
+  // 此时 closest("#conv-pop") 会失败并误关面板。
   document.addEventListener("click", (e) => {
-    const t = e.target;
-    if (t.closest && (t.closest("#conv-pop") || t.closest(".im-tool") || t.closest(".im-caret"))) return;
+    if (clickPathHas(e, (n) =>
+      n.id === "conv-pop" ||
+      (n.classList && (n.classList.contains("im-tool") || n.classList.contains("im-caret") || n.classList.contains("im-pop")))
+    )) return;
     closePop();
   });
   document.addEventListener("keydown", (e) => {
@@ -180,10 +198,13 @@ function onComposerClick(e) {
   if (!btn || !btn.closest(".im-composer")) return;
   const act = btn.getAttribute("data-act") || "";
   const menu = btn.getAttribute("data-menu") || "";
-  if (menu === "shot") { toggleShotMenu(btn); return; }
-  if (menu === "windows" || act === "windows") { toggleWindows(btn); return; }
-  if (menu === "people" || act === "people") { togglePeople(btn); return; }
+  // 同 document 上还有「点外部关面板」监听；stopImmediatePropagation 才能挡住它。
+  // 表情分类会重绘 tabs，点击目标脱离 DOM 后 closest 会失效（见 install）。
+  if (menu === "shot") { e.stopImmediatePropagation(); toggleShotMenu(btn); return; }
+  if (menu === "windows" || act === "windows") { e.stopImmediatePropagation(); toggleWindows(btn); return; }
+  if (menu === "people" || act === "people") { e.stopImmediatePropagation(); togglePeople(btn); return; }
   if (act === "unchip") {
+    e.stopImmediatePropagation();
     const id = btn.getAttribute("data-chip");
     const d = draft();
     const it = d.pending.find((x) => x.localId === id);
@@ -192,9 +213,21 @@ function onComposerClick(e) {
     paintPending();
     return;
   }
-  if (act === "emoji") { toggleEmoji(btn); return; }
-  if (act === "emoji-tab") { emojiTab = btn.getAttribute("data-tab") || "表情"; paintEmoji(btn); return; }
-  if (act === "emoji-pick") { insertAt(btn.getAttribute("data-emoji") || ""); rememberEmoji(btn.getAttribute("data-emoji") || ""); closePop(); return; }
+  if (act === "emoji") { e.stopImmediatePropagation(); toggleEmoji(btn); return; }
+  if (act === "emoji-tab") {
+    e.stopImmediatePropagation();
+    e.preventDefault();
+    emojiTab = btn.getAttribute("data-tab") || "表情";
+    paintEmoji();
+    return;
+  }
+  if (act === "emoji-pick") {
+    e.stopImmediatePropagation();
+    insertAt(btn.getAttribute("data-emoji") || "");
+    rememberEmoji(btn.getAttribute("data-emoji") || "");
+    closePop();
+    return;
+  }
   if (act === "shot") { closePop(); capture(false); return; }
   if (act === "shot-hide") { closePop(); capture(true); return; }
   if (act === "win-pick") { closePop(); captureWindow(Number(btn.getAttribute("data-wid"))); return; }
@@ -711,6 +744,65 @@ async function loadParts(parts, home, mime) {
 function playButton(el) {
   return `<button type="button" class="im-file" data-act="play-video" data-home="${escapeHtml(el.dataset.home || "")}" data-parts="${escapeHtml(el.dataset.parts || "")}" data-name="${escapeHtml(el.dataset.name || "视频")}"><span>${nmIcon("video")}</span><span><b>${escapeHtml(el.dataset.name || "视频")}</b><small>${fmtDur(Number(el.dataset.dur) || 0)} · 播放</small></span></button>`;
 }
+
+/** 媒体加载后高度变大：若增高前用户贴底，则跟着滚到底，避免图片/视频下方消息被顶出视口。 */
+function stickLogIfNearBottom(threshold) {
+  const log = document.getElementById("conv-log");
+  if (!log) return;
+  const gap = log.scrollHeight - log.scrollTop - log.clientHeight;
+  if (gap < (threshold == null ? 160 : threshold)) {
+    log.scrollTop = log.scrollHeight;
+  }
+}
+function watchMediaSize(el) {
+  if (!el) return;
+  const log = document.getElementById("conv-log");
+  const onGrow = (delta) => {
+    if (!log || !(delta > 1)) return;
+    // 增高后 gap 会变大；用「增高前的 gap」判断是否原本贴底。
+    const gapAfter = log.scrollHeight - log.scrollTop - log.clientHeight;
+    if (gapAfter - delta < 160) log.scrollTop = log.scrollHeight;
+  };
+  let lastH = el.getBoundingClientRect().height;
+  const measure = () => {
+    const h = el.getBoundingClientRect().height;
+    const delta = h - lastH;
+    lastH = h;
+    onGrow(delta);
+  };
+  const img = el.querySelector("img.im-photo, img");
+  if (img) {
+    if (img.complete && img.naturalHeight) requestAnimationFrame(measure);
+    else {
+      img.addEventListener("load", () => requestAnimationFrame(measure), { once: true });
+      img.addEventListener("error", () => requestAnimationFrame(measure), { once: true });
+    }
+  }
+  const vid = el.querySelector("video");
+  if (vid) {
+    const bump = () => requestAnimationFrame(measure);
+    vid.addEventListener("loadedmetadata", bump, { once: true });
+    vid.addEventListener("loadeddata", bump, { once: true });
+    if (vid.readyState >= 1) bump();
+  }
+  const aud = el.querySelector("audio");
+  if (aud) {
+    aud.addEventListener("loadedmetadata", () => requestAnimationFrame(measure), { once: true });
+    if (aud.readyState >= 1) requestAnimationFrame(measure);
+  }
+  if (typeof ResizeObserver !== "undefined") {
+    if (el._nmRo) try { el._nmRo.disconnect(); } catch (_) {}
+    const ro = new ResizeObserver(() => {
+      if (!el.isConnected) { try { ro.disconnect(); } catch (_) {} return; }
+      measure();
+    });
+    ro.observe(el);
+    el._nmRo = ro;
+  } else {
+    requestAnimationFrame(() => requestAnimationFrame(measure));
+  }
+}
+
 function paintMedia(el, url, poster) {
   const kind = el.dataset.kind;
   el.dataset.state = "shown";
@@ -726,6 +818,7 @@ function paintMedia(el, url, poster) {
       el.innerHTML = `<video controls playsinline src="${url}" ${poster ? `poster="${poster}"` : ""}></video>`;
     }
   }
+  watchMediaSize(el);
 }
 async function localPoster(el) {
   if (!el.dataset.thumb) return "";
@@ -734,6 +827,8 @@ async function localPoster(el) {
 }
 async function hydrate(root) {
   if (!root) return;
+  const log = document.getElementById("conv-log");
+  const nearBottom = !log || (log.scrollHeight - log.scrollTop - log.clientHeight < 160);
   const nodes = root.matches && root.matches("[data-kind]") ? [root] : [...root.querySelectorAll("[data-kind]")];
   for (const el of nodes) {
     if (el.dataset.state === "shown" || el.dataset.state === "busy") continue;
@@ -757,6 +852,9 @@ async function hydrate(root) {
     el.dataset.local = "1";
     const small = el.querySelector("small");
     if (small) small.textContent = fmtSize(Number(el.dataset.size) || 0);
+  }
+  if (nearBottom) {
+    requestAnimationFrame(() => stickLogIfNearBottom(99999));
   }
 }
 

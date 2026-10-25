@@ -220,13 +220,13 @@
   <div class="resize-handle rh-br" data-resize="SouthEast"></div>
 
   <div class="workspace">
-    <!-- 活动栏：即时通讯（消息）+ 实体目录 + 节点服务 -->
+    <!-- 活动栏：消息 / 实体 / 智能体 / 大模型 / 模型代理 / 频道 -->
     <div class="activitybar">
       <div class="act active" id="act-im" data-act="showPanel" data-panel="im" title="即时通讯"><span class="ico" data-ico="chat"></span></div>
-      <div class="act" id="act-entities" data-act="showPanel" data-panel="entities" title="实体目录"><span class="ico" data-ico="contacts"></span></div>
       <div class="act" id="act-agents" data-act="showPanel" data-panel="agents" title="智能体"><span class="ico" data-ico="agent"></span></div>
-      <div class="act" id="act-nodesvc" data-act="showPanel" data-panel="nodesvc" title="节点服务"><span class="ico" data-ico="nodes"></span></div>
-      <div class="act" id="act-groups" data-act="showPanel" data-panel="groups" title="群组"><span class="ico" data-ico="groups"></span></div>
+      <div class="act" id="act-entities" data-act="showPanel" data-panel="entities" title="实体目录"><span class="ico" data-ico="contacts"></span></div>
+      <div class="act" id="act-models" data-act="showPanel" data-panel="models" title="大模型"><span class="ico" data-ico="llm"></span></div>
+      <div class="act" id="act-proxies" data-act="showPanel" data-panel="proxies" title="模型代理"><span class="ico" data-ico="proxy"></span></div>
       <div class="act" id="act-channels" data-act="showPanel" data-panel="channels" title="频道"><span class="ico" data-ico="channels"></span></div>
       <div class="act-sp"></div>
       <!-- 活动栏底部：当前用户头像（点开切换身份/编辑资料；昵称见悬浮提示与下拉）-->
@@ -234,7 +234,7 @@
         <span class="tb-user-av" id="tb-user-av">?</span>
       </button>
     </div>
-    <!-- 左侧栏：消息会话 / 实体目录 / 节点服务（同时只显示一个 .panel.on）-->
+    <!-- 左侧栏：同时只显示一个 .panel.on -->
     <aside>
       <div class="panel im-panel on" id="panel-im">
         <div class="brand"><span class="uname" data-i18n="panel.im">消息</span><span class="brand-tools"><button class="brand-refresh" data-act="imRefresh" title="刷新目录"><span class="ico" data-ico="refresh"></span></button></span></div>
@@ -245,7 +245,8 @@
         <div class="brand"><span class="uname" data-i18n="panel.entities">实体目录</span>
           <span class="brand-tools">
             <button class="brand-refresh" id="name-claim-btn" title="认领名字 local@域名">@</button>
-            <button class="brand-refresh" id="ent-add-btn" title="添加实体"><span class="ico" data-ico="plus"></span></button>
+            <button class="brand-refresh" id="ent-add-btn" title="添加朋友"><span class="ico" data-ico="plus"></span></button>
+            <button class="brand-refresh" id="ent-new-group" title="新建群组"><span class="ico" data-ico="group-new"></span></button>
             <button class="brand-refresh" data-act="imRefresh" title="刷新目录"><span class="ico" data-ico="refresh"></span></button>
           </span>
         </div>
@@ -258,13 +259,34 @@
         <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="agent-search-input" type="text" placeholder="搜索智能体" data-i18n-ph="search.agents" /></div>
         <div class="im-list" id="agents-list"></div>
       </div>
-      <div class="panel nodesvc-panel" id="panel-nodesvc">
+      <div class="panel models-panel" id="panel-models">
+        <div class="brand"><span class="uname">大模型</span>
+          <span class="brand-tools">
+            <button class="brand-refresh" id="llm-new" title="增加本地模型"><span class="ico" data-ico="plus"></span></button>
+            <button class="brand-refresh" data-act="imRefresh" title="刷新目录"><span class="ico" data-ico="refresh"></span></button>
+          </span>
+        </div>
+        <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="llm-search" type="text" placeholder="搜索本地 / 远端模型" /></div>
+        <div class="im-list" id="llm-list"></div>
+      </div>
+      <div class="panel proxies-panel" id="panel-proxies">
+        <div class="brand"><span class="uname">模型代理</span>
+          <span class="brand-tools">
+            <button class="brand-refresh" id="px-refresh" title="刷新"><span class="ico" data-ico="refresh"></span></button>
+          </span>
+        </div>
+        <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="px-search" type="text" placeholder="搜索端口 / 模型" /></div>
+        <div class="nodesvc-list" id="px-list"></div>
+      </div>
+      <!-- 节点服务面板保留给登录页/内部调用，不在活动栏展示 -->
+      <div class="panel nodesvc-panel" id="panel-nodesvc" style="display:none" aria-hidden="true">
         <div class="brand"><span class="uname" data-i18n="panel.nodes">节点服务</span><span class="brand-tools"><button class="brand-refresh" id="ns-new" title="新增节点服务"><span class="ico" data-ico="plus"></span></button></span></div>
         <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="ns-search" type="text" placeholder="搜索节点服务" data-i18n-ph="search.nodes" /></div>
         <div class="nodesvc-form" id="nodesvc-form" style="display:none"></div>
         <div class="nodesvc-list" id="nodesvc-list"></div>
       </div>
-      <div class="panel groups-panel" id="panel-groups">
+      <!-- 群组独立面板已取消，建群入口在实体目录；DOM 保留供内部刷新 -->
+      <div class="panel groups-panel" id="panel-groups" style="display:none" aria-hidden="true">
         <div class="brand"><span class="uname" data-i18n="panel.groups">群组</span>
           <span class="brand-tools">
             <button class="brand-refresh" id="grp-new-btn" title="新建群"><span class="ico" data-ico="plus"></span></button>
@@ -305,7 +327,7 @@
               <li><span>02</span><div><strong>同网优先 · 穿透兜底</strong><em>同一网络直连 · 跨网 NAT 打洞</em></div></li>
               <li><span>03</span><div><strong>本地身份</strong><em>私钥本地落盘 · 重启复用</em></div></li>
             </ul>
-            <p class="home-hint">从左侧打开会话、实体、群或节点服务</p>
+            <p class="home-hint">从左侧打开会话、朋友、大模型或群聊</p>
           </div>
         </div>
       </template>
@@ -469,7 +491,7 @@
                 <button type="button" class="pubkey-gen" id="c-newsvc" title="新建节点服务（可填公钥/地址、名称、联系方式、地理位置等）"><span class="ico" data-ico="plus"></span> 新建服务</button>
               </div>
               <div class="nodesvc-form svc-form-box" id="svc-form-box" style="display:none"></div>
-              <div class="svc-hint">节点服务是公用的（所有身份共享）；在主界面「节点服务」面板也可新增/管理。</div>
+              <div class="svc-hint">节点服务是公用的（所有身份共享）；可在此新建或导入。</div>
             </div>
             <button class="login-submit" id="c-submit" type="submit">连接</button>
             <div class="error" id="c-error" role="alert"></div>
@@ -493,6 +515,9 @@
 <script src="js/account.js" defer></script>
 <script src="js/invite.js" defer></script>
 <script src="js/nodesvc.js" defer></script>
+<script src="js/llm_models.js" defer></script>
+<script src="js/llm_proxy_ui.js" defer></script>
+<script src="js/llm_proxies.js" defer></script>
 <script src="js/usermenu.js" defer></script>
 <script src="js/profile.js" defer></script>
 <script src="js/groups.js" defer></script>

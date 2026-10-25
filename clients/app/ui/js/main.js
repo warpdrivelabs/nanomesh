@@ -20,9 +20,8 @@ function toggleTheme() {
 function showPanel(name) {
   document.querySelectorAll(".activitybar .act").forEach((a) => a.classList.toggle("active", a.dataset.panel === name));
   document.querySelectorAll("aside .panel").forEach((p) => p.classList.toggle("on", p.id === "panel-" + name));
-  // 打开「节点服务」面板时从 NodeSvc 重新渲染（登录页新增的服务据此显示）。
-  if (name === "nodesvc" && typeof window.renderNodeSvcList === "function") window.renderNodeSvcList();
-  if (name === "groups" && typeof window.renderGroupsList === "function") window.renderGroupsList();
+  if (name === "models" && typeof window.renderModels === "function") window.renderModels();
+  if (name === "proxies" && typeof window.renderLlmProxies === "function") window.renderLlmProxies();
   if (name === "channels" && typeof window.renderChannelsList === "function") window.renderChannelsList();
 }
 

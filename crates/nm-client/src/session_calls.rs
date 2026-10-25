@@ -26,6 +26,7 @@ impl Session {
 
     /// C2：向某 provider 发一次 OpenAI 兼容推理（method=model.infer）。
     /// 入参 `openai_request_json` 为 OpenAI `/chat/completions` 请求体字节；返回 completion JSON 字节。
+    /// 默认超时 120s（LLM 比普通 RPC 慢）。
     pub async fn infer(
         &self,
         provider: [u8; 32],
@@ -35,19 +36,37 @@ impl Session {
             .await
     }
 
-    /// C2：带 Grant 的推理（provider 要求授权时用）。
+    /// C2：带 Grant 的推理（provider 要求授权时用）。超时 120s。
     pub async fn infer_with_grant(
         &self,
         provider: [u8; 32],
         openai_request_json: &[u8],
         grant: Option<nm_proto::Grant>,
     ) -> Result<Vec<u8>, ClientError> {
+        self.infer_with_grant_timeout(
+            provider,
+            openai_request_json,
+            grant,
+            Duration::from_secs(120),
+        )
+        .await
+    }
+
+    /// C2：带 Grant + 自定义超时的推理。
+    pub async fn infer_with_grant_timeout(
+        &self,
+        provider: [u8; 32],
+        openai_request_json: &[u8],
+        grant: Option<nm_proto::Grant>,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, ClientError> {
         let params = Any {
             type_url: "openai.chat.v1".to_string(),
             value: openai_request_json.to_vec(),
         };
+        let timeout_ms = timeout.as_millis().min(u32::MAX as u128) as u32;
         let res = self
-            .call_with_grant(provider, "model.infer", Some(params), grant)
+            .call_with_grant_timeout(provider, "model.infer", Some(params), grant, timeout_ms)
             .await?;
         if !res.ok {
             return Err(ClientError::Other(res.error));
@@ -65,7 +84,7 @@ impl Session {
         self.call_with_grant(target, method, params, None).await
     }
 
-    /// 带能力授权(Grant)的路由命令 RPC（目标要求鉴权时需提供）。
+    /// 带能力授权(Grant)的路由命令 RPC（目标要求鉴权时需提供；超时 10s）。
     pub async fn call_with_grant(
         &self,
         target: [u8; 32],
@@ -73,12 +92,25 @@ impl Session {
         params: Option<Any>,
         grant: Option<nm_proto::Grant>,
     ) -> Result<CommandResult, ClientError> {
+        self.call_with_grant_timeout(target, method, params, grant, 10_000)
+            .await
+    }
+
+    /// 带 Grant + 自定义超时（毫秒）的路由命令 RPC。
+    pub async fn call_with_grant_timeout(
+        &self,
+        target: [u8; 32],
+        method: &str,
+        params: Option<Any>,
+        grant: Option<nm_proto::Grant>,
+        timeout_ms: u32,
+    ) -> Result<CommandResult, ClientError> {
         let n = self.next_corr.fetch_add(1, Ordering::SeqCst);
         let cmd = Command {
             method: method.to_string(),
             params,
             correlation_id: n,
-            timeout_ms: 10_000,
+            timeout_ms,
             grant,
         };
         let gram = {
@@ -101,7 +133,8 @@ impl Session {
             self.pending.remove(&n);
             return Err(e);
         }
-        let result_gram = match tokio::time::timeout(Duration::from_secs(10), rx).await {
+        let wait = Duration::from_millis(timeout_ms as u64).saturating_add(Duration::from_secs(5));
+        let result_gram = match tokio::time::timeout(wait, rx).await {
             Ok(Ok(g)) => g,
             Ok(Err(_)) => return Err(ClientError::Other("call channel closed".into())),
             Err(_) => {

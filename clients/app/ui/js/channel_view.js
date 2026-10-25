@@ -248,8 +248,15 @@
     if (!log || !c || VIEW.id !== ACTIVE) return false;
     const keepBottom = stick || log.scrollHeight - log.scrollTop - log.clientHeight < 80;
     log.innerHTML = feedHtml(VIEW.rows);
-    if (window.Composer) Composer.hydrate(log);
     if (keepBottom) log.scrollTop = log.scrollHeight;
+    if (window.Composer) {
+      Promise.resolve(Composer.hydrate(log)).then(() => {
+        if (keepBottom) {
+          const el = document.getElementById("conv-log");
+          if (el) el.scrollTop = el.scrollHeight;
+        }
+      }).catch(() => {});
+    }
     // 发布后清空草稿
     const input = document.getElementById("conv-input");
     if (input && !input.value.trim()) draftSet(c.id, "");

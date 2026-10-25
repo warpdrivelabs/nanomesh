@@ -1,8 +1,8 @@
 use tauri::Manager;
 
 use crate::{
-    AppState, auth_commands, connection, devices, directory, identity, local_store, media, pairing,
-    registry, social,
+    AppState, auth_commands, connection, devices, directory, identity, llm_proxy, llm_share,
+    local_store, media, pairing, registry, social,
 };
 
 #[cfg(desktop)]
@@ -127,6 +127,22 @@ pub(crate) fn run() {
             registry::ticker::open_https,
             identity::list_identities,
             identity::create_identity,
+            llm_share::llm_model_list,
+            llm_share::llm_model_upsert,
+            llm_share::llm_model_set_key,
+            llm_share::llm_model_delete,
+            llm_share::llm_model_online,
+            llm_share::llm_model_offline,
+            llm_share::llm_model_runtime,
+            llm_share::llm_model_issue_grant,
+            llm_proxy::llm_proxy_start,
+            llm_proxy::llm_proxy_stop,
+            llm_proxy::llm_proxy_list,
+            llm_proxy::llm_proxy_status,
+            llm_proxy::llm_proxy_detail,
+            llm_proxy::llm_proxy_update,
+            llm_proxy::llm_proxy_clear_stats,
+            llm_proxy::llm_proxy_probe,
             auth_commands::auth_status,
             auth_commands::setup_master,
             auth_commands::unlock,

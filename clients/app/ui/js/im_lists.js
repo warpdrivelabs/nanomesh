@@ -1,4 +1,11 @@
-function renderPanels() { renderConversations(); renderEntities(); renderAgents(); paintActUnread(); if (window.Tray) Tray.sync(); }
+function renderPanels() {
+  renderConversations();
+  renderEntities();
+  renderAgents();
+  renderModels();
+  paintActUnread();
+  if (window.Tray) Tray.sync();
+}
 
 function bindPanelUI() {
   const s1 = document.getElementById("im-search-input");
@@ -7,6 +14,8 @@ function bindPanelUI() {
   if (s2 && !s2._bound) { s2._bound = true; s2.addEventListener("input", renderEntities); }
   const s3 = document.getElementById("agent-search-input");
   if (s3 && !s3._bound) { s3._bound = true; s3.addEventListener("input", renderAgents); }
+  const s4 = document.getElementById("llm-search");
+  if (s4 && !s4._bound) { s4._bound = true; s4.addEventListener("input", renderModels); }
   const add = document.getElementById("ent-add-btn");
   if (add && !add._bound) { add._bound = true; add.addEventListener("click", toggleEntityForm); }
 }
@@ -24,7 +33,7 @@ function renderConversations() {
   }).filter(({ c }) => !q || (c.name || "").toLowerCase().includes(q) || c.id.includes(q))
     .sort((a, b) => b.ts - a.ts);
   if (!peers.length) {
-    box.innerHTML = `<div class="im-empty">${window.t ? t("list.noChat") : "还没有会话。去左侧「实体目录」选一个实体开始聊。"}</div>`;
+    box.innerHTML = `<div class="im-empty">${window.t ? t("list.noChat") : "还没有会话。去左侧「实体目录」选一个朋友开始聊。"}</div>`;
     return;
   }
   box.innerHTML = peers.map(({ c, last }) => {
@@ -35,26 +44,56 @@ function renderConversations() {
   wireItems(box, selectContact);
 }
 
-// ── 📇 实体目录：合并实体按类型分组；点击看详情 ──
+// ── 📇 实体目录：仅朋友 + 群聊 ──
 function renderEntities() {
   const box = document.getElementById("entity-list");
   if (!box) return;
   const q = (document.getElementById("entity-search-input").value || "").trim().toLowerCase();
-  const list = mergedEntities().filter((c) => c.id !== MY_ID && (!q || (c.name || "").toLowerCase().includes(q) || (c.id || "").includes(q) || (c.handle || "").toLowerCase().includes(q)));
-  const groups = {};
-  list.forEach((c) => { (groups[kindType(c.kind)] = groups[kindType(c.kind)] || []).push(c); });
-  const sections = ENTITY_TYPES.map((t) => renderGroup(t.key, t.icon, t.label, groups[t.key] || []));
-  if ((groups.other || []).length) sections.push(renderGroup("other", "file", "其他", groups.other));
-  box.innerHTML = sections.join("");
-  wireItems(box, showEntityDetail);
-  box.querySelectorAll(".ent-head").forEach((head) => head.addEventListener("click", () => {
-    const g = head.closest(".ent-group");
-    const key = g.dataset.type;
-    if (ENT_FOLDED.has(key)) ENT_FOLDED.delete(key); else ENT_FOLDED.add(key);
-    const folded = ENT_FOLDED.has(key);
-    g.classList.toggle("folded", folded);
-    head.setAttribute("aria-expanded", folded ? "false" : "true");
-  }));
+  const match = (name, id, handle) =>
+    !q ||
+    (name || "").toLowerCase().includes(q) ||
+    (id || "").includes(q) ||
+    (handle || "").toLowerCase().includes(q);
+
+  const friends = mergedEntities().filter(
+    (c) => c.id !== MY_ID && kindType(c.kind) === "person" && match(c.name, c.id, c.handle)
+  );
+  const groupRows = ((window.Groups && Groups.list && Groups.list()) || [])
+    .map((g) => ({
+      id: g.id,
+      name: g.name || "群",
+      kind: "group",
+      avatar: g.avatar || "",
+      added: false,
+    }))
+    .filter((c) => match(c.name, c.id, ""));
+
+  const sections = [
+    renderGroup("person", "person", "朋友", friends),
+    renderGroup("group", "groups", "群组", groupRows),
+  ];
+  box.innerHTML = sections.join("") || `<div class="im-empty">暂无朋友或群组</div>`;
+
+  box.querySelectorAll('.ent-group[data-type="person"] .im-item').forEach((el) => {
+    el.addEventListener("click", () => showEntityDetail(el.dataset.id));
+  });
+  box.querySelectorAll('.ent-group[data-type="group"] .im-item').forEach((el) => {
+    el.addEventListener("click", () => {
+      if (window.openGroupChat) openGroupChat(el.dataset.id);
+      else if (window.Groups && Groups.open) Groups.open(el.dataset.id);
+    });
+  });
+  box.querySelectorAll(".ent-head").forEach((head) =>
+    head.addEventListener("click", () => {
+      const g = head.closest(".ent-group");
+      const key = g.dataset.type;
+      if (ENT_FOLDED.has(key)) ENT_FOLDED.delete(key);
+      else ENT_FOLDED.add(key);
+      const folded = ENT_FOLDED.has(key);
+      g.classList.toggle("folded", folded);
+      head.setAttribute("aria-expanded", folded ? "false" : "true");
+    })
+  );
 }
 
 // ── 🤖 智能体：目录里的 agent.* 实体，点击直接开聊（复用联系人会话管线）──
@@ -76,10 +115,16 @@ function renderAgents() {
   }).join("");
   wireItems(box, selectContact);
 }
+
+// ── 大模型列表：由 llm_models.js 渲染（本地 / 远端分组）──
+function renderModels() {
+  if (window.renderLlmModelList) window.renderLlmModelList();
+}
 function renderGroup(key, icon, label, items) {
   const q = (document.getElementById("entity-search-input").value || "").trim();
   const folded = !q && (ENT_FOLDED.has(key) || !items.length);
   const person = key === "person";
+  const group = key === "group";
   const rows = items.map((c) => {
     const tag = c.added ? " · 手动" : "";
     if (person) {
@@ -87,6 +132,9 @@ function renderGroup(key, icon, label, items) {
         ? `<span class="nm-handle">${escapeHtml(c.handle)}</span>${tag}`
         : (tag ? tag.slice(3) : "");
       return itemHtml(c, sub, 0, DETAIL_ID, { inlineHandle: false });
+    }
+    if (group) {
+      return itemHtml(c, escapeHtml("群组") + tag, UNREAD[c.id] || 0, ACTIVE || DETAIL_ID, { inlineHandle: false });
     }
     return itemHtml(c, escapeHtml(typeMeta(c.kind).label) + tag, 0, DETAIL_ID);
   }).join("");
@@ -155,20 +203,42 @@ function renderEntityDetail(id) {
   if (!conv) return;
   const c = entityById(id) || { id, name: "", kind: "" };
   const tm = typeMeta(c.kind);
+  const isCompute = kindType(c.kind) === "compute";
   const face = (window.Profile && Profile.displayAvatar(id, c.avatar))
     ? `<img src="${Profile.displayAvatar(id, c.avatar)}" alt="">`
     : escapeHtml((c.name || "?").slice(0, 1));
   const rows = [
-    ["类型", escapeHtml(tm.label)],
+    ["类型", escapeHtml(isCompute ? "远端模型" : tm.label)],
     c.handle ? ["账号", escapeHtml(c.handle)] : "",
+    c.model ? ["模型", escapeHtml(c.model)] : "",
+    c.provider ? ["厂商", escapeHtml(c.provider)] : "",
+    c.metering ? ["计量", escapeHtml(c.metering)] : "",
+    c.billing ? ["收费", escapeHtml(c.billing)] : "",
+    c.price ? ["价格", escapeHtml(c.price)] : "",
+    c.auth ? ["授权", escapeHtml(c.auth)] : "",
     c.statusText ? ["签名", escapeHtml(c.statusText)] : "",
     c.bio ? ["简介", escapeHtml(c.bio)] : "",
     (c.links && c.links.length) ? ["链接", c.links.map((l) => escapeHtml(l)).join(" · ")] : "",
     ["公钥", `<span class="mono">${escapeHtml(shortId(id))}</span><button class="ns-btn" id="ed-copy">复制</button>`],
-    ["来源", c.added ? "手动添加" : "目录发现"],
+    ["来源", c.added ? "手动添加" : (isCompute ? "P2P 目录发现" : "目录发现")],
   ].filter(Boolean);
+  const proxyBox = isCompute ? `
+      <div class="detail-rows" id="ed-proxy-box" style="margin-top:12px">
+        <div class="detail-row"><span class="k" style="font-weight:600">模型代理</span><span class="v" id="ed-proxy-status">查询中…</span></div>
+        <div class="detail-row" style="font-size:11px;color:var(--muted)"><span class="k"></span><span class="v">进程内 · 使用当前登录身份转发</span></div>
+        <div class="detail-row"><span class="k">监听</span><span class="v"><input id="ed-proxy-listen" class="ns-inp" style="width:100%" placeholder="空=自动 18081+" value=""></span></div>
+        <div class="detail-row"><span class="k">Token</span><span class="v"><input id="ed-proxy-token" class="ns-inp" style="width:100%" value="nm-local-token"></span></div>
+        <div class="detail-row"><span class="k">Grant</span><span class="v"><input id="ed-proxy-grant" class="ns-inp" style="width:100%" placeholder="可选 base64 Grant"></span></div>
+        <div class="detail-actions" style="padding:8px 0;display:flex;flex-wrap:wrap;gap:8px">
+          <button class="ns-btn ns-primary" id="ed-proxy-start">启动代理</button>
+          <button class="ns-btn" id="ed-proxy-stop" style="display:none">停止</button>
+          <button class="ns-btn" id="ed-proxy-manage" style="display:none">管理与监控</button>
+          <button class="ns-btn" id="ed-proxy-copy" style="display:none">复制 BASE_URL</button>
+        </div>
+        <div class="detail-row" id="ed-proxy-hint" style="display:none"><span class="k">智能体</span><span class="v mono" id="ed-proxy-env" style="font-size:11px;word-break:break-all"></span></div>
+      </div>` : "";
   conv.innerHTML = `
-    <div class="conv-head"><b>资料</b></div>
+    <div class="conv-head"><b>${isCompute ? "远端模型" : "资料"}</b></div>
     <div class="detail-scroll"><div class="detail">
       <div class="detail-hero">
         <div class="ed-avatar" style="background:${avatarColor(id)}">${face}${(window.Profile && c.presence) ? Profile.presenceDot(c.presence, 14) : ""}</div>
@@ -178,18 +248,21 @@ function renderEntityDetail(id) {
         </div>
       </div>
       <div class="detail-actions">
-        <button class="ns-btn ns-primary" id="ed-msg">发消息</button>
+        ${isCompute ? "" : '<button class="ns-btn ns-primary" id="ed-msg">发消息</button>'}
         ${c.added ? '<button class="ns-btn ns-danger" id="ed-del">从目录移除</button>' : ""}
       </div>
       <div class="detail-rows">${rows.map(([k, v]) => `<div class="detail-row"><span class="k">${k}</span><span class="v">${v}</span></div>`).join("")}</div>
+      ${proxyBox}
     </div></div>`;
   document.getElementById("ed-copy").addEventListener("click", async () => {
     try { await navigator.clipboard.writeText(id); if (window.toast) toast("公钥已复制"); }
     catch (_) { if (window.toast) toast("复制失败，请手动选中"); }
   });
-  document.getElementById("ed-msg").addEventListener("click", () => selectContact(id));
+  const msgBtn = document.getElementById("ed-msg");
+  if (msgBtn) msgBtn.addEventListener("click", () => selectContact(id));
   const del = document.getElementById("ed-del");
   if (del) del.addEventListener("click", () => removeEntity(id));
+  if (isCompute && window.bindModelProxyUi) window.bindModelProxyUi(id, c);
 }
 
 // ── 添加实体（类型可选 + 公钥粘贴/输入）──
@@ -198,8 +271,7 @@ function toggleEntityForm() {
   if (!f) return;
   if (f.style.display !== "none" && f.innerHTML) { f.style.display = "none"; f.innerHTML = ""; return; }
   f.innerHTML = `
-    <div class="ns-ftitle">添加实体</div>
-    <div class="ns-frow"><label>类型</label><select class="ef-type">${ENTITY_TYPES.map((t) => `<option value="${t.key}">${t.label}</option>`).join("")}</select></div>
+    <div class="ns-ftitle">添加朋友</div>
     <div class="ns-frow"><label>公钥（64 位 hex，可粘贴）</label><input class="ef-key" type="text" placeholder="粘贴或输入 64 位公钥 hex"></div>
     <div class="ns-frow"><label>名称（可选）</label><input class="ef-name" type="text" placeholder="备注名"></div>
     <div class="ns-factions"><button class="ns-btn ef-cancel">取消</button><button class="ns-btn ns-primary ef-save">添加</button></div>`;
@@ -207,7 +279,7 @@ function toggleEntityForm() {
   const q = (s) => f.querySelector(s);
   q(".ef-cancel").addEventListener("click", () => { f.style.display = "none"; f.innerHTML = ""; });
   q(".ef-save").addEventListener("click", () => {
-    const kind = q(".ef-type").value;
+    const kind = "person";
     const raw = q(".ef-key").value.trim();
     const name = q(".ef-name").value.trim();
     const pk = (window.NodeSvc && NodeSvc.pubkeyOf) ? NodeSvc.pubkeyOf(raw) : (/^[0-9a-fA-F]{64}$/.test(raw) ? raw.toLowerCase() : null);

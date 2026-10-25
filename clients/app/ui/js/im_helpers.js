@@ -6,7 +6,7 @@ const ENTITY_TYPES = [
   { key: "vehicle", label: "车辆",   icon: "vehicle", prefixes: ["vehicle"] },
   { key: "agent",   label: "智能体", icon: "agent", prefixes: ["agent"] },
   { key: "robot",   label: "机器人", icon: "robot",  prefixes: ["robot"] },
-  { key: "compute", label: "算力体", icon: "compute", prefixes: ["compute"] },
+  { key: "compute", label: "大模型", icon: "llm", prefixes: ["compute", "model"] },
 ];
 function kindType(kind) {
   const k = (kind || "").toLowerCase();

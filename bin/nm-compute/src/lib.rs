@@ -80,16 +80,31 @@ fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
-/// provider 后端：离线 `Demo`（无网络，便于测试/演示）或 `Ollama`（本机 OpenAI 兼容端点）。
+/// provider 后端：离线 `Demo`、本机 `Ollama`、或云厂商 OpenAI 兼容 API（Key 仅留本机）。
 pub enum Backend {
     Demo,
     Ollama { url: String, client: reqwest::Client },
+    /// 云厂商 / 自建 OpenAI 兼容端点；`api_key` 只在进程内存。
+    OpenAi {
+        url: String,
+        api_key: String,
+        client: reqwest::Client,
+    },
 }
 
 impl Backend {
     pub fn ollama(url: impl Into<String>) -> Self {
         Backend::Ollama {
             url: url.into().trim_end_matches('/').to_string(),
+            client: reqwest::Client::new(),
+        }
+    }
+
+    /// 云厂商 OpenAI 兼容：`base_url` 形如 `https://api.openai.com/v1`（勿带尾斜杠）。
+    pub fn openai(url: impl Into<String>, api_key: impl Into<String>) -> Self {
+        Backend::OpenAi {
+            url: url.into().trim_end_matches('/').to_string(),
+            api_key: api_key.into(),
             client: reqwest::Client::new(),
         }
     }
@@ -102,13 +117,18 @@ impl Backend {
         let model = if req.model.is_empty() { model_label.to_string() } else { req.model.clone() };
         let (content, usage) = match self {
             Backend::Demo => demo_infer(&req),
-            Backend::Ollama { url, client } => ollama_infer(client, url, params_json).await?,
+            Backend::Ollama { url, client } => {
+                openai_compat_infer(client, url, None, params_json).await?
+            }
+            Backend::OpenAi { url, api_key, client } => {
+                openai_compat_infer(client, url, Some(api_key.as_str()), params_json).await?
+            }
         };
         Ok(serde_json::to_vec(&chat_response(&model, content, usage))?)
     }
 
     /// 流式推理：把 OpenAI 兼容结果**逐帧**产出到 `tx`——中途帧 `({"delta":"片段"}, false)`，
-    /// 终帧 `(完整 chat.completion, true)`。Demo 切块伪流式（带节奏）；Ollama 走真 SSE。
+    /// 终帧 `(完整 chat.completion, true)`。Demo 切块伪流式；Ollama/云厂商走真 SSE。
     pub async fn stream_infer(
         &self,
         model_label: &str,
@@ -136,7 +156,11 @@ impl Backend {
                 let _ = tx.send((serde_json::to_vec(&chat_response(&model, content, usage))?, true));
             }
             Backend::Ollama { url, client } => {
-                ollama_stream(client, url, params_json, &model, &tx).await?;
+                openai_compat_stream(client, url, None, params_json, &model, &tx).await?;
+            }
+            Backend::OpenAi { url, api_key, client } => {
+                openai_compat_stream(client, url, Some(api_key.as_str()), params_json, &model, &tx)
+                    .await?;
             }
         }
         Ok(())
@@ -176,13 +200,33 @@ pub fn demo_infer(req: &ChatRequest) -> (String, Usage) {
     )
 }
 
-/// Ollama 的 OpenAI 兼容端点 `{url}/v1/chat/completions`：把消费方 JSON 透传，取回 content+usage。
-async fn ollama_infer(client: &reqwest::Client, url: &str, params_json: &[u8]) -> anyhow::Result<(String, Usage)> {
-    let endpoint = format!("{url}/v1/chat/completions");
-    let body: serde_json::Value = serde_json::from_slice(params_json)?;
-    let resp = client.post(&endpoint).json(&body).send().await?.error_for_status()?;
-    let out: serde_json::Value = resp.json().await?;
-    let content = out["choices"][0]["message"]["content"].as_str().unwrap_or_default().to_string();
+/// OpenAI 兼容端点 `{url}/chat/completions`（`url` 已含 `/v1`）。
+/// `api_key=Some` 时带 `Authorization: Bearer`（云厂商）；`None` 时不带（本机 Ollama）。
+async fn openai_compat_infer(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: Option<&str>,
+    params_json: &[u8],
+) -> anyhow::Result<(String, Usage)> {
+    let endpoint = chat_completions_url(url);
+    let mut body: serde_json::Value = serde_json::from_slice(params_json)?;
+    body["stream"] = serde_json::json!(false);
+    let mut req = client.post(&endpoint).json(&body);
+    if let Some(k) = api_key {
+        req = req.bearer_auth(k);
+    }
+    let resp = req.send().await?;
+    let status = resp.status();
+    let raw = resp.text().await?;
+    if !status.is_success() {
+        return Err(anyhow::anyhow!("上游 HTTP {status}: {}", truncate(&raw, 400)));
+    }
+    let out: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| anyhow::anyhow!("上游非 JSON: {e}; body={}", truncate(&raw, 200)))?;
+    let content = out["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     let usage = Usage {
         prompt_tokens: out["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32,
         completion_tokens: out["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32,
@@ -191,21 +235,30 @@ async fn ollama_infer(client: &reqwest::Client, url: &str, params_json: &[u8]) -
     Ok((content, usage))
 }
 
-/// Ollama SSE 流式：设 `stream:true`，逐行解析 `data: {...}` 的 `choices[0].delta.content`，逐片产出到 `tx`；
-/// 末尾产出完整 `chat.completion`（done=true）。需 reqwest `stream` 特性 + `futures-util`。
-async fn ollama_stream(
+/// OpenAI 兼容 SSE：设 `stream:true`，解析 `data:` 行的 `delta.content`，终帧完整 completion。
+async fn openai_compat_stream(
     client: &reqwest::Client,
     url: &str,
+    api_key: Option<&str>,
     params_json: &[u8],
     model: &str,
     tx: &tokio::sync::mpsc::UnboundedSender<(Vec<u8>, bool)>,
 ) -> anyhow::Result<()> {
     use futures_util::StreamExt;
-    let endpoint = format!("{url}/v1/chat/completions");
+    let endpoint = chat_completions_url(url);
     let mut body: serde_json::Value = serde_json::from_slice(params_json)?;
     body["stream"] = serde_json::json!(true);
     body["stream_options"] = serde_json::json!({ "include_usage": true });
-    let resp = client.post(&endpoint).json(&body).send().await?.error_for_status()?;
+    let mut req = client.post(&endpoint).json(&body);
+    if let Some(k) = api_key {
+        req = req.bearer_auth(k);
+    }
+    let resp = req.send().await?;
+    let status = resp.status();
+    if !status.is_success() {
+        let raw = resp.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!("上游 HTTP {status}: {}", truncate(&raw, 400)));
+    }
     let mut stream = resp.bytes_stream();
     let mut buf = String::new();
     let mut content = String::new();
@@ -220,9 +273,12 @@ async fn ollama_stream(
             if data.is_empty() || data == "[DONE]" {
                 continue;
             }
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) else { continue };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) else {
+                continue;
+            };
             if let Some(d) = v["choices"][0]["delta"]["content"].as_str()
-                && !d.is_empty() {
+                && !d.is_empty()
+            {
                 content.push_str(d);
                 let frame = serde_json::json!({ "delta": d });
                 if tx.send((serde_json::to_vec(&frame)?, false)).is_err() {
@@ -238,6 +294,24 @@ async fn ollama_stream(
     }
     let _ = tx.send((serde_json::to_vec(&chat_response(model, content, usage))?, true));
     Ok(())
+}
+
+/// `url` 可为 `https://api.openai.com/v1` 或已含 `/chat/completions` 的完整路径。
+fn chat_completions_url(url: &str) -> String {
+    let u = url.trim_end_matches('/');
+    if u.ends_with("/chat/completions") {
+        u.to_string()
+    } else {
+        format!("{u}/chat/completions")
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(max).collect::<String>())
+    }
 }
 
 #[cfg(test)]

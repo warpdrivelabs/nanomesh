@@ -177,6 +177,7 @@
     try {
       const gid = await NM.inv("group_create", { name: name || "新群" });
       await renderGroupsList();
+      if (typeof renderEntities === "function") renderEntities();
       openDetail(gid);
       if (window.toast) toast("群已创建");
     } catch (e) { if (window.toast) toast("建群失败：" + (e && e.message ? e.message : e)); }
@@ -331,6 +332,8 @@
   (function init() {
     const nw = document.getElementById("grp-new-btn");
     if (nw) nw.addEventListener("click", createGroup);
+    const entNew = document.getElementById("ent-new-group");
+    if (entNew) entNew.addEventListener("click", createGroup);
     const rf = document.getElementById("grp-refresh-btn");
     if (rf) rf.addEventListener("click", renderGroupsList);
     const se = document.getElementById("grp-search");

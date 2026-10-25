@@ -2593,6 +2593,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "nm-llm-gatewayd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "clap",
+ "nm-client",
+ "nm-compute",
+ "nm-entity",
+ "nm-proto",
+ "nm-transport",
+ "prost",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "nm-llm-proxy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "clap",
+ "dashmap",
+ "nm-client",
+ "nm-proto",
+ "nm-transport",
+ "prost",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "nm-node"
 version = "0.1.0"
 dependencies = [

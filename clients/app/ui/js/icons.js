@@ -4,6 +4,8 @@ const NM_ICON_PATHS = {
   contacts: '<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="12" r="2"/><path d="M15 10h4M15 14h3"/>',
   nodes: '<rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/>',
   groups: '<circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2.2"/><path d="M3.5 19c.7-3 2.8-4.5 5.5-4.5s4.8 1.5 5.5 4.5M15.5 14.6c1.6.3 2.9 1.2 3.5 2.9"/>',
+  // 新建群：两人轮廓 + 加号，区别于普通 plus
+  "group-new": '<circle cx="8" cy="8" r="2.3"/><path d="M3.4 17.2c.5-2.4 2.2-3.6 4.6-3.6s4.1 1.2 4.6 3.6"/><circle cx="16.2" cy="8.4" r="1.7"/><path d="M18.6 13.2v4.6M16.3 15.5h4.6"/>',
   channels: '<path d="M5 16.2a8 8 0 0 1 0-8.4M8 14.2a4.2 4.2 0 0 1 0-4.4M16 9.8a4.2 4.2 0 0 1 0 4.4M19 7.8a8 8 0 0 1 0 8.4"/><circle cx="12" cy="12" r="1.3" fill="currentColor" stroke="none"/>',
   "sidebar-close": '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M14.5 9 11 12l3.5 3"/>',
   "sidebar-open": '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M12.5 9 16 12l-3.5 3"/>',
@@ -33,6 +35,10 @@ const NM_ICON_PATHS = {
   vehicle: '<path d="M4 15h16l-1.6-5H6.4L4 15z"/><circle cx="7.5" cy="17.5" r="1.5"/><circle cx="16.5" cy="17.5" r="1.5"/><path d="m6.2 10 1.6-4h8.4l1.6 4"/>',
   agent: '<rect x="5" y="8" width="14" height="10" rx="2"/><path d="M12 8V5M9 13h.01M15 13h.01"/><circle cx="12" cy="4" r="1" fill="currentColor" stroke="none"/>',
   compute: '<path d="M13 2 5 13h6l-1 9 9-13h-6l0-7z"/>',
+  // 大模型：三层神经网络（输入→隐层→输出），区别于太阳/星芒
+  llm: '<circle cx="5" cy="7" r="1.6"/><circle cx="5" cy="12" r="1.6"/><circle cx="5" cy="17" r="1.6"/><circle cx="12" cy="9" r="1.6"/><circle cx="12" cy="15" r="1.6"/><circle cx="19" cy="7" r="1.6"/><circle cx="19" cy="12" r="1.6"/><circle cx="19" cy="17" r="1.6"/><path d="M6.6 7.4 10.4 9M6.6 11.4 10.4 9.6M6.6 12.6 10.4 14.4M6.6 16.6 10.4 15M13.6 9 17.4 7.4M13.6 9.6 17.4 11.4M13.6 14.4 17.4 12.6M13.6 15 17.4 16.6"/>',
+  // 模型代理：中间网关匣 + 左右双向转发
+  proxy: '<rect x="9" y="8" width="6" height="8" rx="1.5"/><path d="M3 10.5h5M3 13.5h5M16 10.5h5M16 13.5h5M6.2 8.8 3.5 10.5 6.2 12.2M17.8 11.8 20.5 13.5 17.8 15.2"/>',
   file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
   edit: '<path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z"/>',
   copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M4 16V6a2 2 0 0 1 2-2h10"/>',

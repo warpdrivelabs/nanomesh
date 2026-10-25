@@ -1,0 +1,27 @@
+[package]
+name = "nm-llm-gatewayd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "本机云厂商 LLM Key 经 nanomesh P2P 共享（提供方）"
+
+[[bin]]
+name = "nm-llm-gatewayd"
+path = "src/main.rs"
+
+[dependencies]
+nm-client = { workspace = true }
+nm-compute = { path = "../nm-compute" }
+nm-entity = { workspace = true }
+nm-proto = { workspace = true }
+nm-transport = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.8"
+prost = "0.14"
+base64 = "0.22"

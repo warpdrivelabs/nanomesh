@@ -55,6 +55,12 @@ message InferenceProfile {
   uint32 max_context = 2;
   uint32 concurrency = 3;
   string price = 4;
+  // 与 PersonProfile 对齐的展示字段（model.llm 共享实体用）：目录卡片可渲染头像/简介。
+  string avatar_url = 5;
+  string bio = 6;
+  string status_text = 7;
+  repeated string links = 8;
+  string locale = 9;
 }
 message DeviceProfile {
   string device_type = 1;
