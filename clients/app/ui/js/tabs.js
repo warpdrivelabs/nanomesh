@@ -10,6 +10,44 @@
   const find = (k) => TABS.find((t) => t.key === k);
   const esc = (s) => (typeof escapeHtml === "function" ? escapeHtml(s) : String(s == null ? "" : s));
 
+  /** 非当前标签的会话未读数（单聊/群/频道 key 为 c:id）。 */
+  function unreadOf(t) {
+    if (!t || t.key === ACTIVE) return 0;
+    if (typeof window.tabUnreadOf === "function") return Number(window.tabUnreadOf(t.key)) || 0;
+    return 0;
+  }
+  function unreadLabel(n) {
+    return typeof formatUnread === "function" ? formatUnread(n) : (n > 99 ? "99+" : (n > 0 ? String(n) : ""));
+  }
+  function badgeHtml(n) {
+    const label = unreadLabel(n);
+    return label ? `<span class="tab-unread" aria-hidden="true">${esc(label)}</span>` : "";
+  }
+  /** 仅刷新已打开标签上的未读气泡（避免整条 strip 重绑）。 */
+  function paintBadges() {
+    const s = strip();
+    if (!s) return;
+    s.querySelectorAll(".tab").forEach((el) => {
+      const t = find(decodeURIComponent(el.dataset.k || ""));
+      const label = unreadLabel(unreadOf(t));
+      let badge = el.querySelector(".tab-unread");
+      if (!label) {
+        if (badge) badge.remove();
+        return;
+      }
+      if (!badge) {
+        badge = document.createElement("span");
+        badge.className = "tab-unread";
+        badge.setAttribute("aria-hidden", "true");
+        const x = el.querySelector(".tab-x");
+        if (x) el.insertBefore(badge, x);
+        else el.appendChild(badge);
+      }
+      badge.textContent = label;
+    });
+    if (overOpen()) fillOverflow();
+  }
+
   function renderStrip() {
     const s = strip();
     if (!s) return;
@@ -18,6 +56,7 @@
       <div class="tab${t.key === ACTIVE ? " active" : ""}" data-k="${encodeURIComponent(t.key)}" title="${esc(t.title)}">
         <span class="tab-ico">${window.nmIcon ? nmIcon(t.ico || "file") : ""}</span>
         <span class="tab-t">${esc(t.title)}</span>
+        ${badgeHtml(unreadOf(t))}
         <span class="tab-x" title="关闭">${window.nmIcon ? nmIcon("close") : ""}</span>
       </div>`).join("");
     s.querySelectorAll(".tab").forEach((el) => {
@@ -155,6 +194,7 @@
       <button type="button" class="tab-mi${t.key === ACTIVE ? " on" : ""}" data-k="${encodeURIComponent(t.key)}">
         <span class="tab-ico">${window.nmIcon ? nmIcon(t.ico || "file") : ""}</span>
         <span class="tab-mi-t">${esc(t.title)}</span>
+        ${badgeHtml(unreadOf(t))}
       </button>`).join("");
     m.hidden = false;
     if (btn) btn.classList.add("open");
@@ -239,5 +279,5 @@
   }
 
   showEmpty();
-  window.Tabs = { open, activate, close, closeAll, remove, retitle, showEmpty, active: () => ACTIVE, has: (k) => !!find(k) };
+  window.Tabs = { open, activate, close, closeAll, remove, retitle, showEmpty, paintBadges, active: () => ACTIVE, has: (k) => !!find(k) };
 })();

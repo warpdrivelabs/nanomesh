@@ -52,23 +52,29 @@ async function toggleUserMenu() {
   })() : "";
   m.innerHTML = head +
     (cur && window.Profile ? row("status", "person", "状态", Profile.presenceLabel(st)) : "") +
-    (cur ? row("account", "contacts", "账号", ids.length > 1 ? ids.length + " 个身份" : "资料与设备") : "") +
+    (cur ? row("account", "contacts", "账号", ids.length > 1 ? (ids.length - 1) + " 个其他" : "资料与设备") : "") +
     row("look", light ? "moon" : "sun", "外观", (light ? "浅色" : "深色") + " · " + langName) +
     row("app", "shield", "通知与安全", window.Tray && Tray.available() ? "托盘、锁定、备份" : "锁定与备份") +
     `<div class="um-fly" id="um-fly" hidden></div>`;
   m.classList.add("on");
   const closeAll = () => m.classList.remove("on");
-  const identRow = (pk) => {
+  const others = cur ? ids.filter((pk) => pk !== cur) : [];
+  const identRow = (pk, opts) => {
     const av = window.Profile ? Profile.ownAvatar(pk) : "";
     const face = (window.Profile && Profile.isImg(av))
       ? `<span class="um-av" style="padding:0;overflow:hidden"><img src="${av}" alt="" style="width:100%;height:100%;object-fit:cover"></span>`
       : `<span class="um-av" style="background:${uColor(pk)}">${escapeHtml(Identity.label(pk).slice(0, 1))}</span>`;
-    return `<div class="um-item ${pk === cur ? "on" : ""}" data-pk="${pk}">${face}<span class="um-meta"><b>${escapeHtml(Identity.label(pk))}</b><small class="mono">${shortNode(pk)}</small></span></div>`;
+    const tag = (opts && opts.current) ? `<span class="um-cur">当前</span>` : "";
+    const cls = (opts && opts.current) ? "um-item on um-cur-id" : "um-item";
+    return `<div class="${cls}" data-pk="${pk}">${face}<span class="um-meta"><b>${escapeHtml(Identity.label(pk))}</b><small class="mono">${shortNode(pk)}</small></span>${tag}</div>`;
   };
   const subs = {
     status: cur && window.Profile ? `<div class="um-status" id="um-status">${["online", "away", "busy", "dnd"].map((s) => `<button class="um-st${st === s ? " on" : ""}" data-st="${s}"><span class="um-stdot" style="background:${Profile.presenceColor(s)}"></span>${Profile.presenceLabel(s)}</button>`).join("")}</div>` : "",
     account: cur ? [
-      ids.map(identRow).join(""),
+      identRow(cur, { current: true }),
+      others.length
+        ? `<div class="um-item um-subrow um-others" id="um-others"><span class="um-av um-plus">${nmIcon("contacts")}</span><span class="um-meta"><b>其他用户</b><small>${others.length} 个</small></span>${chev}</div>`
+        : "",
       `<div class="um-sep"></div>`,
       `<div class="um-item" id="um-copy"><span class="um-av um-plus">${nmIcon("copy")}</span><span class="um-meta"><b>复制用户 id</b></span></div>`,
       `<div class="um-item" id="um-profile"><span class="um-av um-plus">${nmIcon("person")}</span><span class="um-meta"><b>编辑资料</b></span></div>`,
@@ -87,27 +93,59 @@ async function toggleUserMenu() {
     ].join(""),
   };
   const fly = document.getElementById("um-fly");
-  const placeFly = (row) => {
-    const mr = m.getBoundingClientRect();
-    const rr = row.getBoundingClientRect();
-    fly.hidden = false;
-    fly.style.left = (mr.right + 6) + "px";
-    fly.style.top = Math.max(8, rr.top) + "px";
-    const fr = fly.getBoundingClientRect();
-    if (fr.right > window.innerWidth - 8) fly.style.left = Math.max(8, mr.left - fr.width - 6) + "px";
-    const fr2 = fly.getBoundingClientRect();
-    if (fr2.bottom > window.innerHeight - 8) fly.style.top = Math.max(8, window.innerHeight - fr2.height - 8) + "px";
+  let fly2 = document.getElementById("um-fly2");
+  if (!fly2) {
+    fly2 = document.createElement("div");
+    fly2.id = "um-fly2";
+    fly2.className = "um-fly um-fly2";
+    fly2.hidden = true;
+    m.appendChild(fly2);
+  }
+  fly2.hidden = true;
+  const placeBeside = (panel, anchor, preferRightOf) => {
+    const ar = preferRightOf.getBoundingClientRect();
+    const rr = anchor.getBoundingClientRect();
+    panel.hidden = false;
+    panel.style.left = (ar.right + 6) + "px";
+    panel.style.top = Math.max(8, rr.top) + "px";
+    const fr = panel.getBoundingClientRect();
+    if (fr.right > window.innerWidth - 8) panel.style.left = Math.max(8, ar.left - fr.width - 6) + "px";
+    const fr2 = panel.getBoundingClientRect();
+    if (fr2.bottom > window.innerHeight - 8) panel.style.top = Math.max(8, window.innerHeight - fr2.height - 8) + "px";
+  };
+  const hideFly2 = () => {
+    fly2.hidden = true;
+    const o = fly.querySelector("#um-others");
+    if (o) o.classList.remove("on");
+  };
+  const bindOthersNest = () => {
+    const nest = fly.querySelector("#um-others");
+    if (!nest) return;
+    nest.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (!fly2.hidden) { hideFly2(); return; }
+      nest.classList.add("on");
+      fly2.innerHTML = others.map((pk) => identRow(pk)).join("");
+      placeBeside(fly2, nest, fly);
+    });
+  };
+  const onPickUser = (pk) => {
+    closeAll();
+    if (pk && pk !== cur) switchUser(pk);
   };
   m.querySelectorAll(".um-subrow").forEach((row) => row.addEventListener("click", (e) => {
     e.stopPropagation();
+    hideFly2();
     if (fly.dataset.for === row.dataset.sub && !fly.hidden) { fly.hidden = true; row.classList.remove("on"); return; }
     m.querySelectorAll(".um-subrow").forEach((r) => r.classList.remove("on"));
     row.classList.add("on");
     fly.dataset.for = row.dataset.sub;
     fly.innerHTML = subs[row.dataset.sub] || "";
-    placeFly(row);
+    placeBeside(fly, row, m);
+    if (row.dataset.sub === "account") bindOthersNest();
   }));
   fly.addEventListener("click", async (e) => {
+    if (e.target.closest("#um-others")) return;
     const stBtn = e.target.closest(".um-st");
     const pkEl = e.target.closest(".um-item[data-pk]");
     const act = e.target.closest("#um-copy, #um-profile, #um-passwd, #um-devices, #um-notify, #um-sec, #um-new, #um-theme, #um-lang");
@@ -115,7 +153,7 @@ async function toggleUserMenu() {
     const id = act ? act.id : "";
     closeAll();
     if (stBtn) { await setMyStatus(stBtn.dataset.st); return; }
-    if (pkEl) { if (pkEl.dataset.pk !== cur) switchUser(pkEl.dataset.pk); return; }
+    if (pkEl) { onPickUser(pkEl.dataset.pk); return; }
     if (id === "um-copy") {
       try { await navigator.clipboard.writeText(cur); if (window.toast) toast("已复制当前用户 id"); }
       catch (_) { if (window.toast) toast("复制失败，请手动选中"); }
@@ -127,6 +165,10 @@ async function toggleUserMenu() {
     else if (id === "um-new" && typeof imDisconnect === "function") imDisconnect();
     else if (id === "um-theme" && typeof toggleTheme === "function") toggleTheme();
     else if (id === "um-lang" && window.nmSetLocale) nmSetLocale(window.nmLocale && nmLocale() === "en" ? "zh-CN" : "en");
+  });
+  fly2.addEventListener("click", (e) => {
+    const pkEl = e.target.closest(".um-item[data-pk]");
+    if (pkEl) onPickUser(pkEl.dataset.pk);
   });
 }
 

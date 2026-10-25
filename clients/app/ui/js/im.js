@@ -109,8 +109,14 @@ function paintActUnread() {
   badge.textContent = label;
   badge.classList.toggle("badge-lg", label.length > 2);
 }
+/** 供 Tabs 读取：仅会话类标签 c:<id> 返回未读数。 */
+window.tabUnreadOf = function (key) {
+  if (!key || key.slice(0, 2) !== "c:") return 0;
+  return Number(UNREAD[key.slice(2)]) || 0;
+};
 function scheduleUnread() {
   paintActUnread();
+  if (window.Tabs && Tabs.paintBadges) Tabs.paintBadges();
   clearTimeout(unreadTimer);
   unreadTimer = setTimeout(() => { if (window.ChatLog) ChatLog.setUnread(UNREAD); }, 200);
 }
