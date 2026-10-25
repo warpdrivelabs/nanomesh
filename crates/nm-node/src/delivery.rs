@@ -429,8 +429,52 @@ pub(crate) async fn deliver_direct(gram: &Gram, ctx: &Ctx, track: bool) {
     }
 }
 
-/// 尝试把 gram 经 uni 流推送给某在线会话；返回是否投递成功。
-/// 推送失败（连接已断但会话表尚未清理）则移除陈旧会话，交由上层落离线队列。
+/// 跨节点路由 Command/CommandResult 转发（B 根治）：调用方 home 投不到目标会话时，把原样 gram 包进
+/// `GroupGossip::Routed` 发往 `nmspace-inbox:<receiver>`（目标实体 home 常驻 join，register_as 盖
+/// home_node → local_accounts 命中）+ 火管兜底。与 Direct 的三点刻意不同——**不入 outbox、不等
+/// overlay 成型（无 pending_fwd）、不落离线库**：Command 语义=快速失败，可靠性由客户端
+/// pending+timeout 兜底（session_calls），黑洞只表现为客户端超时而非 24h 重传。
+pub(crate) async fn forward_routed(ctx: &Ctx, gram: &Gram) {
+    let to = &gram.receiver;
+    // nonce：转发节点随机 8B——接收侧 (origin,nonce) 内存去重，吸收 inbox+火管双写副本。
+    let nonce = nm_transport::SecretKey::generate().to_bytes()[..8].to_vec();
+    let gg = GroupGossip {
+        origin: ctx.node_id.to_vec(),
+        body: Some(nm_proto::pb::group_gossip::Body::Routed(nm_proto::RoutedGram {
+            gram: Some(gram.clone()),
+            nonce,
+        })),
+    };
+    let bytes = gg.encode_to_vec();
+    let per_topic = ctx.per_topic.load(std::sync::atomic::Ordering::Relaxed);
+    let retire = per_topic
+        && inbox_retireable(
+            to,
+            &ctx.node_id,
+            &ctx.dir.entities,
+            &ctx.per_group_live,
+            now_ms(),
+            LIVE_TTL_MS,
+        );
+    let mut inbox_ok = false;
+    if per_topic {
+        let _ = ctx.fed.join_inbox(to, inbox_bootstrap(to, ctx)).await;
+        inbox_ok = ctx.fed.publish_inbox(to, bytes.clone()).await.is_ok();
+    }
+    let inbox_has_neighbors = per_topic && ctx.fed.inbox_neighbors(to).await > 0;
+    if retire && inbox_ok && inbox_has_neighbors {
+        tracing::debug!("firehose Routed suppressed (target home live on inbox topic)");
+    } else {
+        let _ = ctx.group_pub.send(bytes);
+    }
+    tracing::debug!(
+        kind = ?gram.kind(),
+        target = %crate::records::hex_encode(&to[..to.len().min(8)]),
+        "routed gram forwarded cross-node (inbox/firehose)"
+    );
+}
+
+/// 尝试把 gram 经 uni 流推送给某在线会话；返回是否投递成功。/// 推送失败（连接已断但会话表尚未清理）则移除陈旧会话，交由上层落离线队列。
 /// 尝试把 gram 经 uni 流推给目标在线会话；返回是否成功。
 /// 瞬时失败（uni 流开启/写入偶发失败，连接其实还活着）先原地重试一次，吸收大部分抖动，
 /// 减少"在线却投递失败→存离线库→要等重连才补投"的消息延迟。两次都失败才判会话陈旧并清理。

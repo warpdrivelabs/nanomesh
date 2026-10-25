@@ -352,14 +352,40 @@ async fn handle_gram(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Optio
             });
         } else {
             let delivered = deliver_account(to, gram, ctx, false, None).await;
-            // Command 不入离线库：若目标无在线会话，必须立刻回 CommandResult，
-            // 否则调用方会空等到 timeout（连通性探测表现为「探测中…」约 125s 后 call timed out）。
-            if !delivered && matches!(gram.kind(), GramKind::Command) {
-                tracing::warn!(
-                    target = %crate::records::hex_encode(&to[..to.len().min(8)]),
-                    "routed command: no online session; failing fast"
-                );
-                push_command_error(gram, rid, caller, ctx, "provider offline or unreachable");
+            // Command/CommandResult 不入离线库。本节点无目标在线会话时（B 根治，跨节点路由）：
+            // 目录里该实体 home 在别的节点 → 单跳转发到其 home（nmspace-inbox:<to> + 火管兜底，
+            // federation_runtime 的 Routed 臂在 home 投给在线会话；结果回程走同管道反向）。
+            // home 即本节点 / 目录无此实体 → 确实离线：Command 立刻回错（否则调用方空等到
+            // timeout——连通性探测曾表现为「探测中…」约 125s 后 call timed out）；CommandResult 丢弃。
+            if !delivered
+                && matches!(gram.kind(), GramKind::Command | GramKind::CommandResult)
+            {
+                let remote_home = match ctx.dir.get(to).await {
+                    Ok(Some(t))
+                        if !t.home_node.is_empty()
+                            && t.home_node.as_slice() != ctx.node_id.as_slice() =>
+                    {
+                        true
+                    }
+                    _ => false,
+                };
+                if remote_home {
+                    let (g, c) = (gram.clone(), ctx.clone());
+                    ctx.tracker.spawn(async move {
+                        crate::delivery::forward_routed(&c, &g).await;
+                    });
+                } else if matches!(gram.kind(), GramKind::Command) {
+                    tracing::warn!(
+                        target = %crate::records::hex_encode(&to[..to.len().min(8)]),
+                        "routed command: no online session; failing fast"
+                    );
+                    push_command_error(gram, rid, caller, ctx, "provider offline or unreachable");
+                } else {
+                    tracing::debug!(
+                        target = %crate::records::hex_encode(&to[..to.len().min(8)]),
+                        "routed CommandResult: caller not here and no remote home; dropped"
+                    );
+                }
             }
         }
         return Some(reply_gram(gram, GramKind::Receipt, None)); // 给发送方回 ack
@@ -779,8 +805,12 @@ fn push_command_error(gram: &Gram, rid: &[u8], account: &[u8], ctx: &Ctx, error:
         });
         return;
     }
-    // 2) 回退：按账号找任一在线设备（多设备 / rid 表抖）
+    // 2) 回退：按账号找任一在线设备（多设备 / rid 表抖）。async fn 必须 spawn——裸 `let _ =`
+    //    只是 drop 未 poll 的 future，等于没发（曾是静默空操作 bug）。
     if !account.is_empty() {
-        let _ = deliver_account(account, &reply, ctx, false, None);
+        let (a, r, c) = (account.to_vec(), reply, ctx.clone());
+        ctx.tracker.spawn(async move {
+            let _ = deliver_account(&a, &r, &c, false, None).await;
+        });
     }
 }

@@ -17,7 +17,7 @@ pub use pb::{
     ChannelList, ChannelLog, ChannelLive, ChannelMsg, ChannelOp, ChannelPub, ChannelPubReject,
     ChannelPubReq, Command, CommandResult,
     DeviceCert, DeviceInfo, DeviceList, DeviceRevoke, DirectoryQuery, Entity, EntityList, Grant, Gram, FedSyncReq, FedSyncResp, GramKind, Group,
-    GroupAck, GroupAckBatch, GroupAckEntry, GroupGossip, GroupList, GroupOp, JobSpec, NameList, NameOp, NameQuery, NameRecord, PubPolicy,
+    GroupAck, GroupAckBatch, GroupAckEntry, GroupGossip, GroupList, GroupOp, JobSpec, NameList, NameOp, NameQuery, NameRecord, PubPolicy, RoutedGram,
     ReadMarker, ReadMarkerList, Invite, AdmissionGrant,
 };
 

@@ -262,6 +262,42 @@ impl Node {
                     let _ = self.group_pub.send(ack.encode_to_vec()); // 火管兜底
                 }
             }
+            Some(nm_proto::pb::group_gossip::Body::Routed(r)) => {
+                // B 根治：跨节点路由 Command/CommandResult（见 delivery::forward_routed）。
+                // 单跳投给本节点在线会话；**绝不落离线库/不重传**——可靠性=客户端 pending+timeout。
+                let Some(gram) = r.gram else { return };
+                if !matches!(gram.kind(), nm_proto::GramKind::Command | nm_proto::GramKind::CommandResult) {
+                    return; // 信封只承运这两类；其余丢弃（防被当通用隧道滥用）
+                }
+                // (origin,nonce) 内存去重：吸收 inbox 主题+火管双写副本。nonce 为转发节点随机 8B，
+                // 键空间与 Direct 的 (sender,gram_id,crc) 无交集；不做持久去重——双写窗口秒级，
+                // 也规避「客户端重启 gram_id 回绕 + Command 空 crc」的持久表误判。
+                let nonce_u64 = u64::from_be_bytes(
+                    r.nonce.get(..8).and_then(|s| s.try_into().ok()).unwrap_or([0u8; 8]),
+                );
+                if !self.seen.lock().unwrap().first_seen(&origin, nonce_u64, b"routed") {
+                    return;
+                }
+                let to = gram.receiver.clone();
+                let delivered = deliver_account(&to, &gram, &ctx, false, None).await;
+                if delivered {
+                    return;
+                }
+                // home 在此却无在线会话 → 仅对 Command 以权威身份合成错误并经同管道回程；
+                // 非 home 的火管副本不代答（防非权威误报）；CommandResult 投不到则丢弃（客户端超时兜底）。
+                if is_home_here(&ctx, &to) && matches!(gram.kind(), nm_proto::GramKind::Command) {
+                    let cr = nm_proto::CommandResult {
+                        correlation_id: gram.gram_id,
+                        ok: false,
+                        result: None,
+                        error: "provider offline at home".to_string(),
+                        seq: 0,
+                        done: true,
+                    };
+                    let reply = crate::grams::command_result_gram(&gram, &cr);
+                    crate::delivery::forward_routed(&ctx, &reply).await;
+                }
+            }
             Some(nm_proto::pb::group_gossip::Body::DirectAck(ack)) => {
                 // 本节点是原 sender 的 home（订阅了 nmspace-inbox:<my account>）→ 删待确认条目、停重传。
                 // DirectAck 不再回 ack、不入 outbox —— 无回环。

@@ -250,7 +250,15 @@ message GroupGossip {
     GroupAck group_ack = 9;           // 跨节点群消息可靠扇出：成员节点收到并投递群 Msg 后，在群主题回发，发送方 home 据此按节点销账、停重传
     ChannelGram channel = 10;          // P4 频道火管兜底：频道 Meta/定序消息/发布意图经全节点火管广播一份（与频道专属主题双写），令跨节点订阅者的 home 无需频道 overlay 先成型即可收到（对齐群 announce 全网可见）
     GroupAckBatch group_ack_batch = 11; // ack 聚合：成员节点把一窗口内多条 GroupAck 合并为一个批量 gram（仅走火管），降低高并发群的 ack 数量级与写放大；老节点跳过未知字段（body=None）忽略
+    RoutedGram routed = 12;           // 跨节点路由 Command/CommandResult：调用方 home 投不到目标会话时按目录 home_node 单跳转发（nmspace-inbox:<receiver> + 火管兜底）；不落离线库/不重传，可靠性=客户端 pending+timeout。老节点忽略
   }
+}
+// 跨节点路由 gram 转发信封（Command/CommandResult 专用）：`gram` 为原样路由 gram（receiver=目标实体），
+// `nonce`=转发节点随机 8B——接收侧 (origin,nonce) 内存去重，吸收 inbox 主题+火管双写的重复副本。
+// 刻意不复用 Direct：Direct 的离线落库/outbox 重传/DirectAck 均与 Command「不落盘、快速失败、1:1 关联」语义相克。
+message RoutedGram {
+  Gram gram = 1;
+  bytes nonce = 2;
 }
 // F3：收件人收件箱存活心跳。由收件人 home 节点在 nmspace-inbox:<account> 周期广播；
 // origin(=该 home 节点 id) 由 GroupGossip 携带。发送方收到后记其存活，用于省略火管 Direct 副本。
