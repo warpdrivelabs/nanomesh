@@ -1,9 +1,13 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use nm_proto::{now_ms, Any, Command, Group, GroupOp};
+use nm_proto::{now_ms, Any, Command, Gram, GramKind, Group, GroupOp, PROTOCOL_VERSION};
 use nm_store::RedbStore;
 use prost::Message;
+
+use crate::delivery::{is_home_here, online_rids, try_push};
+use crate::records::hex_encode;
+use crate::{Ctx, GROUP_UPDATED_TYPE};
 
 pub(crate) enum GroupMut {
     Join,
@@ -22,6 +26,55 @@ fn persist_group(store: &Option<Arc<RedbStore>>, group: &Group) {
     {
         tracing::warn!("persist group failed: {err}");
     }
+}
+
+/// 向本节点托管的在线群成员推送群状态变更（名称/头像/成员等），客户端按 type_url 拦截刷新列表。
+pub(crate) fn notify_group_updated(ctx: &Ctx, g: &Group) {
+    let event = serde_json::json!({
+        "groupId": hex_encode(&g.group_id),
+        "name": g.name,
+        "topic": g.topic,
+        "avatar": g.avatar_url,
+        "updatedAt": g.updated_at,
+    });
+    let value = event.to_string().into_bytes();
+    let now = now_ms();
+    let sessions = ctx.sessions.clone();
+    let mut jobs: Vec<(Vec<u8>, Gram)> = Vec::new();
+    for member in &g.members {
+        if !is_home_here(ctx, member) {
+            continue;
+        }
+        let rids = online_rids(&ctx.sessions, &ctx.principals, &ctx.devices, member);
+        if rids.is_empty() {
+            continue;
+        }
+        let gram = Gram {
+            version: PROTOCOL_VERSION,
+            kind: GramKind::Message as i32,
+            gram_id: now,
+            ref_gram_id: None,
+            sender: ctx.node_id.to_vec(),
+            receiver: member.to_vec(),
+            timestamp_ms: now,
+            payload: Some(Any {
+                type_url: GROUP_UPDATED_TYPE.into(),
+                value: value.clone(),
+            }),
+            crc: Vec::new(),
+        };
+        for rid in rids {
+            jobs.push((rid, gram.clone()));
+        }
+    }
+    if jobs.is_empty() {
+        return;
+    }
+    ctx.tracker.spawn(async move {
+        for (rid, gram) in jobs {
+            try_push(&rid, &gram, &sessions).await;
+        }
+    });
 }
 
 fn is_group_admin(group: &Group, who: &[u8]) -> bool {

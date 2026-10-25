@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use nm_client::{Client, Session};
 use prost::Message;
-use serde_json::json;
+use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State, async_runtime};
 
 use crate::{
@@ -68,6 +68,26 @@ pub(crate) async fn finish_session(
                 if gram.sender.as_slice() == node_id.as_slice() {
                     devices::node_event(&apph, &p.value);
                 }
+                continue;
+            }
+            // 群元数据/成员变更：节点推送，须在回执逻辑前拦截（不进聊天、不回执）。
+            if let Some(p) = gram
+                .payload
+                .as_ref()
+                .filter(|p| p.type_url == "nmspace.v1/group.updated")
+            {
+                let body: Value = serde_json::from_slice(&p.value).unwrap_or_else(|_| json!({}));
+                let _ = apph.emit(
+                    "core://event",
+                    json!({
+                        "type": "group_updated",
+                        "groupId": body.get("groupId").and_then(|v| v.as_str()).unwrap_or(""),
+                        "name": body.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                        "topic": body.get("topic").and_then(|v| v.as_str()).unwrap_or(""),
+                        "avatar": body.get("avatar").and_then(|v| v.as_str()).unwrap_or(""),
+                        "updatedAt": body.get("updatedAt").and_then(|v| v.as_i64()).unwrap_or(0),
+                    }),
+                );
                 continue;
             }
             // 送达回执（双对号）：

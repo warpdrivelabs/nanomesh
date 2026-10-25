@@ -684,10 +684,13 @@ async fn handle_command(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Op
         other => (false, None, format!("unknown method: {other}")),
     };
     // 群状态变更：立即向联邦 gossip 广播一次群公告，让成员节点尽快学到群（发现 + 成员表），
-    // 免等 20s 周期——发现驱动跨节点群消息投递。
+    // 免等 20s 周期——发现驱动跨节点群消息投递；并推给本节点托管的在线成员刷新 UI。
     if ok && cmd.method.starts_with("group.") && cmd.method != "group.list" {
         if let Some(op) = cmd.params.as_ref().and_then(|p| GroupOp::decode(p.value.as_slice()).ok()) {
             announce_group(ctx, &op.group_id);
+            if let Some(g) = ctx.groups.get(&op.group_id).map(|e| e.clone()) {
+                crate::groups::notify_group_updated(ctx, &g);
+            }
         }
     }
     let cr = CommandResult {

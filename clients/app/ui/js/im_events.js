@@ -40,6 +40,28 @@ function ensureRoomDirectory(key, m) {
 }
 window.ensureRoomDirectory = ensureRoomDirectory;
 
+/** 他人改了群名/头像等：刷新群目录，并更新打开中的会话头/标签。 */
+async function handleGroupUpdated(ev) {
+  const gid = (ev && ev.groupId) || "";
+  try {
+    if (window.renderGroupsList) await renderGroupsList();
+  } catch (_) {}
+  if (typeof renderPanels === "function") renderPanels();
+  if (gid && window.Tabs) {
+    const g = window.Groups && Groups.byId && Groups.byId(gid);
+    const title = (g && g.name) || (ev && ev.name) || "群";
+    Tabs.retitle("c:" + gid, title, "groups");
+    Tabs.retitle("g:" + gid, title, "groups");
+  }
+  if (gid && typeof renderConversation === "function" && window.ACTIVE === gid) {
+    renderConversation();
+  }
+  if (gid && window.Groups && Groups.renderMembersPanel) {
+    const mb = document.getElementById("grp-members");
+    if (mb) Groups.renderMembersPanel(gid, mb);
+  }
+}
+
 function growStreamBubble(localId, peer, text, ts) {
   if (VIEW.id !== peer) return;                       // 该会话未在前台
   let row = VIEW.rows.find((r) => r.id === localId);
@@ -165,6 +187,7 @@ function onCoreEvent(ev) {
   }
   if (ev.type === "receipt") { handleReceipt(ev); return; }
   if (ev.type === "read") { if (window.applyReadMarker) applyReadMarker(ev.conversation, ev.readUpToMs); return; } // P1-6 本账号其它设备已读同步
+  if (ev.type === "group_updated") { handleGroupUpdated(ev); return; }
   if (ev.type !== "message" || !ev.msg) return;
   const m = ev.msg;
   if (m.typeUrl === AGENT_DELTA_TYPE) { handleAgentDelta(m); return; }

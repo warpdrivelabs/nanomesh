@@ -126,7 +126,8 @@ impl Node {
     }
 
     /// LWW 合并群状态（联邦发现：各节点据此填充群目录 + 成员表）；较旧不覆盖较新。
-    fn merge_group_lww(&self, g: Group) {
+    /// 返回是否真正写入（接受更新），供推送本节点成员刷新客户端。
+    fn merge_group_lww(&self, g: Group) -> bool {
         use dashmap::mapref::entry::Entry;
         match self.groups.entry(g.group_id.clone()) {
             Entry::Occupied(mut o) => {
@@ -135,6 +136,9 @@ impl Node {
                     if let Some(s) = &self.store {
                         let _ = s.put_group(&g);
                     }
+                    true
+                } else {
+                    false
                 }
             }
             Entry::Vacant(v) => {
@@ -142,6 +146,7 @@ impl Node {
                 if let Some(s) = &self.store {
                     let _ = s.put_group(&g);
                 }
+                true
             }
         }
     }
@@ -173,7 +178,10 @@ impl Node {
                 }
                 g.supports_per_topic = false; // 节点能力不写进群状态（保持群状态纯净）
                 g.supports_ack_batch = false; // 同上：能力位是 announce 瞬态，不写进持久群状态
-                self.merge_group_lww(g);
+                if self.merge_group_lww(g.clone()) {
+                    // 跨 home 收敛后，推给本节点托管的在线成员，否则对方客户端仍握着旧名称/头像。
+                    crate::groups::notify_group_updated(&ctx, &g);
+                }
             }
             Some(nm_proto::pb::group_gossip::Body::Msg(gram)) => {
                 let Some(group) = self.groups.get(&gram.receiver).map(|g| g.clone()) else {

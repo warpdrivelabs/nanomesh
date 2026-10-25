@@ -51,6 +51,26 @@ pub(crate) async fn finish_session(
                 }
                 continue;
             }
+            if let Some(p) = gram
+                .payload
+                .as_ref()
+                .filter(|p| p.type_url == "nmspace.v1/group.updated")
+            {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&p.value).unwrap_or_else(|_| json!({}));
+                let _ = apph.emit(
+                    "core://event",
+                    json!({
+                        "type": "group_updated",
+                        "groupId": body.get("groupId").and_then(|v| v.as_str()).unwrap_or(""),
+                        "name": body.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                        "topic": body.get("topic").and_then(|v| v.as_str()).unwrap_or(""),
+                        "avatar": body.get("avatar").and_then(|v| v.as_str()).unwrap_or(""),
+                        "updatedAt": body.get("updatedAt").and_then(|v| v.as_i64()).unwrap_or(0),
+                    }),
+                );
+                continue;
+            }
             if matches!(gram.kind(), nm_proto::GramKind::Receipt) {
                 if let Some(refid) = gram.ref_gram_id {
                     let _ = apph.emit("core://event", json!({

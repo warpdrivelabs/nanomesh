@@ -679,6 +679,14 @@ window.imMarkAllRead = function () {
 window.imFlush = () => { if (window.ChatLog) ChatLog.setUnread(UNREAD); };
 
 function onCoreEvent(ev) {
+  if (ev && ev.type === "group_updated") {
+    Promise.resolve(window.renderGroupsList && renderGroupsList()).then(() => {
+      if (typeof renderPanels === "function") renderPanels();
+      const gid = ev.groupId || "";
+      if (gid && typeof renderConversation === "function" && ACTIVE === gid) renderConversation();
+    }).catch(() => {});
+    return;
+  }
   if (!ev || ev.type !== "message" || !ev.msg) return;
   const m = ev.msg;
   const mine = m.from === MY_ID;

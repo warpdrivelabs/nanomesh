@@ -73,6 +73,8 @@ type Revoked = DashMap<Vec<u8>, DeviceRevoke>;
 const INBOX_RETENTION_MS: u64 = 30 * 24 * 3600 * 1000;
 /// 节点推给账号设备的系统事件（吊销等）的 type_url。
 const DEVICE_EVENT_TYPE: &str = "nmspace.v1/device.event";
+/// 群元数据/成员变更推送：客户端拦截刷新群列表，不进聊天。
+const GROUP_UPDATED_TYPE: &str = "nmspace.v1/group.updated";
 
 /// 会话旁挂元数据（不改动 `Sessions` 值类型；用于管理台展示接入时长）。
 #[derive(Clone, Copy)]
