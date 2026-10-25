@@ -76,17 +76,18 @@
   .panel{display:none;flex-direction:column;flex:1;min-height:0}
   .panel.on{display:flex}
   /* IM / 插件 面板共用件 */
-  .im-search{position:relative;padding:8px 4px}
+  .im-search{position:relative;flex:0 0 auto;padding:6px 4px 8px}
   .im-search-ico{position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--muted);pointer-events:none}
-  .im-search input{width:100%;height:32px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-ctrl);
+  .im-search input{width:100%;height:30px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-ctrl);
     padding:0 11px 0 30px;color:var(--ink);font-size:13px;outline:none;font-family:inherit}
   .im-search input:focus{border-color:var(--aqua)}
+  .brand .uname{flex:0 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .im-list,
   /* Telegram 式会话行 */
-  .im-item{display:flex;gap:10px;padding:9px 8px;border-radius:var(--r-ctrl);cursor:pointer}
+  .im-item{display:flex;gap:8px;padding:6px 8px;border-radius:var(--r-ctrl);cursor:pointer}
   .im-item:hover{background:var(--hover)}
-  .im-item .av{width:40px;height:40px;border-radius:var(--avatar-radius);flex:0 0 40px;display:flex;align-items:center;justify-content:center;
-    font-size:16px;color:#fff}
+  .im-item .av{width:var(--av-md);height:var(--av-md);border-radius:var(--avatar-radius);flex:0 0 var(--av-md);display:flex;align-items:center;justify-content:center;
+    font-size:14px;color:#fff}
   .im-item .mid{flex:1;min-width:0}
   .im-item .r1{display:flex;align-items:center;gap:6px} .im-item .nm{font-weight:600;font-size:14px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .im-item .tm{font-size:11px;color:var(--muted);flex:0 0 auto}
@@ -108,10 +109,9 @@
   .plug-item .pbtn{align-self:center;font-size:12px;padding:4px 10px;border-radius:8px;border:1px solid var(--border2);color:var(--ink2);flex:0 0 auto}
   .plug-item .pbtn.installed{color:var(--aqua);border-color:var(--aqua)}
   .plug-item .pbtn:hover{background:var(--hover)}
-  .brand{display:flex;align-items:center;gap:9px;height:var(--header-h);box-sizing:border-box;
-    margin:0 -10px;padding:0 14px;border-bottom:1px solid var(--border)}
-  .brand
-  .brand .uname{font-weight:700;font-size:14px} .brand .v{color:var(--muted);font-size:11px;margin-left:auto;font-weight:400}
+  .brand{display:flex;align-items:center;gap:8px;height:var(--header-h);box-sizing:border-box;
+    margin:0 -10px;padding:0 10px;border-bottom:1px solid var(--border);flex:0 0 var(--header-h)}
+  .brand .uname{font-weight:700;font-size:13px} .brand .v{color:var(--muted);font-size:11px;margin-left:auto;font-weight:400}
   .newbtn{display:flex;align-items:center;gap:9px;width:100%;padding:11px 12px;border-radius:8px;
     background:var(--surface);border:1px solid var(--border2);font-weight:600;font-size:14px;margin:12px 0 8px}
   .newbtn:hover{background:var(--hover)} .newbtn .plus{font-size:16px;color:var(--aqua)}

@@ -58,6 +58,14 @@ const NM_ICON_PATHS = {
   "close-right": '<path d="m10 7 6 5-6 5"/><path d="M6 6v12"/>',
   "close-others": '<rect x="9" y="6.5" width="6" height="11" rx="1.5"/><path d="M5 9.5 7.2 12 5 14.5M19 9.5 16.8 12 19 14.5"/>',
   "close-all": '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="m9 9 6 6M15 9l-6 6"/>',
+  link: '<path d="M10 13a5 5 0 0 0 7.07 0l1.42-1.41a5 5 0 0 0-7.07-7.07L10 6"/><path d="M14 11a5 5 0 0 0-7.07 0L5.5 12.42a5 5 0 0 0 7.07 7.07L14 18"/>',
+  "user-plus": '<circle cx="9" cy="8" r="3"/><path d="M3.5 19c.7-3 2.8-4.5 5.5-4.5S14.3 16 15 19M17 8v6M14 11h6"/>',
+  "user-minus": '<circle cx="9" cy="8" r="3"/><path d="M3.5 19c.7-3 2.8-4.5 5.5-4.5S14.3 16 15 19M14 11h6"/>',
+  trash: '<path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M10 11v6M14 11v6"/>',
+  logout: '<path d="M10 17H6a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h4M15 16l4-4-4-4M19 12H10"/>',
+  crown: '<path d="M4 16h16l-1.2-8-3.8 3L12 6l-3 5-3.8-3z"/><path d="M5 18h14"/>',
+  play: '<path d="M8 6v12l10-6z"/>',
+  stop: '<rect x="6" y="6" width="12" height="12" rx="1.5"/>',
 };
 
 function nmIcon(name) {

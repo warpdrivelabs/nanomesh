@@ -23,10 +23,13 @@ function renderConversation() {
     ? `<span class="av av-sm" id="conv-hav" style="background:${avatarColor(ACTIVE)}">${nmIcon(grp ? "groups" : "channels")}</span>`
     : (window.Profile ? Profile.faceHtml(ACTIVE, c.name || "?", 26, "", c.avatar, "conv-hav") : `<span class="av av-sm" id="conv-hav" style="background:${avatarColor(ACTIVE)}">${escapeHtml((c.name || "?").slice(0, 1))}</span>`);
   const people = window.t ? t("conv.people", { n: (grp && grp.members || []).length }) : ((grp && grp.members || []).length + " 人");
+  const dmStatus = !grp && !chn
+    ? [(window.Profile && c.presence) ? Profile.presenceLabel(c.presence) : "", c.statusText ? escapeHtml(c.statusText) : ""].filter(Boolean).join(" · ")
+    : "";
   const headMeta = grp
     ? `<span class="conv-status" id="conv-grp-count">${people}</span>`
-    : chn ? `<span class="conv-status">${escapeHtml(chn.topic || (window.t ? t("conv.channel") : "频道"))}</span>`
-    : `<span class="conv-status">${(window.Profile && c.presence) ? Profile.presenceLabel(c.presence) : ""}${c.statusText ? (c.presence ? " · " : "") + escapeHtml(c.statusText) : ""}</span>`;
+    : chn ? (chn.topic ? `<span class="conv-status" title="${escapeHtml(chn.topic)}">${escapeHtml(chn.topic)}</span>` : "")
+    : (dmStatus ? `<span class="conv-status">${dmStatus}</span>` : "");
   const logHtml = `<div class="log" id="conv-log"></div>`;
   if (window.Composer) Composer.prepare(ACTIVE, !!(grp || chn));
   const composerHtml = window.Composer ? Composer.markup() : "";
@@ -38,7 +41,7 @@ function renderConversation() {
   conv.innerHTML = `
     <div class="conv-head">
       ${headAv}
-      <span class="conv-who"><b>${escapeHtml(c.name || shortId(ACTIVE))}</b>${headMeta}</span>
+      <span class="conv-who"><b title="${escapeHtml(c.name || ACTIVE)}">${escapeHtml(c.name || shortId(ACTIVE))}</b>${headMeta}</span>
       <span class="sp"></span>
       <button class="conv-gear" id="conv-search" title="${window.t ? t("conv.search") : "搜索此会话"}">${nmIcon("search")}</button>
       ${grp ? `<button class="conv-gear${SHOW_MEMBERS ? " is-on" : ""}" id="conv-members" title="${window.t ? t("conv.members") : "成员"}">${nmIcon("groups")}</button>` : ""}

@@ -116,23 +116,26 @@ function renderNodeSvcDetail(id) {
   if (s.location) fields.push(["地理位置", s.location]);
   if (s.note) fields.push(["备注", s.note]);
   const modeLabel = s.mode === "nat" ? "穿透" : s.mode === "lan" ? "同网" : s.mode === "selfhost" ? "自建" : s.mode;
-  const rows = [["连接方式", escapeHtml(modeLabel)], ["公钥", `<span class="mono">${escapeHtml(shortNode(NodeSvc.pubkeyOf(s.node) || s.node))}</span><button class="ns-btn" id="nsd-copy">复制</button>`]]
+  const rows = [["连接方式", escapeHtml(modeLabel)], ["公钥", `<span class="mono">${escapeHtml(shortNode(NodeSvc.pubkeyOf(s.node) || s.node))}</span><button type="button" class="ns-btn ns-ico" id="nsd-copy" title="复制">${nmIcon("copy")}</button>`]]
     .concat(fields.map(([l, v]) => [escapeHtml(l), escapeHtml(v)]));
   conv.innerHTML = `
     <div class="conv-head"><b>节点服务</b></div>
     <div class="detail-scroll"><div class="detail">
       <div class="detail-hero">
         <div class="ed-avatar" style="background:var(--accent-soft);color:var(--aqua)">${nmIcon("nodes")}</div>
-        <div>
+        <div style="min-width:0;flex:1">
           <div class="detail-name">${escapeHtml(s.name || "(未命名)")}</div>
           <div class="detail-sub">${escapeHtml(modeLabel)}</div>
         </div>
+        <div class="detail-actions">
+          <button type="button" class="ns-btn ns-ico ns-primary" id="nsd-edit" title="编辑">${nmIcon("edit")}</button>
+          <button type="button" class="ns-btn ns-ico ns-danger" id="nsd-del" title="删除">${nmIcon("trash")}</button>
+        </div>
       </div>
-      <div class="detail-actions"><button class="ns-btn ns-primary" id="nsd-edit">编辑</button><button class="ns-btn ns-danger" id="nsd-del">删除</button></div>
       <div class="detail-rows">${rows.map(([k, v]) => `<div class="detail-row"><span class="k">${k}</span><span class="v">${v}</span></div>`).join("")}</div>
       <div class="ed-users">
-        <div class="ed-users-head"><span>此节点上的用户</span><button class="ns-btn" id="nsd-refresh">刷新</button></div>
-        <div class="nsu-list" id="nsd-users"><div class="ns-empty">点「刷新」加载该节点的用户</div></div>
+        <div class="ed-users-head"><span>此节点上的用户</span><button type="button" class="ns-btn ns-ico" id="nsd-refresh" title="刷新">${nmIcon("refresh")}</button></div>
+        <div class="nsu-list" id="nsd-users"><div class="ns-empty">点刷新加载该节点的用户</div></div>
       </div>
     </div></div>`;
   document.getElementById("nsd-copy").addEventListener("click", async () => {
@@ -165,11 +168,11 @@ async function loadNodeUsers(s) {
       <div class="nsu-item">
         ${window.Profile ? Profile.faceHtml(u.id, u.name || "?", 32, "", u.avatar) : `<span class="av" style="background:${avatarColor(u.id)}">${escapeHtml((u.name || "?").slice(0, 1))}</span>`}
         <span class="nsu-meta"><b>${escapeHtml(u.name || shortId(u.id))}</b><small>${escapeHtml(typeof typeMeta === "function" ? typeMeta(u.kind).label : (u.kind || ""))}</small></span>
-        <button class="ns-btn nsu-add" data-id="${u.id}" data-kind="${escapeHtml(u.kind || "")}" data-name="${escapeHtml(u.name || "")}">添加</button>
+        <button type="button" class="ns-btn ns-ico nsu-add" data-id="${u.id}" data-kind="${escapeHtml(u.kind || "")}" data-name="${escapeHtml(u.name || "")}" title="添加到目录">${nmIcon("user-plus")}</button>
       </div>`).join("");
     box.querySelectorAll(".nsu-add").forEach((b) => b.addEventListener("click", () => {
       if (window.addKnownEntity && window.addKnownEntity(b.dataset.id, b.dataset.kind, b.dataset.name)) {
-        b.textContent = "已添加"; b.disabled = true;
+        b.disabled = true; b.title = "已添加"; b.innerHTML = nmIcon("close");
         if (window.toast) toast("已添加到实体目录");
       }
     }));

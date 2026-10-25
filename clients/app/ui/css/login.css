@@ -83,18 +83,18 @@
     .form-panel { color: var(--ink); background-color: #0b0f18;
       background-image: radial-gradient(circle at 100% 0, color-mix(in srgb, var(--accent) 9%, transparent), transparent 52%), radial-gradient(circle at 0 100%, color-mix(in srgb, var(--aqua) 8%, transparent), transparent 48%),
         linear-gradient(180deg, #0d121c 0%, #080b12 100%);
-      flex: 1; justify-content: center; align-items: center; padding: 48px; display: flex; position: relative; }
+      flex: 1; justify-content: center; align-items: center; padding: 32px 40px; display: flex; position: relative; }
     .form-panel::before { content: ''; position: absolute; inset: 0; pointer-events: none;
       background-image: linear-gradient(90deg, color-mix(in srgb, var(--accent) 6%, transparent) 1px, transparent 1px), linear-gradient(color-mix(in srgb, var(--accent) 6%, transparent) 1px, transparent 1px);
       background-size: 40px 40px; -webkit-mask-image: radial-gradient(90% 80% at 70% 20%, #000 20%, transparent 72%);
       mask-image: radial-gradient(90% 80% at 70% 20%, #000 20%, transparent 72%); opacity: .45; }
     .form-wrapper { width: 100%; max-width: 400px; animation: .8s .3s both fadeInUp; position: relative; z-index: 1; }
-    .form-card__head { margin-bottom: 34px; }
-    .form-title { letter-spacing: 0; color: var(--ink); margin: 0 0 10px; font-size: 20px; font-weight: 700; }
-    .form-subtitle { color: var(--ink2); letter-spacing: 0; margin: 0; font-size: 14px; }
-    .login-form__item { margin-bottom: 20px; }
-    .login-form label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--ink); }
-    .login-form input { width: 100%; height: 44px; padding: 0 14px; font-size: 14px; background: var(--surface); border: 1px solid var(--border2);
+    .form-card__head { margin-bottom: 20px; }
+    .form-title { letter-spacing: 0; color: var(--ink); margin: 0 0 6px; font-size: 18px; font-weight: 700; }
+    .form-subtitle { color: var(--ink2); letter-spacing: 0; margin: 0; font-size: 13px; }
+    .login-form__item { margin-bottom: 12px; }
+    .login-form label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 5px; color: var(--ink); }
+    .login-form input { width: 100%; height: 38px; padding: 0 12px; font-size: 14px; background: var(--surface); border: 1px solid var(--border2);
       border-radius: var(--r-ctrl); outline: none; transition: border-color .2s, background .2s; color: var(--ink); font-family: inherit; }
     .login-form input::placeholder { color: var(--muted); }
     .login-form input:hover { border-color: var(--accent); background: var(--hover); }
@@ -131,7 +131,7 @@
     .acct-sas:empty { display: none; }
     .acct-import-foot { margin-top: 10px; justify-content: flex-end; }
     .login-submit { letter-spacing: 0; text-indent: 0; background: linear-gradient(135deg, var(--accent) 0%, var(--green) 100%);
-      border: none; border-radius: var(--r-ctrl); width: 100%; height: 44px; margin-top: 6px; font-size: 14px; font-weight: 600; color: var(--on-accent);
+      border: none; border-radius: var(--r-ctrl); width: 100%; height: 38px; margin-top: 4px; font-size: 14px; font-weight: 600; color: var(--on-accent);
       cursor: pointer; transition: filter .2s, box-shadow .2s; box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 35%, transparent); }
     .login-submit:hover:not(:disabled) { filter: brightness(1.08); box-shadow: 0 8px 26px color-mix(in srgb, var(--accent) 50%, transparent); }
     .login-submit:active:not(:disabled) { filter: brightness(0.98); box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 30%, transparent); }

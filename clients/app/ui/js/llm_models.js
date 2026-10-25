@@ -313,13 +313,13 @@
       <div class="conv-head">
         <b>监控 · ${esc(m.displayName || m.model || "本地模型")}</b>
         <span id="llm-head-badge" style="margin-left:8px;font-size:12px;color:${online ? "var(--ok,#1fb182)" : "var(--muted)"}">${online ? "● 运行中" : "○ 已停止"}</span>
-        <div style="margin-left:auto;display:flex;gap:8px">
+        <div style="margin-left:auto;display:flex;gap:4px">
           ${
             online
-              ? `<button class="ns-btn" id="llm-mon-stop">停止</button>`
-              : `<button class="ns-btn ns-primary" id="llm-mon-start">启动</button>`
+              ? `<button type="button" class="ns-btn ns-ico" id="llm-mon-stop" title="停止">${nmIcon("stop")}</button>`
+              : `<button type="button" class="ns-btn ns-ico ns-primary" id="llm-mon-start" title="启动">${nmIcon("play")}</button>`
           }
-          <button class="ns-btn" id="llm-mon-back">属性</button>
+          <button type="button" class="ns-btn ns-ico" id="llm-mon-back" title="属性">${nmIcon("file")}</button>
         </div>
       </div>
       <div class="detail-scroll"><div class="detail" style="max-width:min(720px,90%)">
@@ -340,7 +340,7 @@
         <div class="llm-sec">实时日志</div>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
           <span style="font-size:12px;color:var(--muted)">gatewayd 输出 · 约每 2.5s 刷新</span>
-          <button class="ns-btn" id="llm-mon-refresh" type="button">立即刷新</button>
+          <button class="ns-btn ns-ico" id="llm-mon-refresh" type="button" title="立即刷新">${nmIcon("refresh")}</button>
         </div>
         <pre class="llm-log" id="llm-mon-log" style="max-height:min(52vh,480px)">加载中…</pre>
       </div></div>`;
@@ -408,21 +408,20 @@
       <div class="detail-scroll"><div class="detail">
         <div class="detail-hero">
           <div class="detail-av-wrap">${face}</div>
-          <div style="min-width:0">
+          <div style="min-width:0;flex:1">
             <div class="detail-name">${esc(m.displayName || m.model || "未命名")}</div>
             <div class="detail-sub">${esc(subtitle(m))}</div>
           </div>
-        </div>
-
-        <div class="detail-actions">
-          ${
-            online
-              ? `<button class="ns-btn" id="llm-off">停止</button>`
-              : `<button class="ns-btn ns-primary" id="llm-on">启动</button>`
-          }
-          <button class="ns-btn" id="llm-monitor">监控</button>
-          <button class="ns-btn" id="llm-edit">编辑属性</button>
-          <button class="ns-btn ns-danger" id="llm-del">删除</button>
+          <div class="detail-actions">
+            ${
+              online
+                ? `<button type="button" class="ns-btn ns-ico" id="llm-off" title="停止">${nmIcon("stop")}</button>`
+                : `<button type="button" class="ns-btn ns-ico ns-primary" id="llm-on" title="启动">${nmIcon("play")}</button>`
+            }
+            <button type="button" class="ns-btn ns-ico" id="llm-monitor" title="监控">${nmIcon("list")}</button>
+            <button type="button" class="ns-btn ns-ico" id="llm-edit" title="编辑属性">${nmIcon("edit")}</button>
+            <button type="button" class="ns-btn ns-ico ns-danger" id="llm-del" title="删除">${nmIcon("trash")}</button>
+          </div>
         </div>
 
         <div class="llm-sec">档案</div>
@@ -436,7 +435,7 @@
           <div class="detail-row"><span class="k">需要 Grant</span><span class="v">${m.requireGrant !== false ? "是" : "否"}</span></div>
           <div class="detail-row"><span class="k">并发 / 上下文</span><span class="v">${esc(String(m.concurrency || 4))} / ${esc(m.maxContext ? String(m.maxContext) : "默认")}</span></div>
           <div class="detail-row"><span class="k">简介</span><span class="v">${esc(m.bio || "—")}</span></div>
-          <div class="detail-row"><span class="k">实体 ID</span><span class="v mono" style="font-size:11px">${esc(m.entityId || "—")}${m.entityId ? ' <button class="ns-btn" id="llm-copy-id">复制</button>' : ""}</span></div>
+          <div class="detail-row"><span class="k">实体 ID</span><span class="v mono" style="font-size:11px">${esc(m.entityId || "—")}${m.entityId ? ` <button type="button" class="ns-btn ns-ico" id="llm-copy-id" title="复制">${nmIcon("copy")}</button>` : ""}</span></div>
         </div>
 
         <div class="llm-sec">授权 Grant</div>
@@ -445,7 +444,7 @@
           <div class="detail-row"><span class="k">有效天数</span><span class="v"><input class="ns-inp" id="llm-g-days" type="number" min="0" style="width:100%" value="7" /></span></div>
         </div>
         <div class="detail-actions" style="padding:8px 0">
-          <button class="ns-btn ns-primary" id="llm-grant">签发并复制 Grant</button>
+          <button type="button" class="ns-btn ns-ico ns-primary" id="llm-grant" title="签发并复制 Grant">${nmIcon("key")}</button>
         </div>
       </div></div>`;
 

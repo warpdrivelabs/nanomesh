@@ -223,7 +223,7 @@ function renderEntityDetail(id) {
     c.statusText ? ["签名", escapeHtml(c.statusText)] : "",
     c.bio ? ["简介", escapeHtml(c.bio)] : "",
     (c.links && c.links.length) ? ["链接", c.links.map((l) => escapeHtml(l)).join(" · ")] : "",
-    ["公钥", `<span class="mono">${escapeHtml(shortId(id))}</span><button class="ns-btn" id="ed-copy">复制</button>`],
+    ["公钥", `<span class="mono">${escapeHtml(shortId(id))}</span><button type="button" class="ns-btn ns-ico" id="ed-copy" title="复制公钥">${nmIcon("copy")}</button>`],
     ["来源", c.added ? "手动添加" : (isCompute ? "P2P 目录发现" : "目录发现")],
   ].filter(Boolean);
   const proxyBox = isCompute ? `
@@ -233,11 +233,11 @@ function renderEntityDetail(id) {
         <div class="detail-row"><span class="k">监听</span><span class="v"><input id="ed-proxy-listen" class="ns-inp" style="width:100%" placeholder="空=自动 18081+" value=""></span></div>
         <div class="detail-row"><span class="k">Token</span><span class="v"><input id="ed-proxy-token" class="ns-inp" style="width:100%" value="nm-local-token"></span></div>
         <div class="detail-row"><span class="k">Grant</span><span class="v"><input id="ed-proxy-grant" class="ns-inp" style="width:100%" placeholder="可选 base64 Grant"></span></div>
-        <div class="detail-actions" style="padding:8px 0;display:flex;flex-wrap:wrap;gap:8px">
-          <button class="ns-btn ns-primary" id="ed-proxy-start">启动代理</button>
-          <button class="ns-btn" id="ed-proxy-stop" style="display:none">停止</button>
-          <button class="ns-btn" id="ed-proxy-manage" style="display:none">管理与监控</button>
-          <button class="ns-btn" id="ed-proxy-copy" style="display:none">复制 BASE_URL</button>
+        <div class="detail-actions" style="padding:8px 0">
+          <button type="button" class="ns-btn ns-ico ns-primary" id="ed-proxy-start" title="启动代理">${nmIcon("play")}</button>
+          <button type="button" class="ns-btn ns-ico" id="ed-proxy-stop" style="display:none" title="停止代理">${nmIcon("stop")}</button>
+          <button type="button" class="ns-btn ns-ico" id="ed-proxy-manage" style="display:none" title="管理与监控">${nmIcon("settings")}</button>
+          <button type="button" class="ns-btn ns-ico" id="ed-proxy-copy" style="display:none" title="复制 BASE_URL">${nmIcon("copy")}</button>
         </div>
         <div class="detail-row" id="ed-proxy-hint" style="display:none"><span class="k">智能体</span><span class="v mono" id="ed-proxy-env" style="font-size:11px;word-break:break-all"></span></div>
       </div>` : "";
@@ -246,14 +246,14 @@ function renderEntityDetail(id) {
     <div class="detail-scroll"><div class="detail">
       <div class="detail-hero">
         <div class="ed-avatar" style="background:${avatarColor(id)}">${face}${(window.Profile && c.presence) ? Profile.presenceDot(c.presence, 14) : ""}</div>
-        <div>
+        <div style="min-width:0;flex:1">
           <div class="detail-name">${escapeHtml(c.name || "(未命名)")}</div>
           <div class="detail-sub">${(window.Profile && c.presence) ? Profile.presenceLabel(c.presence) : "离线"}${c.statusText ? " · " + escapeHtml(c.statusText) : ""}</div>
         </div>
-      </div>
-      <div class="detail-actions">
-        ${isCompute ? "" : '<button class="ns-btn ns-primary" id="ed-msg">发消息</button>'}
-        ${c.added ? '<button class="ns-btn ns-danger" id="ed-del">从目录移除</button>' : ""}
+        <div class="detail-actions">
+          ${isCompute ? "" : `<button type="button" class="ns-btn ns-ico ns-primary" id="ed-msg" title="发消息">${nmIcon("chat")}</button>`}
+          ${c.added ? `<button type="button" class="ns-btn ns-ico ns-danger" id="ed-del" title="从目录移除">${nmIcon("trash")}</button>` : ""}
+        </div>
       </div>
       <div class="detail-rows">${rows.map(([k, v]) => `<div class="detail-row"><span class="k">${k}</span><span class="v">${v}</span></div>`).join("")}</div>
       ${proxyBox}

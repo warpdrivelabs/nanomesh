@@ -328,47 +328,67 @@
     let pendingCover = null;
     const m = document.createElement("div");
     m.className = "sec-overlay on";
-    const coverBlock = withCover ? `
-          <div class="sec-row me-cover-row"><label>封面</label>
-            <div style="flex:1;min-width:0">
-              <div class="me-cover-prev"></div>
-              <div style="display:flex;align-items:center;gap:10px">
-                <button class="ns-btn me-cover-pick">选择封面</button>
-                <button class="ns-btn me-cover-clear">移除</button>
-                <input type="file" class="me-cover-file" accept="image/*" style="display:none">
-              </div>
-              <div class="sec-hint" style="margin-top:6px">建议宽幅图（约 3:1），用于频道顶部横幅；未设置时用品牌色块。</div>
-            </div></div>` : "";
+    const ico = opts.ico || (withCover ? "channels" : "groups");
+    const coverRows = withCover ? `
+          <label>封面</label>
+          <div class="me-cover-field">
+            <div class="me-cover-prev"></div>
+            <div class="me-field-ops">
+              <button type="button" class="ns-btn ns-ico me-cover-pick" title="选择封面">${nmIcon("image")}</button>
+              <button type="button" class="ns-btn ns-ico me-cover-clear" title="移除封面">${nmIcon("trash")}</button>
+              <input type="file" class="me-cover-file" accept="image/*" hidden>
+            </div>
+            <div class="me-field-hint">建议宽幅约 3:1；未设置时用品牌色块</div>
+          </div>` : "";
     m.innerHTML = `
-      <div class="sec-box"><div class="sec-head">${escapeHtml(opts.title || "编辑信息")}<button class="sec-x">${nmIcon("close")}</button></div>
-        <div class="sec-body"><div class="sec-sec">
-          ${coverBlock}
-          <div class="sec-row" style="align-items:center"><label>头像</label>
-            <div style="display:flex;align-items:center;gap:10px">
-              <span class="me-prev"></span>
-              <button class="ns-btn me-pick">选择图片</button>
-              <button class="ns-btn me-clear">移除</button>
-              <input type="file" class="me-file" accept="image/*" style="display:none">
-            </div></div>
-          <div class="sec-row"><label>名称</label><input class="me-name sec-input" placeholder="${escapeHtml(opts.namePh || "名称")}"></div>
-          <div class="sec-row"><label>${escapeHtml(opts.bioLabel || "简介")}</label><input class="me-bio sec-input" placeholder="${escapeHtml(opts.bioPh || "一句话简介")}"></div>
-          <div class="sec-actions"><button class="ns-btn me-cancel">取消</button><button class="ns-btn ns-primary me-save">保存</button></div>
-        </div></div></div>`;
+      <div class="dlg me-dlg">
+        <div class="dlg-head">
+          <span class="ico">${nmIcon(ico)}</span>
+          <span class="dlg-title">${escapeHtml(opts.title || "编辑信息")}</span>
+          <span class="dlg-sub">${escapeHtml(opts.sub || "名称、简介与头像")}</span>
+          <button type="button" class="sec-x me-x" title="关闭">${nmIcon("close")}</button>
+        </div>
+        <div class="dlg-main">
+          <aside class="dlg-aside">
+            <span class="me-prev pf-av"></span>
+            <div class="aside-ops">
+              <button type="button" class="ns-btn ns-ico me-pick" title="选择头像">${nmIcon("image")}</button>
+              <button type="button" class="ns-btn ns-ico me-clear" title="移除头像">${nmIcon("trash")}</button>
+            </div>
+            <input type="file" class="me-file" accept="image/*" hidden>
+            <div class="aside-d">建议正方形头像；保存后同步给成员。</div>
+          </aside>
+          <div class="dlg-form">
+            <div class="fm-grid me-grid">
+              ${coverRows}
+              <label for="me-name-inp">名称</label>
+              <input id="me-name-inp" class="me-name sec-input" type="text" autocomplete="off" placeholder="${escapeHtml(opts.namePh || "名称")}">
+              <label for="me-bio-inp">${escapeHtml(opts.bioLabel || "简介")}</label>
+              <textarea id="me-bio-inp" class="me-bio sec-input" rows="3" placeholder="${escapeHtml(opts.bioPh || "一句话简介")}"></textarea>
+            </div>
+          </div>
+        </div>
+        <div class="dlg-foot">
+          <div class="sec-msg"></div>
+          <button type="button" class="ns-btn me-cancel">取消</button>
+          <button type="button" class="ns-btn ns-primary me-save">保存</button>
+        </div>
+      </div>`;
     document.body.appendChild(m);
     let previewData = isImg(cur) ? cur : (isRef(cur) ? await resolveAvatar(cur, opts.homeNode) : "");
     let coverPreview = isImg(curCover) ? curCover : (isRef(curCover) ? await resolveAvatar(curCover, opts.homeNode) : "");
     const paint = () => {
-      m.querySelector(".me-prev").innerHTML = avatarHtml(pending === "" ? "" : (pending || previewData), (opts.name || "?").slice(0, 1), 48);
+      m.querySelector(".me-prev").innerHTML = avatarHtml(pending === "" ? "" : (pending || previewData), (opts.name || "?").slice(0, 1), 72);
       const cp = m.querySelector(".me-cover-prev");
       if (!cp) return;
       const src = pendingCover === "" ? "" : (pendingCover || coverPreview);
-      cp.innerHTML = isImg(src) ? `<img src="${src}" alt="">` : "未设置封面（将显示品牌色块）";
+      cp.innerHTML = isImg(src) ? `<img src="${src}" alt="">` : `<span>未设置封面</span>`;
     };
     m.querySelector(".me-name").value = opts.name || "";
     m.querySelector(".me-bio").value = opts.bio || "";
     paint();
     const close = () => m.remove();
-    m.querySelector(".sec-x").onclick = close;
+    m.querySelector(".me-x").onclick = close;
     m.querySelector(".me-cancel").onclick = close;
     m.addEventListener("click", (e) => { if (e.target === m) close(); });
     m.querySelector(".me-pick").onclick = () => m.querySelector(".me-file").click();
@@ -380,7 +400,6 @@
         let data = await fileToAvatar(f, 256, 0.85);
         if (!data) return; // 用户取消裁剪
         if (data.length > AV_MAX) {
-          // 再开一次裁剪不合适；对已裁结果降质重编码。
           data = await reencodeAvatar(data, 192, 0.72);
         }
         if (data.length > AV_MAX) { if (window.toast) toast("图片太大，请换更简单的图"); return; }
@@ -395,7 +414,7 @@
         if (!f) return;
         try {
           let data = await fileToCover(f, 960, 320, 0.82);
-          if (!data) return; // 用户取消裁剪
+          if (!data) return;
           if (data.length > 280 * 1024) data = await reencodeRect(data, 800, 268, 0.72);
           if (data.length > 280 * 1024) { if (window.toast) toast("封面太大，请换更简单的图"); return; }
           pendingCover = data; paint();
@@ -417,6 +436,7 @@
       try { if (opts.onSave) await opts.onSave({ name, bio, avatar, cover }); }
       catch (e) { if (window.toast) toast("保存失败：" + (e && e.message ? e.message : e)); }
     };
+    setTimeout(() => { const inp = m.querySelector(".me-name"); if (inp) inp.focus(); }, 30);
   }
 
   function ensureModal() {

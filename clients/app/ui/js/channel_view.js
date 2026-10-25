@@ -82,8 +82,8 @@
             <div class="chn-sub">${owner ? "你是管理员 · " : ""}已订阅${pub ? " · 可发布" : ""}</div>
           </div>
           <div class="chn-hero-actions">
-            <button type="button" class="chn-act" data-act="share" title="分享邀请">${nmIcon("copy")}<span>分享</span></button>
-            <button type="button" class="chn-act" data-act="search" title="搜索">${nmIcon("search")}</button>
+            <button type="button" class="chn-act" data-act="share" title="分享邀请">${nmIcon("link")}</button>
+            <button type="button" class="chn-act" data-act="search" title="搜索帖子">${nmIcon("search")}</button>
             ${owner ? `<button type="button" class="chn-act" data-act="edit" title="编辑频道">${nmIcon("settings")}</button>` : ""}
           </div>
         </div>

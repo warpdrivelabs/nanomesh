@@ -93,8 +93,9 @@
   async function createChannel() {
     if (!window.Profile || !Profile.metaEditor) return;
     Profile.metaEditor({
-      title: "新建频道", name: "", bio: "", avatar: "", cover: "", withCover: true,
-      namePh: "频道名称", bioLabel: "频道简介", bioPh: "一句话简介（可选）",
+      title: "新建频道", sub: "名称、简介、头像与封面", ico: "channels",
+      name: "", bio: "", avatar: "", cover: "", withCover: true,
+      namePh: "频道名称", bioLabel: "简介", bioPh: "一句话简介（可选）",
       onSave: async ({ name, bio, avatar, cover }) => {
         const cid = await NM.inv("channel_create", { name: name || "新频道", topic: bio || "", avatar });
         // 封面经 set_meta 写入（create 命令暂未透传 cover，避免改动 create 签名）
@@ -115,9 +116,10 @@
     const c = byId(cid);
     if (!c || !window.Profile || !Profile.metaEditor) return;
     Profile.metaEditor({
-      title: "编辑频道信息", name: c.name || "", bio: c.topic || "", avatar: c.avatar || "", cover: c.cover || "",
+      title: "编辑频道信息", sub: "名称、简介、头像与封面", ico: "channels",
+      name: c.name || "", bio: c.topic || "", avatar: c.avatar || "", cover: c.cover || "",
       homeNode: c.homeNode || "", withCover: true,
-      namePh: "频道名称", bioLabel: "频道简介", bioPh: "一句话简介",
+      namePh: "频道名称", bioLabel: "简介", bioPh: "一句话简介",
       onSave: async ({ name, bio, avatar, cover }) => {
         await NM.inv("channel_set_meta", {
           channelId: cid, name: name || (c.name || ""), topic: bio, avatar, cover: cover || "",

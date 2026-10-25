@@ -61,7 +61,7 @@
         </section>
         <section class="dlg-pane" data-pane="master" hidden>
           <div class="pane-head"><div><div class="pane-t">修改主口令</div><div class="pane-d">主口令只用来加密本机密钥库，不会上传。新口令需 <b>≥8 位</b>，含大小写字母、数字和特殊字符。</div></div>
-            <button class="ns-btn ns-primary" id="sec-cm-save">修改</button></div>
+            <button type="button" class="ns-btn ns-ico ns-primary" id="sec-cm-save" title="修改主口令"><span class="ico" data-ico="lock"></span></button></div>
           <div class="fm-grid">
             <label for="sec-old">旧主口令</label><input id="sec-old" type="password" class="sec-input" autocomplete="current-password" />
             <label for="sec-new">新主口令</label><input id="sec-new" type="password" class="sec-input" autocomplete="new-password" />
@@ -72,12 +72,12 @@
           <div class="pane-head"><div><div class="pane-t">加密备份</div><div class="pane-d">用一个<b>独立的备份口令</b>把全部身份导出为加密串，换机时粘回即可恢复。主口令和备份都丢失将<b>无法找回</b>。</div></div></div>
           <div class="pane-cols">
             <div class="pane-card">
-              <div class="card-head"><span class="pane-t">导出</span><button class="ns-btn" id="sec-exp-copy">复制</button><button class="ns-btn ns-primary" id="sec-exp-go">导出</button></div>
+              <div class="card-head"><span class="pane-t">导出</span><button type="button" class="ns-btn ns-ico" id="sec-exp-copy" title="复制备份串"><span class="ico" data-ico="copy"></span></button><button type="button" class="ns-btn ns-ico ns-primary" id="sec-exp-go" title="导出备份"><span class="ico" data-ico="file"></span></button></div>
               <input id="sec-exp-pw" type="password" class="sec-input" placeholder="设置备份口令（请另行牢记）" autocomplete="new-password" />
               <textarea id="sec-exp-out" class="sec-ta" readonly placeholder="导出的备份串会出现在这里"></textarea>
             </div>
             <div class="pane-card">
-              <div class="card-head"><span class="pane-t">导入</span><button class="ns-btn ns-primary" id="sec-imp-go">导入</button></div>
+              <div class="card-head"><span class="pane-t">导入</span><button type="button" class="ns-btn ns-ico ns-primary" id="sec-imp-go" title="导入备份"><span class="ico" data-ico="plus"></span></button></div>
               <input id="sec-imp-pw" type="password" class="sec-input" placeholder="该备份的口令" autocomplete="off" />
               <textarea id="sec-imp-in" class="sec-ta" placeholder="粘贴备份串"></textarea>
             </div>
@@ -85,13 +85,13 @@
         </section>
         <section class="dlg-pane" data-pane="recovery" hidden>
           <div class="pane-head"><div><div class="pane-t">恢复码</div><div class="pane-d">生成一段 24 词恢复码并<b>离线抄写保存</b>，忘记主口令时在解锁页用它重置。生成新码会使旧码失效。</div></div>
-            <button class="ns-btn ns-primary" id="sec-rec-go">生成恢复码</button></div>
+            <button type="button" class="ns-btn ns-ico ns-primary" id="sec-rec-go" title="生成恢复码"><span class="ico" data-ico="key"></span></button></div>
           <textarea id="sec-rec-out" class="sec-ta" readonly placeholder="生成的 24 词恢复码会出现在这里（只显示这一次，请立即抄写）"></textarea>
           <div id="sec-rec-status" class="pane-d"></div>
         </section>
         <section class="dlg-pane" data-pane="audit" hidden>
           <div class="pane-head"><div><div class="pane-t">安全日志</div><div class="pane-d">本机最近的解锁、导出、迁移、吊销等敏感操作记录。</div></div>
-            <button class="ns-btn" id="sec-audit-go">刷新</button></div>
+            <button type="button" class="ns-btn ns-ico" id="sec-audit-go" title="刷新"><span class="ico" data-ico="refresh"></span></button></div>
           <div id="sec-audit-out" class="sec-audit"></div>
         </section>
       </div>
@@ -110,7 +110,7 @@
         </nav>
         <section class="dlg-pane" data-pane="list">
           <div class="pane-head"><div><div class="pane-t">设备列表</div><div class="pane-d" id="sec-dev-hint">每台设备有自己的设备密钥。丢了一台只需吊销它，账号和其它设备不受影响。</div></div>
-            <button class="ns-btn" id="sec-dev-refresh">刷新</button></div>
+            <button type="button" class="ns-btn ns-ico" id="sec-dev-refresh" title="刷新"><span class="ico" data-ico="refresh"></span></button></div>
           <div class="dev-list" id="sec-dev-list"></div>
         </section>
         <section class="dlg-pane" data-pane="freeze" hidden>
@@ -122,7 +122,7 @@
         </section>
         <section class="dlg-pane" data-pane="grant" hidden>
           <div class="pane-head"><div><div class="pane-t">授权新设备</div><div class="pane-d">新设备在登录页选「迁移串」生成一段文字，粘贴到这里，核对后为它签发设备证书（可选同时交出账号私钥）。只有<b>管理设备</b>能处理。</div></div>
-            <button class="ns-btn ns-primary" id="sec-pair-go">处理</button></div>
+            <button type="button" class="ns-btn ns-ico ns-primary" id="sec-pair-go" title="处理迁移串"><span class="ico" data-ico="key"></span></button></div>
           <textarea id="sec-pair-in" class="sec-ta" spellcheck="false" placeholder="粘贴新设备上的迁移串（nmpair1:…）"></textarea>
         </section>
       </div>
@@ -144,7 +144,7 @@
         </nav>
         <section class="dlg-pane" data-pane="notify">
           <div class="pane-head"><div><div class="pane-t">消息通知</div><div class="pane-d">窗口不在前台时，新消息用系统通知提醒你。设置即时生效。</div></div>
-            <button class="ns-btn" id="tp-test">发送测试通知</button></div>
+            <button type="button" class="ns-btn ns-ico" id="tp-test" title="发送测试通知"><span class="ico" data-ico="bell"></span></button></div>
           <div class="set-list">
             <label class="set-row"><span class="set-txt"><b>新消息系统通知</b><small>私聊、群聊和频道的新消息</small></span><input type="checkbox" class="tg" data-pref="notify" /></label>
             <label class="set-row"><span class="set-txt"><b>显示发送者和内容</b><small>关闭后只提示「你收到一条新消息」，适合投屏或公共场合</small></span><input type="checkbox" class="tg" data-pref="preview" /></label>
@@ -180,7 +180,7 @@
           </div>
           <div class="hk-box">
             <button class="hk-rec" id="tp-hk-rec" title="点击后按下新的组合键"></button>
-            <div class="hk-ops"><button class="ns-btn" id="tp-hk-reset">恢复默认</button></div>
+            <div class="hk-ops"><button type="button" class="ns-btn ns-ico" id="tp-hk-reset" title="恢复默认快捷键"><span class="ico" data-ico="refresh"></span></button></div>
           </div>
           <div class="pane-d" id="tp-hk-hint">点击上方按键框，然后按下新的组合键（需包含 Ctrl、Alt 或 ⌘ 之一），按 Esc 取消。</div>
         </section>
@@ -237,17 +237,21 @@
     <!-- 左侧栏：同时只显示一个 .panel.on -->
     <aside>
       <div class="panel im-panel on" id="panel-im">
-        <div class="brand"><span class="uname" data-i18n="panel.im">消息</span><span class="brand-tools"><button class="brand-refresh" data-act="imRefresh" title="刷新目录"><span class="ico" data-ico="refresh"></span></button></span></div>
+        <div class="brand">
+          <span class="uname" data-i18n="panel.im">消息</span>
+          <span class="brand-tools"><button type="button" class="brand-refresh" data-act="imRefresh" title="刷新目录"><span class="ico" data-ico="refresh"></span></button></span>
+        </div>
         <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="im-search-input" type="text" placeholder="搜索会话" data-i18n-ph="search.im" /></div>
         <div class="im-list" id="im-list"></div>
       </div>
       <div class="panel entities-panel" id="panel-entities">
-        <div class="brand"><span class="uname" data-i18n="panel.entities">实体目录</span>
+        <div class="brand">
+          <span class="uname" data-i18n="panel.entities">实体</span>
           <span class="brand-tools">
-            <button class="brand-refresh" id="name-claim-btn" title="认领名字 local@域名">@</button>
-            <button class="brand-refresh" id="ent-add-btn" title="添加朋友"><span class="ico" data-ico="plus"></span></button>
-            <button class="brand-refresh" id="ent-new-group" title="新建群组"><span class="ico" data-ico="group-new"></span></button>
-            <button class="brand-refresh" data-act="imRefresh" title="刷新目录"><span class="ico" data-ico="refresh"></span></button>
+            <button type="button" class="brand-refresh" id="name-claim-btn" title="认领名字 local@域名">@</button>
+            <button type="button" class="brand-refresh" id="ent-add-btn" title="添加朋友"><span class="ico" data-ico="plus"></span></button>
+            <button type="button" class="brand-refresh" id="ent-new-group" title="新建群组"><span class="ico" data-ico="group-new"></span></button>
+            <button type="button" class="brand-refresh" data-act="imRefresh" title="刷新目录"><span class="ico" data-ico="refresh"></span></button>
           </span>
         </div>
         <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="entity-search-input" type="text" placeholder="搜索实体" data-i18n-ph="search.entities" /></div>
@@ -255,24 +259,29 @@
         <div class="entity-list" id="entity-list"></div>
       </div>
       <div class="panel agents-panel" id="panel-agents">
-        <div class="brand"><span class="uname" data-i18n="panel.agents">智能体</span><span class="brand-tools"><button class="brand-refresh" data-act="imRefresh" title="刷新目录"><span class="ico" data-ico="refresh"></span></button></span></div>
+        <div class="brand">
+          <span class="uname" data-i18n="panel.agents">智能体</span>
+          <span class="brand-tools"><button type="button" class="brand-refresh" data-act="imRefresh" title="刷新目录"><span class="ico" data-ico="refresh"></span></button></span>
+        </div>
         <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="agent-search-input" type="text" placeholder="搜索智能体" data-i18n-ph="search.agents" /></div>
         <div class="im-list" id="agents-list"></div>
       </div>
       <div class="panel models-panel" id="panel-models">
-        <div class="brand"><span class="uname">大模型</span>
+        <div class="brand">
+          <span class="uname">大模型</span>
           <span class="brand-tools">
-            <button class="brand-refresh" id="llm-new" title="增加本地模型"><span class="ico" data-ico="plus"></span></button>
-            <button class="brand-refresh" data-act="imRefresh" title="刷新目录"><span class="ico" data-ico="refresh"></span></button>
+            <button type="button" class="brand-refresh" id="llm-new" title="增加本地模型"><span class="ico" data-ico="plus"></span></button>
+            <button type="button" class="brand-refresh" data-act="imRefresh" title="刷新目录"><span class="ico" data-ico="refresh"></span></button>
           </span>
         </div>
-        <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="llm-search" type="text" placeholder="搜索本地 / 远端模型" /></div>
+        <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="llm-search" type="text" placeholder="搜索模型" /></div>
         <div class="im-list" id="llm-list"></div>
       </div>
       <div class="panel proxies-panel" id="panel-proxies">
-        <div class="brand"><span class="uname">模型代理</span>
+        <div class="brand">
+          <span class="uname">代理</span>
           <span class="brand-tools">
-            <button class="brand-refresh" id="px-refresh" title="刷新"><span class="ico" data-ico="refresh"></span></button>
+            <button type="button" class="brand-refresh" id="px-refresh" title="刷新"><span class="ico" data-ico="refresh"></span></button>
           </span>
         </div>
         <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="px-search" type="text" placeholder="搜索端口 / 模型" /></div>
@@ -280,28 +289,33 @@
       </div>
       <!-- 节点服务面板保留给登录页/内部调用，不在活动栏展示 -->
       <div class="panel nodesvc-panel" id="panel-nodesvc" style="display:none" aria-hidden="true">
-        <div class="brand"><span class="uname" data-i18n="panel.nodes">节点服务</span><span class="brand-tools"><button class="brand-refresh" id="ns-new" title="新增节点服务"><span class="ico" data-ico="plus"></span></button></span></div>
+        <div class="brand">
+          <span class="uname" data-i18n="panel.nodes">节点</span>
+          <span class="brand-tools"><button type="button" class="brand-refresh" id="ns-new" title="新增节点服务"><span class="ico" data-ico="plus"></span></button></span>
+        </div>
         <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="ns-search" type="text" placeholder="搜索节点服务" data-i18n-ph="search.nodes" /></div>
         <div class="nodesvc-form" id="nodesvc-form" style="display:none"></div>
         <div class="nodesvc-list" id="nodesvc-list"></div>
       </div>
       <!-- 群组独立面板已取消，建群入口在实体目录；DOM 保留供内部刷新 -->
       <div class="panel groups-panel" id="panel-groups" style="display:none" aria-hidden="true">
-        <div class="brand"><span class="uname" data-i18n="panel.groups">群组</span>
+        <div class="brand">
+          <span class="uname" data-i18n="panel.groups">群组</span>
           <span class="brand-tools">
-            <button class="brand-refresh" id="grp-new-btn" title="新建群"><span class="ico" data-ico="plus"></span></button>
-            <button class="brand-refresh" id="grp-refresh-btn" title="刷新"><span class="ico" data-ico="refresh"></span></button>
+            <button type="button" class="brand-refresh" id="grp-new-btn" title="新建群"><span class="ico" data-ico="plus"></span></button>
+            <button type="button" class="brand-refresh" id="grp-refresh-btn" title="刷新"><span class="ico" data-ico="refresh"></span></button>
           </span>
         </div>
         <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="grp-search" type="text" placeholder="搜索群组" data-i18n-ph="search.groups" /></div>
         <div class="im-list" id="groups-list"></div>
       </div>
       <div class="panel channels-panel" id="panel-channels">
-        <div class="brand"><span class="uname" data-i18n="panel.channels">频道</span>
+        <div class="brand">
+          <span class="uname" data-i18n="panel.channels">频道</span>
           <span class="brand-tools">
-            <button class="brand-refresh" id="chn-new-btn" title="新建频道"><span class="ico" data-ico="plus"></span></button>
-            <button class="brand-refresh" id="chn-sub-btn" title="订阅频道（粘贴邀请链接或 id）"><span class="ico" data-ico="subscribe"></span></button>
-            <button class="brand-refresh" id="chn-refresh-btn" title="刷新"><span class="ico" data-ico="refresh"></span></button>
+            <button type="button" class="brand-refresh" id="chn-new-btn" title="新建频道"><span class="ico" data-ico="plus"></span></button>
+            <button type="button" class="brand-refresh" id="chn-sub-btn" title="订阅频道"><span class="ico" data-ico="subscribe"></span></button>
+            <button type="button" class="brand-refresh" id="chn-refresh-btn" title="刷新"><span class="ico" data-ico="refresh"></span></button>
           </span>
         </div>
         <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="chn-search" type="text" placeholder="搜索频道" data-i18n-ph="search.channels" /></div>
@@ -323,9 +337,9 @@
             <h1 class="home-name">NANO<span>MESH</span></h1>
             <p class="home-lead">基于 QUIC/P2P 的去中心化网格<br>按节点公钥直连 · 同网优先 · 穿透兜底</p>
             <ul class="home-feats">
-              <li><span>01</span><div><strong>去中心 P2P</strong><em>节点即身份 · 无中心服务器</em></div></li>
-              <li><span>02</span><div><strong>同网优先 · 穿透兜底</strong><em>同一网络直连 · 跨网 NAT 打洞</em></div></li>
-              <li><span>03</span><div><strong>本地身份</strong><em>私钥本地落盘 · 重启复用</em></div></li>
+              <li><span>01</span><div><strong>去中心 P2P</strong><em>节点即身份</em></div></li>
+              <li><span>02</span><div><strong>同网优先</strong><em>穿透兜底</em></div></li>
+              <li><span>03</span><div><strong>本地身份</strong><em>私钥落盘</em></div></li>
             </ul>
             <p class="home-hint">从左侧打开会话、朋友、大模型或群聊</p>
           </div>
