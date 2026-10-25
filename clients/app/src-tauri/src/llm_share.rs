@@ -175,11 +175,15 @@ fn resolve_gatewayd_bin() -> Result<PathBuf, String> {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../../.cargo-shared-target/release/nm-llm-gatewayd"),
     ];
-    // 也查 CARGO_TARGET_DIR / 相对 cwd
+    // 也查 CARGO_TARGET_DIR / 共享 target(~/.cargo/config.toml 的 target-dir 约定,运行时无对应 env) / 相对 cwd
     let mut more = Vec::new();
     if let Ok(td) = std::env::var("CARGO_TARGET_DIR") {
         more.push(PathBuf::from(&td).join("debug/nm-llm-gatewayd"));
         more.push(PathBuf::from(&td).join("release/nm-llm-gatewayd"));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        more.push(PathBuf::from(&home).join(".cargo-shared-target/debug/nm-llm-gatewayd"));
+        more.push(PathBuf::from(&home).join(".cargo-shared-target/release/nm-llm-gatewayd"));
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -216,6 +220,7 @@ fn write_runtime_files(
     dir: &Path,
     share: &ModelShare,
     seed: &[u8; 32],
+    fallback: Option<&crate::state::ConnectArgs>,
 ) -> Result<(PathBuf, PathBuf, String), String> {
     let run = runtime_dir(dir, &share.local_id);
     std::fs::create_dir_all(&run).map_err(|e| e.to_string())?;
@@ -233,35 +238,59 @@ fn write_runtime_files(
         share.local_id.chars().take(8).collect::<String>().to_uppercase()
     );
 
-    let mut relays = String::new();
-    for r in &share.relay_urls {
-        if !r.trim().is_empty() {
-            relays.push_str(&format!("relay = [\"{}\"]\n", toml_escape(r.trim())));
-            break; // 简化：首条；多条下面循环补
-        }
-    }
-    if share.relay_urls.len() > 1 {
-        relays.clear();
-        relays.push_str("relay = [");
-        for (i, r) in share.relay_urls.iter().filter(|s| !s.trim().is_empty()).enumerate() {
-            if i > 0 {
-                relays.push_str(", ");
-            }
-            relays.push_str(&format!("\"{}\"", toml_escape(r.trim())));
-        }
-        relays.push_str("]\n");
-    }
-
-    let pkarr = share
+    // 连接参数：share 未配时继承 app 自身最近一次 connect 的 relay/pkarr/dns_origin——
+    // 否则 selfhost 场景下 gatewayd 缺 pkarr 直接启动失败/落到 N0 公网设施,够不到自建 relay 上的 home。
+    let mut relay_list: Vec<String> = share
+        .relay_urls
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut pkarr = share
         .pkarr_url
         .as_ref()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    let dns = share
+    let mut dns = share
         .dns_origin
         .as_ref()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    if let Some(fb) = fallback {
+        if relay_list.is_empty() {
+            relay_list = fb
+                .relay_urls
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+        if pkarr.is_none() {
+            pkarr = fb
+                .pkarr_url
+                .as_ref()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+        }
+        if dns.is_none() {
+            dns = fb
+                .dns_origin
+                .as_ref()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+        }
+    }
+    let mut relays = String::new();
+    if !relay_list.is_empty() {
+        relays.push_str("relay = [");
+        for (i, r) in relay_list.iter().enumerate() {
+            if i > 0 {
+                relays.push_str(", ");
+            }
+            relays.push_str(&format!("\"{}\"", toml_escape(r)));
+        }
+        relays.push_str("]\n");
+    }
 
     let mut toml = String::new();
     toml.push_str(&format!(
@@ -492,7 +521,9 @@ pub(crate) async fn llm_model_online(
     }
 
     let bin = resolve_gatewayd_bin()?;
-    let (cfg_path, log_path, key_env) = write_runtime_files(&dir, &share, &seed)?;
+    // share 未配 relay/pkarr 时继承 app 自身连接参数(last_connect),见 write_runtime_files 注释。
+    let fb = state.last_connect.lock().await.clone();
+    let (cfg_path, log_path, key_env) = write_runtime_files(&dir, &share, &seed, fb.as_ref())?;
 
     let log_file = std::fs::OpenOptions::new()
         .create(true)

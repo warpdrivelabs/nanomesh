@@ -493,7 +493,13 @@ async fn serve(config: String, node_override: String) -> anyhow::Result<()> {
     );
     let meter = Arc::new(Meter::new());
 
-    let addr = nm_transport::addr_from_string(&cfg.home_node)?;
+    // home_node：NM_NODE_ADDR JSON **或 64-hex 节点 id**(id-only，靠 relay/pkarr 发现拨号——与 agentd 同约定；
+    // 客户端 app 的云模型共享写的就是 hex id)。
+    let addr = if let Ok(id) = parse_hex32(cfg.home_node.trim()) {
+        nm_transport::addr_from_id(id)?
+    } else {
+        nm_transport::addr_from_string(&cfg.home_node)?
+    };
     let home_id: [u8; 32] = *addr.id.as_bytes();
     let client = bind_client_async(&cfg).await?;
     client.watch_addr_log("nm-llm-gatewayd");
