@@ -92,11 +92,35 @@ pub enum Backend {
     },
 }
 
+/// 上游 HTTP 客户端：必须带超时，否则错误 URL / 防火墙会让 `model.infer` 挂到消费方 P2P 超时。
+fn http_client() -> reqwest::Client {
+    use std::time::Duration;
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(90))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// 请求 JSON 缺 model 时回填 `model_label`，避免上游收到空 model 名。
+fn params_with_model(params_json: &[u8], model_label: &str) -> anyhow::Result<Vec<u8>> {
+    let mut body: serde_json::Value = serde_json::from_slice(params_json)?;
+    let empty = body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(|s| s.is_empty())
+        .unwrap_or(true);
+    if empty {
+        body["model"] = serde_json::json!(model_label);
+    }
+    Ok(serde_json::to_vec(&body)?)
+}
+
 impl Backend {
     pub fn ollama(url: impl Into<String>) -> Self {
         Backend::Ollama {
             url: url.into().trim_end_matches('/').to_string(),
-            client: reqwest::Client::new(),
+            client: http_client(),
         }
     }
 
@@ -105,7 +129,7 @@ impl Backend {
         Backend::OpenAi {
             url: url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
-            client: reqwest::Client::new(),
+            client: http_client(),
         }
     }
 
@@ -115,13 +139,14 @@ impl Backend {
         let req: ChatRequest = serde_json::from_slice(params_json)
             .map_err(|e| anyhow::anyhow!("非法 OpenAI chat 请求: {e}"))?;
         let model = if req.model.is_empty() { model_label.to_string() } else { req.model.clone() };
+        let forward = params_with_model(params_json, &model)?;
         let (content, usage) = match self {
             Backend::Demo => demo_infer(&req),
             Backend::Ollama { url, client } => {
-                openai_compat_infer(client, url, None, params_json).await?
+                openai_compat_infer(client, url, None, &forward).await?
             }
             Backend::OpenAi { url, api_key, client } => {
-                openai_compat_infer(client, url, Some(api_key.as_str()), params_json).await?
+                openai_compat_infer(client, url, Some(api_key.as_str()), &forward).await?
             }
         };
         Ok(serde_json::to_vec(&chat_response(&model, content, usage))?)
@@ -138,6 +163,7 @@ impl Backend {
         let req: ChatRequest = serde_json::from_slice(params_json)
             .map_err(|e| anyhow::anyhow!("非法 OpenAI chat 请求: {e}"))?;
         let model = if req.model.is_empty() { model_label.to_string() } else { req.model.clone() };
+        let forward = params_with_model(params_json, &model)?;
         match self {
             Backend::Demo => {
                 let (content, usage) = demo_infer(&req);
@@ -156,10 +182,10 @@ impl Backend {
                 let _ = tx.send((serde_json::to_vec(&chat_response(&model, content, usage))?, true));
             }
             Backend::Ollama { url, client } => {
-                openai_compat_stream(client, url, None, params_json, &model, &tx).await?;
+                openai_compat_stream(client, url, None, &forward, &model, &tx).await?;
             }
             Backend::OpenAi { url, api_key, client } => {
-                openai_compat_stream(client, url, Some(api_key.as_str()), params_json, &model, &tx)
+                openai_compat_stream(client, url, Some(api_key.as_str()), &forward, &model, &tx)
                     .await?;
             }
         }

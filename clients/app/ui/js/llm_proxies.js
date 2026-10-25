@@ -321,7 +321,10 @@
     if (probe) {
       probe.onclick = async () => {
         const out = root.querySelector("#px-probe-out");
-        if (out) out.textContent = "探测中…";
+        if (out) {
+          out.textContent = "探测中…（最长约 30s）";
+          out.style.color = "var(--muted)";
+        }
         try {
           const r = await NM.inv("llm_proxy_probe", { providerId: pid });
           if (out) {

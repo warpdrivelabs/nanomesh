@@ -32,8 +32,35 @@
 .llm-stat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px;margin:8px 0 12px}
 .llm-stat{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:10px 12px}
 .llm-stat-v{font-size:15px;font-weight:650}.llm-stat-k{font-size:11px;color:var(--muted);margin-top:4px}
+.llm-hint{font-size:11px;font-weight:500;color:var(--muted);margin-top:4px;line-height:1.4}
+.llm-adv-toggle{display:flex;align-items:center;gap:6px;margin:14px 0 0;padding:0;border:0;background:none;color:var(--aqua);font:inherit;font-size:12px;font-weight:650;cursor:pointer}
+.llm-adv-toggle .nm-ico{width:14px;height:14px;transition:transform .15s}
+.llm-adv-toggle[aria-expanded="true"] .nm-ico{transform:rotate(90deg)}
+.llm-adv-body{display:none;flex-direction:column;gap:10px;margin-top:10px}
+.llm-adv-body.open{display:flex}
+.llm-base-row{display:flex;gap:8px;align-items:flex-end}
+.llm-base-row label{flex:1;min-width:0}
+.llm-base-row .ns-btn{flex:0 0 auto;height:34px}
 `;
     document.head.appendChild(st);
+  }
+
+  function defaultHomeFromNodeSvc() {
+    try {
+      if (!window.NodeSvc || !NodeSvc.list) return { homeNode: "", mode: "nat", relayUrls: [] };
+      const list = NodeSvc.list() || [];
+      const s = list[0];
+      if (!s) return { homeNode: "", mode: "nat", relayUrls: [] };
+      return {
+        homeNode: s.node || "",
+        mode: s.mode || "nat",
+        relayUrls: Array.isArray(s.relayUrls) ? s.relayUrls.slice() : [],
+        pkarrUrl: s.pkarrUrl || null,
+        dnsOrigin: s.dnsOrigin || null,
+      };
+    } catch (_) {
+      return { homeNode: "", mode: "nat", relayUrls: [] };
+    }
   }
 
   async function load() {
@@ -206,7 +233,11 @@
 
   function openCreate() {
     SEL = null;
-    load().then(() => openDetail(null, { create: true }));
+    const ready = Promise.all([
+      load(),
+      window.NodeSvc && NodeSvc.load ? NodeSvc.load() : Promise.resolve(),
+    ]);
+    ready.then(() => openDetail(null, { create: true }));
   }
 
   async function refreshMon(localId) {
@@ -521,7 +552,7 @@
     }
   }
 
-  // ── 新建 / 编辑 ──
+  // ── 新建 / 编辑（厂商预设驱动，尽量少手填）──
   function renderEdit(localId) {
     const conv = document.getElementById("conv");
     if (!conv) return;
@@ -530,80 +561,262 @@
     const m = localId ? find(localId) : null;
     const isNew = !m;
     const title = isNew ? "添加本地模型" : "编辑 · " + (m.displayName || m.model || "");
+    const homeDef = isNew ? defaultHomeFromNodeSvc() : null;
+    const vendors = (window.LlmPresets && LlmPresets.list()) || [];
+    const matched =
+      (window.LlmPresets &&
+        LlmPresets.match((m && m.provider) || "", (m && m.baseUrl) || "", (m && m.model) || "")) ||
+      null;
+    const initVendorId = (matched && matched.id) || (vendors[0] && vendors[0].id) || "custom";
+
+    const vendorOpts = vendors
+      .map((v) => `<option value="${esc(v.id)}"${v.id === initVendorId ? " selected" : ""}>${esc(v.label)}</option>`)
+      .join("");
 
     conv.innerHTML = `
       <div class="conv-head"><b>${esc(title)}</b></div>
       <div class="detail-scroll"><div class="detail">
         <div class="llm-form-grid" id="llm-edit-form">
           <div class="llm-sec">上游连接</div>
-          <label>显示名称
-            <input class="ns-inp" id="llm-f-name" value="${esc((m && m.displayName) || "")}" placeholder="如 GPT-4o 共享" />
+          <label>模型厂商
+            <select class="ns-inp" id="llm-f-vendor">${vendorOpts}</select>
+            <span class="llm-hint" id="llm-f-vendor-hint"></span>
           </label>
-          <div class="llm-form-row">
-            <label>上游模型名
-              <input class="ns-inp" id="llm-f-model" value="${esc((m && m.model) || "")}" placeholder="gpt-4o" />
-            </label>
-            <label>厂商
-              <input class="ns-inp" id="llm-f-provider" value="${esc((m && m.provider) || "openai")}" />
-            </label>
-          </div>
-          <label>Base URL
-            <input class="ns-inp" id="llm-f-base" value="${esc((m && m.baseUrl) || "https://api.openai.com/v1")}" />
+          <label>模型
+            <select class="ns-inp" id="llm-f-model-sel"></select>
+            <span class="llm-hint" id="llm-f-model-hint"></span>
+          </label>
+          <label id="llm-f-model-wrap" style="display:none">上游模型 ID（手工）
+            <input class="ns-inp" id="llm-f-model" value="${esc((m && m.model) || "")}" placeholder="如 gpt-4o / qwen-plus" />
+          </label>
+          <input type="hidden" id="llm-f-provider" value="${esc((m && m.provider) || "openai")}" />
+          <label>显示名称
+            <input class="ns-inp" id="llm-f-name" value="${esc((m && m.displayName) || "")}" placeholder="对端目录里显示的名字" />
           </label>
           <label>API Key${m && m.hasKey ? "（已保存，留空不改）" : ""}
             <input class="ns-inp" id="llm-f-key" type="password" placeholder="${m && m.hasKey ? "••••••••" : "sk-…"}" autocomplete="off" />
+            <span class="llm-hint" id="llm-f-key-hint"></span>
           </label>
-          <label>简介（对端可见）
-            <input class="ns-inp" id="llm-f-bio" value="${esc((m && m.bio) || "")}" />
-          </label>
-          <label>状态文案
-            <input class="ns-inp" id="llm-f-status" value="${esc((m && m.statusText) || "")}" placeholder="闲置 / 高峰限流…" />
-          </label>
+          <div class="llm-base-row">
+            <label>Base URL
+              <input class="ns-inp" id="llm-f-base" value="${esc((m && m.baseUrl) || "")}" />
+            </label>
+            <button type="button" class="ns-btn" id="llm-f-base-lock" title="锁定/解锁 URL">预设</button>
+          </div>
+          <span class="llm-hint" id="llm-f-base-hint">选择厂商后自动填入；点「预设」可改为手工编辑</span>
 
-          <div class="llm-sec">P2P 网络</div>
-          <label>Home 节点
-            <textarea class="ns-inp" id="llm-f-home" rows="3" placeholder="节点公钥 hex 或 NM_NODE_ADDR JSON">${esc((m && m.homeNode) || "")}</textarea>
-          </label>
-          <label>连接模式
-            <select class="ns-inp" id="llm-f-mode">
-              <option value="nat"${!m || m.mode === "nat" ? " selected" : ""}>nat（N0）</option>
-              <option value="lan"${m && m.mode === "lan" ? " selected" : ""}>lan</option>
-              <option value="selfhost"${m && m.mode === "selfhost" ? " selected" : ""}>selfhost</option>
-            </select>
-          </label>
-
-          <div class="llm-sec">收费与授权</div>
-          <div class="llm-form-row">
-            <label>计量方式
-              <select class="ns-inp" id="llm-f-meter">
-                ${["token", "request", "time"].map((x) => `<option value="${x}"${(m && m.metering) === x || (!m && x === "token") ? " selected" : ""}>${x}</option>`).join("")}
+          <button type="button" class="llm-adv-toggle" id="llm-adv-btn" aria-expanded="false">
+            ${typeof nmIcon === "function" ? nmIcon("chevron") : "›"} 高级选项（网络 / 收费 / 简介）
+          </button>
+          <div class="llm-adv-body" id="llm-adv-body">
+            <label>简介（对端可见）
+              <input class="ns-inp" id="llm-f-bio" value="${esc((m && m.bio) || "")}" />
+            </label>
+            <label>状态文案
+              <input class="ns-inp" id="llm-f-status" value="${esc((m && m.statusText) || "")}" placeholder="闲置 / 高峰限流…" />
+            </label>
+            <div class="llm-sec" style="margin-top:4px">P2P 网络</div>
+            <label>Home 节点
+              <textarea class="ns-inp" id="llm-f-home" rows="3" placeholder="节点公钥 hex 或 NM_NODE_ADDR JSON">${esc((m && m.homeNode) || (homeDef && homeDef.homeNode) || "")}</textarea>
+              <span class="llm-hint">${isNew && homeDef && homeDef.homeNode ? "已从当前节点服务自动填入" : "新建时会尝试用节点服务列表首项预填"}</span>
+            </label>
+            <label>连接模式
+              <select class="ns-inp" id="llm-f-mode">
+                <option value="nat"${(m ? m.mode : (homeDef && homeDef.mode) || "nat") === "nat" ? " selected" : ""}>nat（N0）</option>
+                <option value="lan"${(m ? m.mode : homeDef && homeDef.mode) === "lan" ? " selected" : ""}>lan</option>
+                <option value="selfhost"${(m ? m.mode : homeDef && homeDef.mode) === "selfhost" ? " selected" : ""}>selfhost</option>
               </select>
             </label>
-            <label>收费模式
-              <select class="ns-inp" id="llm-f-bill">
-                ${["friend_quota", "free", "paid", "pass"].map((x) => `<option value="${x}"${(m && m.billing) === x || (!m && x === "friend_quota") ? " selected" : ""}>${x}</option>`).join("")}
-              </select>
+            <div class="llm-sec" style="margin-top:4px">收费与授权</div>
+            <div class="llm-form-row">
+              <label>计量方式
+                <select class="ns-inp" id="llm-f-meter">
+                  ${["token", "request", "time"].map((x) => `<option value="${x}"${(m && m.metering) === x || (!m && x === "token") ? " selected" : ""}>${x}</option>`).join("")}
+                </select>
+              </label>
+              <label>收费模式
+                <select class="ns-inp" id="llm-f-bill">
+                  ${["friend_quota", "free", "paid", "pass"].map((x) => `<option value="${x}"${(m && m.billing) === x || (!m && x === "friend_quota") ? " selected" : ""}>${x}</option>`).join("")}
+                </select>
+              </label>
+            </div>
+            <label>价格文案
+              <input class="ns-inp" id="llm-f-price" value="${esc((m && m.price) || "")}" placeholder="好友免费 / 日 200k tokens" />
             </label>
+            <div class="llm-form-row">
+              <label>并发上限
+                <input class="ns-inp" id="llm-f-conc" type="number" min="1" value="${(m && m.concurrency) || 4}" />
+              </label>
+              <label>最大上下文
+                <input class="ns-inp" id="llm-f-ctx" type="number" min="0" value="${(m && m.maxContext) || 0}" placeholder="0=默认" />
+              </label>
+            </div>
+            <label class="llm-check"><input type="checkbox" id="llm-f-grant" ${!m || m.requireGrant !== false ? "checked" : ""} /> 需要 Grant 才能调用</label>
           </div>
-          <label>价格文案
-            <input class="ns-inp" id="llm-f-price" value="${esc((m && m.price) || "")}" placeholder="好友免费 / 日 200k tokens" />
-          </label>
-          <div class="llm-form-row">
-            <label>并发上限
-              <input class="ns-inp" id="llm-f-conc" type="number" min="1" value="${(m && m.concurrency) || 4}" />
-            </label>
-            <label>最大上下文
-              <input class="ns-inp" id="llm-f-ctx" type="number" min="0" value="${(m && m.maxContext) || 0}" placeholder="0=默认" />
-            </label>
-          </div>
-          <label class="llm-check"><input type="checkbox" id="llm-f-grant" ${!m || m.requireGrant !== false ? "checked" : ""} /> 需要 Grant 才能调用</label>
         </div>
         <div class="detail-actions" style="margin-top:20px">
           <button class="ns-btn ns-primary" id="llm-f-save">保存</button>
           <button class="ns-btn" id="llm-f-cancel">取消</button>
         </div>
-        <p style="font-size:12px;color:var(--muted);margin-top:12px">保存后需在详情页点「对外提供服务」才会以独立进程上线到 P2P。</p>
+        <p style="font-size:12px;color:var(--muted);margin-top:12px">主路径：选厂商 → 选模型 → 填 Key → 保存。保存后在详情页点「对外提供服务」上线到 P2P。</p>
       </div></div>`;
+
+    const form = document.getElementById("llm-edit-form");
+    const vendorEl = document.getElementById("llm-f-vendor");
+    const modelSel = document.getElementById("llm-f-model-sel");
+    const modelInp = document.getElementById("llm-f-model");
+    const modelWrap = document.getElementById("llm-f-model-wrap");
+    const providerEl = document.getElementById("llm-f-provider");
+    const nameEl = document.getElementById("llm-f-name");
+    const baseEl = document.getElementById("llm-f-base");
+    const baseLock = document.getElementById("llm-f-base-lock");
+    const keyEl = document.getElementById("llm-f-key");
+    const ctxEl = document.getElementById("llm-f-ctx");
+    const vendorHint = document.getElementById("llm-f-vendor-hint");
+    const modelHint = document.getElementById("llm-f-model-hint");
+    const keyHint = document.getElementById("llm-f-key-hint");
+    let nameTouched = !!(m && m.displayName);
+    let baseManual = false;
+    let applying = false;
+
+    if (nameEl) {
+      nameEl.addEventListener("input", () => {
+        nameTouched = true;
+      });
+    }
+
+    function setBaseLocked(locked) {
+      baseManual = !locked;
+      if (baseEl) baseEl.readOnly = locked;
+      if (baseLock) baseLock.textContent = locked ? "预设" : "手工";
+      if (baseEl) baseEl.style.opacity = locked ? "0.85" : "1";
+    }
+
+    function fillModelSelect(vendor, preferModel) {
+      if (!modelSel) return;
+      const models = (vendor && vendor.models) || [];
+      const prefer = preferModel || "";
+      let html = models
+        .map((x) => {
+          const ctx = x.context ? ` · ${x.context >= 1000 ? Math.round(x.context / 1000) + "k" : x.context}` : "";
+          return `<option value="${esc(x.id)}">${esc(x.label || x.id)}${esc(ctx)}</option>`;
+        })
+        .join("");
+      html += `<option value="__custom__">其他（手工输入模型 ID）</option>`;
+      modelSel.innerHTML = html;
+      const hit = models.some((x) => x.id === prefer);
+      if (prefer && hit) modelSel.value = prefer;
+      else if (prefer && !hit) modelSel.value = "__custom__";
+      else if (models.length) modelSel.value = models[0].id;
+      else modelSel.value = "__custom__";
+    }
+
+    function applyModelChoice(fromVendorChange) {
+      if (!form || applying) return;
+      applying = true;
+      try {
+        const vendor = (window.LlmPresets && LlmPresets.get(vendorEl.value)) || null;
+        const sel = modelSel.value;
+        const isCustomModel = sel === "__custom__" || !vendor || vendor.id === "custom";
+        if (modelWrap) modelWrap.style.display = isCustomModel || sel === "__custom__" ? "" : "none";
+        if (!isCustomModel && sel !== "__custom__") {
+          if (modelInp) modelInp.value = sel;
+        } else if (fromVendorChange && vendor && vendor.id === "custom" && modelInp && !m) {
+          modelInp.value = "";
+        }
+        const mid = (modelInp && modelInp.value.trim()) || (sel !== "__custom__" ? sel : "");
+        const preset = vendor && window.LlmPresets ? LlmPresets.modelInVendor(vendor, mid) : null;
+        if (preset && ctxEl && (fromVendorChange || !m || !m.maxContext)) {
+          ctxEl.value = String(preset.context || 0);
+        }
+        if (preset && nameEl && (!nameTouched || fromVendorChange) && (isNew || fromVendorChange)) {
+          if (!nameTouched) nameEl.value = preset.label || preset.id;
+        }
+        if (modelHint) {
+          modelHint.textContent = preset
+            ? `模型 ID：${preset.id}${preset.context ? " · 上下文约 " + preset.context.toLocaleString() + " tokens" : ""}`
+            : isCustomModel
+              ? "请填写上游实际接受的 model 字段"
+              : "";
+        }
+      } finally {
+        applying = false;
+      }
+    }
+
+    function applyVendor(preferModel, opts) {
+      opts = opts || {};
+      const vendor = (window.LlmPresets && LlmPresets.get(vendorEl.value)) || null;
+      if (!vendor) return;
+      if (providerEl) providerEl.value = vendor.provider || vendor.id;
+      if (vendorHint) {
+        vendorHint.textContent = vendor.keyHelp || (vendor.id === "custom" ? "手动填写 Base URL 与模型 ID" : "");
+      }
+      if (keyHint) keyHint.textContent = vendor.keyHelp || "";
+      if (keyEl && !(m && m.hasKey)) keyEl.placeholder = vendor.keyHint || "sk-…";
+      const keepBase = opts.keepBase || baseManual;
+      if (!keepBase && baseEl) {
+        if (vendor.baseUrl) baseEl.value = vendor.baseUrl;
+        else if (vendor.id === "custom" && isNew && !m) baseEl.value = "";
+      }
+      setBaseLocked(vendor.id !== "custom" && !baseManual && !!vendor.baseUrl);
+      fillModelSelect(vendor, preferModel || (m && m.model) || "");
+      applyModelChoice(true);
+    }
+
+    if (baseLock) {
+      baseLock.onclick = () => {
+        const vendor = (window.LlmPresets && LlmPresets.get(vendorEl.value)) || null;
+        if (baseManual) {
+          // 回到预设 URL
+          if (vendor && vendor.baseUrl && baseEl) baseEl.value = vendor.baseUrl;
+          setBaseLocked(!!(vendor && vendor.baseUrl));
+        } else {
+          setBaseLocked(false);
+        }
+      };
+    }
+    if (vendorEl) {
+      vendorEl.onchange = () => {
+        baseManual = false;
+        applyVendor("", { keepBase: false });
+      };
+    }
+    if (modelSel) {
+      modelSel.onchange = () => applyModelChoice(false);
+    }
+    if (modelInp) {
+      modelInp.addEventListener("input", () => {
+        if (modelSel && modelSel.value !== "__custom__") modelSel.value = "__custom__";
+        applyModelChoice(false);
+      });
+    }
+
+    const advBtn = document.getElementById("llm-adv-btn");
+    const advBody = document.getElementById("llm-adv-body");
+    if (advBtn && advBody) {
+      // 编辑已有档案或缺 Home 时默认展开高级项
+      const needAdv = !isNew || !(homeDef && homeDef.homeNode);
+      if (needAdv) {
+        advBody.classList.add("open");
+        advBtn.setAttribute("aria-expanded", "true");
+      }
+      advBtn.onclick = () => {
+        const open = !advBody.classList.contains("open");
+        advBody.classList.toggle("open", open);
+        advBtn.setAttribute("aria-expanded", open ? "true" : "false");
+      };
+    }
+
+    // 初始：按已有档案或默认厂商填充
+    applyVendor((m && m.model) || "", { keepBase: !!(m && m.baseUrl) });
+    if (m && m.baseUrl && baseEl) baseEl.value = m.baseUrl;
+    if (m && m.model && modelInp) modelInp.value = m.model;
+    if (m && matched && window.LlmPresets && !LlmPresets.modelInVendor(matched, m.model)) {
+      if (modelSel) modelSel.value = "__custom__";
+      if (modelWrap) modelWrap.style.display = "";
+    }
+    applyModelChoice(false);
 
     document.getElementById("llm-f-cancel").onclick = () => {
       if (isNew) {
@@ -612,43 +825,67 @@
       } else renderView(localId);
     };
     document.getElementById("llm-f-save").onclick = async () => {
-      const form = document.getElementById("llm-edit-form");
       if (!form) return;
-      const name = form.querySelector("#llm-f-name").value.trim();
-      const model = form.querySelector("#llm-f-model").value.trim();
-      if (!name && !model) {
-        if (window.toast) toast("请填写显示名称或上游模型名");
+      const name = (nameEl && nameEl.value.trim()) || "";
+      const model =
+        modelSel && modelSel.value && modelSel.value !== "__custom__"
+          ? modelSel.value
+          : ((modelInp && modelInp.value.trim()) || "");
+      if (!model) {
+        if (window.toast) toast("请选择或填写上游模型");
         return;
       }
+      const baseUrl = (baseEl && baseEl.value.trim()) || "";
+      if (!baseUrl) {
+        if (window.toast) toast("请填写 Base URL");
+        return;
+      }
+      if (isNew && !(keyEl && keyEl.value.trim()) && !(m && m.hasKey)) {
+        if (window.toast) toast("请填写 API Key");
+        return;
+      }
+      const homeNode = ((document.getElementById("llm-f-home") || {}).value || "").trim();
+      if (!homeNode) {
+        if (advBody && !advBody.classList.contains("open")) {
+          advBody.classList.add("open");
+          if (advBtn) advBtn.setAttribute("aria-expanded", "true");
+        }
+        if (window.toast) toast("请填写 Home 节点（高级选项）");
+        return;
+      }
+      const vendor = (window.LlmPresets && LlmPresets.get(vendorEl.value)) || null;
       const share = {
         localId: (m && m.localId) || "",
         entityId: (m && m.entityId) || "",
         displayName: name || model,
         model,
-        provider: form.querySelector("#llm-f-provider").value.trim() || "openai",
-        baseUrl: form.querySelector("#llm-f-base").value.trim(),
-        homeNode: form.querySelector("#llm-f-home").value.trim(),
-        mode: form.querySelector("#llm-f-mode").value,
-        bio: form.querySelector("#llm-f-bio").value.trim(),
-        statusText: form.querySelector("#llm-f-status").value.trim(),
-        metering: form.querySelector("#llm-f-meter").value.trim() || "token",
-        billing: form.querySelector("#llm-f-bill").value.trim() || "friend_quota",
-        price: form.querySelector("#llm-f-price").value.trim(),
-        requireGrant: form.querySelector("#llm-f-grant").checked,
-        concurrency: Number(form.querySelector("#llm-f-conc").value) || 4,
-        maxContext: Number(form.querySelector("#llm-f-ctx").value) || 0,
+        provider: (providerEl && providerEl.value.trim()) || (vendor && vendor.provider) || "openai",
+        baseUrl,
+        homeNode,
+        mode: (document.getElementById("llm-f-mode") || {}).value || "nat",
+        bio: ((document.getElementById("llm-f-bio") || {}).value || "").trim(),
+        statusText: ((document.getElementById("llm-f-status") || {}).value || "").trim(),
+        metering: ((document.getElementById("llm-f-meter") || {}).value || "").trim() || "token",
+        billing: ((document.getElementById("llm-f-bill") || {}).value || "").trim() || "friend_quota",
+        price: ((document.getElementById("llm-f-price") || {}).value || "").trim(),
+        requireGrant: (() => {
+          const el = document.getElementById("llm-f-grant");
+          return el ? !!el.checked : true;
+        })(),
+        concurrency: Number((document.getElementById("llm-f-conc") || {}).value) || 4,
+        maxContext: Number((document.getElementById("llm-f-ctx") || {}).value) || 0,
         avatar: (m && m.avatar) || "",
         links: (m && m.links) || [],
         locale: (m && m.locale) || "",
-        relayUrls: (m && m.relayUrls) || [],
-        pkarrUrl: (m && m.pkarrUrl) || null,
-        dnsOrigin: (m && m.dnsOrigin) || null,
+        relayUrls: (m && m.relayUrls) || (homeDef && homeDef.relayUrls) || [],
+        pkarrUrl: (m && m.pkarrUrl) || (homeDef && homeDef.pkarrUrl) || null,
+        dnsOrigin: (m && m.dnsOrigin) || (homeDef && homeDef.dnsOrigin) || null,
         hasKey: !!(m && m.hasKey),
         online: false,
       };
       try {
         const saved = await NM.inv("llm_model_upsert", { share });
-        const key = form.querySelector("#llm-f-key").value;
+        const key = keyEl && keyEl.value;
         if (key && key.trim()) {
           await NM.inv("llm_model_set_key", { localId: saved.localId, apiKey: key.trim() });
         }

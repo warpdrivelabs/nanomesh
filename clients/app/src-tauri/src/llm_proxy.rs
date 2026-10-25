@@ -853,6 +853,7 @@ pub(crate) async fn llm_proxy_clear_stats(
 }
 
 /// 连通性探测：经当前登录 Session 发一条极简 infer。
+/// 用短超时（≤30s），避免代理默认 120s 让 UI「探测中」空等两分钟。
 #[tauri::command]
 pub(crate) async fn llm_proxy_probe(
     state: State<'_, AppState>,
@@ -862,29 +863,32 @@ pub(crate) async fn llm_proxy_probe(
     let key = parse_id(&provider_id)
         .map(|id| hex(&id))
         .unwrap_or_else(|_| provider_id.trim().to_lowercase());
-    let (provider, grant, timeout, model) = {
+    let (provider, grant, model, has_grant) = {
         let g = state.llm_proxies.lock().await;
         let r = g.get(&key).ok_or_else(|| "代理未运行".to_string())?;
         let live = r.live.read().await;
         (
             r.provider_id,
             live.grant.clone(),
-            live.timeout,
             live.model_hint.clone(),
+            live.grant.is_some(),
         )
     };
     let sess = session_of(&state).await?;
-    let model = if model.is_empty() { "default" } else { &model };
-    let body = serde_json::to_vec(&json!({
-        "model": model,
+    // 空 model → 提供方用其 default_model；勿写死 "default"（多数上游无此模型名）。
+    let mut body_val = json!({
         "messages": [{"role":"user","content":"ping"}],
         "max_tokens": 1,
         "stream": false,
-    }))
-    .map_err(|e| e.to_string())?;
+    });
+    if !model.is_empty() {
+        body_val["model"] = json!(model);
+    }
+    let body = serde_json::to_vec(&body_val).map_err(|e| e.to_string())?;
+    let probe_timeout = Duration::from_secs(30);
     let t0 = Instant::now();
     match sess
-        .infer_with_grant_timeout(provider, &body, grant, timeout)
+        .infer_with_grant_timeout(provider, &body, grant, probe_timeout)
         .await
     {
         Ok(bytes) => Ok(json!({
@@ -892,10 +896,24 @@ pub(crate) async fn llm_proxy_probe(
             "latencyMs": t0.elapsed().as_millis() as u64,
             "bytes": bytes.len(),
         })),
-        Err(e) => Ok(json!({
-            "ok": false,
-            "latencyMs": t0.elapsed().as_millis() as u64,
-            "error": e.to_string(),
-        })),
+        Err(e) => {
+            let mut msg = e.to_string();
+            if msg.contains("timed out") || msg.contains("Timeout") {
+                msg = if has_grant {
+                    format!(
+                        "{msg}（提供方未在时限内响应：请确认 gatewayd 在线、Home 节点一致、上游 Base URL/Key 可用）"
+                    )
+                } else {
+                    format!(
+                        "{msg}（若该模型要求 Grant，请先在代理配置中粘贴 Grant 后重试；否则检查 gatewayd 是否在线）"
+                    )
+                };
+            }
+            Ok(json!({
+                "ok": false,
+                "latencyMs": t0.elapsed().as_millis() as u64,
+                "error": msg,
+            }))
+        }
     }
 }

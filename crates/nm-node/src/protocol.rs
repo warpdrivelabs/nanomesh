@@ -351,7 +351,16 @@ async fn handle_gram(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Optio
                 }
             });
         } else {
-            deliver_account(to, gram, ctx, false, None).await;
+            let delivered = deliver_account(to, gram, ctx, false, None).await;
+            // Command 不入离线库：若目标无在线会话，必须立刻回 CommandResult，
+            // 否则调用方会空等到 timeout（连通性探测表现为「探测中…」约 125s 后 call timed out）。
+            if !delivered && matches!(gram.kind(), GramKind::Command) {
+                tracing::warn!(
+                    target = %crate::records::hex_encode(&to[..to.len().min(8)]),
+                    "routed command: no online session; failing fast"
+                );
+                push_command_error(gram, rid, caller, ctx, "provider offline or unreachable");
+            }
         }
         return Some(reply_gram(gram, GramKind::Receipt, None)); // 给发送方回 ack
     }
@@ -724,28 +733,54 @@ fn authorize_routed(gram: &Gram, caller: &[u8], target: &Entity) -> std::result:
 }
 
 /// 把「命令被拒」作为 CommandResult 推回调用方在线会话（若在线）。
-fn push_command_denied(gram: &Gram, caller: &[u8], ctx: &Ctx, reason: &str) {
-    let sessions = &ctx.sessions;
+fn push_command_denied(gram: &Gram, rid: &[u8], ctx: &Ctx, reason: &str) {
+    push_command_error(gram, rid, &gram.sender, ctx, &format!("denied: {reason}"));
+}
+
+/// 把一条失败的 CommandResult 推回调用方（优先本连接 rid，其次按账号找在线会话）。
+fn push_command_error(gram: &Gram, rid: &[u8], account: &[u8], ctx: &Ctx, error: &str) {
     let corr = gram
         .payload
         .as_ref()
         .and_then(|p| Command::decode(p.value.as_slice()).ok())
         .map(|c| c.correlation_id)
         .unwrap_or(0);
-    let Some(conn) = sessions.get(caller).map(|r| r.clone()) else {
-        return;
+    let cr = CommandResult {
+        correlation_id: corr,
+        ok: false,
+        result: None,
+        error: error.to_string(),
+        seq: 0,
+        done: true,
     };
-    let cr = CommandResult { correlation_id: corr, ok: false, result: None, error: format!("denied: {reason}"), seq: 0, done: true };
-    let mut reply = reply_gram(gram, GramKind::CommandResult, Some(Any {
-        type_url: "nmspace.v1.CommandResult".to_string(),
-        value: cr.encode_to_vec(),
-    }));
+    let mut reply = reply_gram(
+        gram,
+        GramKind::CommandResult,
+        Some(Any {
+            type_url: "nmspace.v1.CommandResult".to_string(),
+            value: cr.encode_to_vec(),
+        }),
+    );
     reply.ref_gram_id = Some(gram.gram_id);
-    reply.receiver = caller.to_vec();
-    ctx.tracker.spawn(async move {
-        if let Ok(mut sname) = conn.open_uni().await {
-            let _ = write_gram(&mut sname, &reply).await;
-            let _ = sname.finish();
-        }
-    });
+    reply.receiver = if account.is_empty() {
+        rid.to_vec()
+    } else {
+        account.to_vec()
+    };
+
+    // 1) 本连接（发 Command 的那条 bi 流所属 session）
+    if let Some(conn) = ctx.sessions.get(rid).map(|r| r.clone()) {
+        let reply = reply.clone();
+        ctx.tracker.spawn(async move {
+            if let Ok(mut s) = conn.open_uni().await {
+                let _ = write_gram(&mut s, &reply).await;
+                let _ = s.finish();
+            }
+        });
+        return;
+    }
+    // 2) 回退：按账号找任一在线设备（多设备 / rid 表抖）
+    if !account.is_empty() {
+        let _ = deliver_account(account, &reply, ctx, false, None);
+    }
 }
