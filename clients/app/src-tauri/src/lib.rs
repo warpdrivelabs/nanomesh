@@ -26,6 +26,7 @@ mod connection;
 mod devices;
 mod directory;
 mod identity;
+mod cmx_host;
 mod llm_chat;
 mod llm_proxy;
 mod llm_share;

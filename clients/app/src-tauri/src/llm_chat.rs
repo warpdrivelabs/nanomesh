@@ -13,7 +13,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 
 use crate::state::{hex, parse_id, session_of, vk_of, AppState};
-use crate::llm_share;
+use crate::{llm_proxy, llm_share};
 
 /// 与 nm-agent-bridge/im_events.js 对齐的流式帧 type_url。
 const AGENT_DELTA_TYPE: &str = "nmspace.agent.delta.v1";
@@ -154,7 +154,8 @@ pub(crate) async fn llm_chat_stream(
         return Ok(());
     }
 
-    // 远端 P2P:须已连接节点;Grant/超时/model 借运行中代理的配置(有则)。
+    // 远端 P2P:须已连接节点;Grant 优先借运行中代理的,否则**读盘留存**(llm_grant_save/代理启动时落盘)
+    // ——聊天不再要求先开代理粘 Grant。超时/model 同理借代理,无则默认。
     let sess = session_of(&state).await.map_err(|e| format!("未连接节点: {e}"))?;
     let provider = parse_id(&target_hex)?;
     let (grant, timeout_ms, model_hint) = {
@@ -162,9 +163,9 @@ pub(crate) async fn llm_chat_stream(
         match g.get(&target_hex) {
             Some(p) => {
                 let (grant, t, m) = p.chat_params().await;
-                (grant, t.as_millis().min(u32::MAX as u128) as u32, m)
+                (grant.or_else(|| llm_proxy::load_grant(&app, &target_hex)), t.as_millis().min(u32::MAX as u128) as u32, m)
             }
-            None => (None, DEFAULT_REMOTE_TIMEOUT_MS, String::new()),
+            None => (llm_proxy::load_grant(&app, &target_hex), DEFAULT_REMOTE_TIMEOUT_MS, String::new()),
         }
     };
     let mut body = json!({ "messages": msgs, "stream": true });

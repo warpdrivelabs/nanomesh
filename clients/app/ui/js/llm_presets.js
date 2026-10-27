@@ -318,6 +318,7 @@
       keyHelp: "本机 Ollama；Key 可填 ollama；模型名=ollama list 所示",
       models: [
         { id: "gpt-oss", label: "gpt-oss", context: 131072 },
+        { id: "qwen2.5:0.5b", label: "qwen2.5:0.5b（轻量）", context: 32768 },
         { id: "qwen3", label: "qwen3", context: 40960 },
         { id: "llama3.3", label: "llama3.3", context: 131072 },
         { id: "llama3.2", label: "llama3.2", context: 128000 },

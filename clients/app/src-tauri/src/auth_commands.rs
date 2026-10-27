@@ -41,6 +41,8 @@ pub(crate) fn unlock(
         Ok(vk) => {
             *state.vault.lock().unwrap() = Some(vk);
             auth::audit(&dir, "unlock:ok");
+            // 云模型期望态自启:autostart 模型解锁后自动上线(需 VK 解 Key,故挂此处;后台跑不阻塞解锁)。
+            tauri::async_runtime::spawn(crate::llm_share::autostart_models(app.clone()));
             Ok(())
         }
         Err(e) => {

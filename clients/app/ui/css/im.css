@@ -191,6 +191,39 @@
 .dlg-aside .aside-ops .ns-btn { height: 30px; padding: 0 14px; }
 .dlg-aside .aside-ops .ns-btn.ns-ico { width: 32px; min-width: 32px; height: 32px; padding: 0; }
 .pf-av { display: inline-flex; padding: 4px; border-radius: calc(var(--avatar-radius) + 4px); box-shadow: 0 0 0 1px var(--border2); }
+.fm-attrs-row { display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap; }
+.fm-attrs-row .ns-btn { height: 34px; display: inline-flex; align-items: center; gap: 6px; }
+.fm-attrs-row .ns-btn .nm-ico { width: 14px; height: 14px; }
+.fm-attrs-tip { font-size: 12px; color: var(--muted); }
+.pf-attrs-dlg { width: min(720px, 96vw); aspect-ratio: auto; height: auto; max-height: min(640px, 92vh); display: flex; flex-direction: column; }
+.pf-attrs-dlg .dlg-body, .pf-attrs-body {
+  flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 10px;
+  padding: 14px 18px 8px;
+}
+.pf-attrs-toolbar { display: flex; align-items: center; gap: 12px; flex: none; }
+.pf-attrs-toolbar .ns-btn { height: 30px; display: inline-flex; align-items: center; gap: 6px; }
+.pf-attrs-toolbar .nm-ico { width: 14px; height: 14px; }
+.pf-attrs-hint { font-size: 12px; color: var(--muted); }
+.pf-attrs-table-wrap { flex: 1; min-height: 180px; overflow: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); position: relative; }
+.pf-attrs-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.pf-attrs-table th, .pf-attrs-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.pf-attrs-table th { position: sticky; top: 0; z-index: 1; background: var(--panel); font-size: 12px; font-weight: 600; color: var(--ink2); text-align: left; }
+.pf-attrs-table .c-key { width: 22%; }
+.pf-attrs-table .c-val { width: 34%; }
+.pf-attrs-table .c-note { width: 34%; }
+.pf-attrs-table .c-act { width: 48px; text-align: center; padding-left: 4px; padding-right: 4px; }
+.pf-attrs-table .sec-input {
+  width: 100%; height: 32px; margin: 0; box-sizing: border-box;
+  border: 1px solid var(--border); background: var(--panel2); color: var(--ink);
+  border-radius: var(--r-ctrl); padding: 0 10px; font-size: 13px; font-family: inherit;
+}
+.pf-attrs-table .sec-input:focus { border-color: var(--aqua); outline: none; }
+.pf-attrs-table .pf-a-del { width: 30px; min-width: 30px; height: 30px; padding: 0; }
+.pf-attrs-empty {
+  position: absolute; inset: 40px 12px 12px; display: flex; align-items: center; justify-content: center;
+  color: var(--muted); font-size: 13px; pointer-events: none;
+}
+.pf-attrs-empty[hidden] { display: none !important; }
 
 /* 群/频道元信息编辑器：左头像 + 右对齐表单 */
 .me-dlg {
@@ -228,11 +261,12 @@
 .me-cover-field { display: flex; flex-direction: column; gap: 8px; min-width: 0; width: 100%; }
 .me-cover-prev {
   width: 100%; height: 72px; border-radius: 10px; overflow: hidden;
-  background: var(--surface); border: 1px solid var(--border);
+  background-color: var(--surface); border: 1px solid var(--border);
+  background-repeat: repeat; background-position: center center; background-size: auto;
   display: flex; align-items: center; justify-content: center;
   color: var(--muted); font-size: 12px;
 }
-.me-cover-prev img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.me-cover-prev.me-cover-tiled { color: transparent; }
 .me-field-ops { display: flex; align-items: center; gap: 6px; }
 .me-field-hint { font-size: 11px; color: var(--muted); line-height: 1.4; }
 

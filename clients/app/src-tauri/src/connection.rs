@@ -216,13 +216,17 @@ pub(crate) async fn finish_session(
     Ok(hex(&my_id))
 }
 
-/// 换网重连驱动：在 setup 里启动的长驻任务，从换网信号通道收信号，去重节流后**按需**重连。
+/// 换网重连驱动：在 setup 里启动的长驻任务，从换网信号通道收信号，去重节流后**按需**自愈重连。
 /// 持 `AppHandle`（Send），每次现取 `State` 调 `reconnect`，避开"重连 future 非 Send 不能进裸 spawn"。
 ///
-/// 关键：换网信号**不等于连接已死**。底层 `spawn_addr_change` 已做实质换网判定 + 冷却（见
-/// nm-transport），此处再加一道**重连前验活**：仅当当前连接确已关闭（`close_reason` 为 Some）
-/// 才主动重连；若连接表面仍活着，**不重连**，把判活交给真正发送时的 `send_with_retry`
-/// （那里有发送超时 + looks_dead 的可靠判活）。两道合力根除"地址一抖就断连重连"的自激风暴。
+/// 两道闸 + 一个自愈循环：
+/// 1) **节流**：合并 300ms 内的连环地址抖动。
+/// 2) **主动验活（ping）**：换网信号不等于连接已死。用一次带超时的 `ping` 探活——ping 通就**不重连**
+///    （根除"地址一抖就断连重连"的自激风暴），仅 ping 超时/失败（含换网后的 QUIC 假死，此时
+///    `close_reason` 常仍为 `None`，旧的 close_reason 验活会漏判）才认定需要重连。
+/// 3) **无限退避自愈**：一旦认定失活，就 2s→30s 退避**反复重拨直到连上**（对齐节点侧
+///    `online_by_id_retry` 的"永不放弃"语义），而非单次失败即停——这正是 app 换网后"一直连不上、
+///    重启才好"的根因修复。终止条件：连上、或用户已断开（conn=None）/已锁库。
 pub(crate) async fn roam_reconnect_driver(
     app: AppHandle,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<()>,
@@ -234,22 +238,56 @@ pub(crate) async fn roam_reconnect_driver(
             .is_ok()
         {}
         let Some(state) = app.try_state::<AppState>() else { continue };
-        // 验活：连接还在就不重连——换网哨兵只负责「连接真死后的补救」，不负责「地址变就重拨」。
-        // 否则 NAT/relay 候选的稳态抖动会不断把活连接拆掉重建，拖垮收发（principals 映射抖动→收不到）。
-        let (cur_gen, dead) = {
+        // 取当前会话 + 世代；未连接则忽略本次信号。
+        let (cur_gen, session) = {
             let g = state.conn.lock().await;
             match g.as_ref() {
-                Some(c) => (Some(c.conn_gen), c.session.close_reason().is_some()),
-                None => (None, false),
+                Some(c) => (c.conn_gen, c.session.clone()),
+                None => continue,
             }
         };
-        let Some(g) = cur_gen else { continue };
-        if !dead {
-            continue; // 连接仍活着：忽略这次换网信号，交由发送路径按需重连。
+        // 主动验活：ping 通=连接仍活，忽略本次换网信号（交由发送路径按需重连）。
+        // ping 超时/失败=真失活（含换网后假死，close_reason 可能仍为 None）→ 进入自愈。
+        let alive = matches!(
+            tokio::time::timeout(SEND_TIMEOUT, session.ping()).await,
+            Ok(Ok(()))
+        );
+        if alive {
+            continue;
         }
+        drop(session);
+        tracing::info!("roam: 连接失活（ping 超时/失败），进入自愈重连循环");
         let _ = app.emit("core://event", json!({ "type": "roaming" }));
-        // 连接确已关闭 → 用当前世代触发重连；若期间已被发送路径重连过（gen 前进）则复用、不重复拨号。
-        let _ = reconnect(&app, &state, g).await;
+
+        // 无限退避自愈：反复重拨直到连上 / 用户断开 / 锁库。
+        let mut backoff = std::time::Duration::from_secs(2);
+        loop {
+            // 终止：用户已断开连接（disconnect/lock 把 conn 置 None）。
+            if state.conn.lock().await.is_none() {
+                tracing::info!("roam: 连接已被清除（断开/切换账号），停止自愈");
+                break;
+            }
+            // 终止：库已上锁——重连需 vault 现解身份，锁库下反复试无意义。
+            if vk_of(&state).is_err() {
+                tracing::warn!("roam: 库已锁，停止自愈（解锁后由后续信号重新触发）");
+                break;
+            }
+            // 用进入自愈时的世代触发重连；若期间已被发送路径连上（gen 前进），reconnect 内判重即 Ok。
+            match reconnect(&app, &state, cur_gen).await {
+                Ok(()) => {
+                    tracing::info!("roam: 自愈重连成功");
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "roam: 自愈重连失败：{e}；{}s 后重试",
+                        backoff.as_secs()
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(std::time::Duration::from_secs(30));
+                }
+            }
+        }
     }
 }
 
@@ -330,12 +368,23 @@ where
     }
 
     // 重连（单飞 + gen 判重），再用新 session 重发一次。
-    reconnect(app, state, cur_gen).await?;
+    if let Err(e) = reconnect(app, state, cur_gen).await {
+        // 这次重连没成——触发后台自愈驱动接管（退避重试直到连上），别让用户这条失败后就无人重连。
+        if let Some(tx) = state.roam_tx.get() {
+            let _ = tx.send(());
+        }
+        return Err(e);
+    }
     let s2 = session_of(state).await?;
     match tokio::time::timeout(SEND_TIMEOUT, op(s2)).await {
         Ok(Ok(v)) => Ok(v),
         Ok(Err(e)) => Err(e.to_string()),
-        Err(_) => Err("发送失败：重连后仍无法送达".into()),
+        Err(_) => {
+            if let Some(tx) = state.roam_tx.get() {
+                let _ = tx.send(());
+            }
+            Err("发送失败：重连后仍无法送达".into())
+        }
     }
 }
 
@@ -369,6 +418,14 @@ pub(crate) async fn reconnect(
 
     let _ = app.emit("core://event", json!({ "type": "reconnecting" }));
 
+    // 换网重连：home node 一律**按公钥 id** 拨号（经发现服务 pkarr/DNS 重解析当前地址）。
+    // 缓存的完整地址换网后必失效，直接用它会把连接导向死地址；dial 还会先浪费数秒试「同网直连旧地址」。
+    // 故把 node 收敛成纯公钥 hex，让 dial 跳过同网直连、直奔发现重解析（对齐节点侧 online_by_id）。
+    let redial_node = match nm_transport::addr_from_string(args.node.trim()) {
+        Ok(a) => hex(a.id.as_bytes()),
+        Err(_) => args.node.clone(),
+    };
+
     // 先拨号（12s 兜底）成功，再换手。
     let dialed = tokio::time::timeout(
         std::time::Duration::from_secs(12),
@@ -377,7 +434,7 @@ pub(crate) async fn reconnect(
             &vk,
             &args.user,
             &args.mode,
-            &args.node,
+            &redial_node,
             args.relay_urls.clone(),
             args.pkarr_url.clone(),
             args.dns_origin.clone(),
@@ -386,10 +443,9 @@ pub(crate) async fn reconnect(
     .await;
     let (client, session) = match dialed {
         Ok(Ok(cs)) => cs,
-        _ => {
-            let _ = app.emit("core://event", json!({ "type": "reconnect_failed" }));
-            return Err("重连失败，请检查网络".into());
-        }
+        // 失败不发终态 reconnect_failed：自愈驱动会继续退避重试，发送路径会返回错误给用户。
+        Ok(Err(e)) => return Err(e),
+        Err(_) => return Err("重连超时（12s）".into()),
     };
 
     // gram_id 续号：从旧 session 高水位接着走，避免被节点 SeenGrams 误去重（群/跨节点消息静默丢失）。

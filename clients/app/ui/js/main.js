@@ -18,6 +18,9 @@ function toggleTheme() {
   applyTheme(cur === "light" ? "dark" : "light");
 }
 function showPanel(name) {
+  // 智能体工作台:无左侧栏目,整个工作区交给 cmx-agent(cmx_agent.js 全权接管显隐与高亮)。
+  if (name === "cmx") { if (typeof window.openCmxWorkbench === "function") window.openCmxWorkbench(); return; }
+  document.body.classList.remove("cmx-full");
   document.querySelectorAll(".activitybar .act").forEach((a) => a.classList.toggle("active", a.dataset.panel === name));
   document.querySelectorAll("aside .panel").forEach((p) => p.classList.toggle("on", p.id === "panel-" + name));
   if (name === "models" && typeof window.renderModels === "function") window.renderModels();

@@ -38,15 +38,32 @@
     return typeof escapeHtml === "function" ? escapeHtml(src || "") : String(src || "");
   }
 
+  // 平铺封面：经 style.backgroundImage 设置（勿写入 HTML style 属性——data:URI 含引号会截断属性）。
+  function applyCoverTile(el, src) {
+    if (!el) return;
+    el.innerHTML = "";
+    if (!src) {
+      el.style.backgroundImage = "";
+      el.classList.remove("chn-cover--tiled");
+      return;
+    }
+    el.classList.add("chn-cover--tiled");
+    el.classList.remove("chn-cover--pending", "chn-cover--tint");
+    el.style.backgroundImage = "url(" + JSON.stringify(String(src)) + ")";
+    el.style.backgroundRepeat = "repeat";
+    el.style.backgroundPosition = "center center";
+    el.style.backgroundSize = "auto";
+  }
   function heroCoverHtml(c) {
     const tint = colorOf(c.id);
     if (window.Profile && Profile.isImg(c.cover)) {
-      return `<div class="chn-cover" style="--chn-tint:${tint}"><img src="${c.cover}" alt=""></div>`;
+      // data-cover-ready：render 后由 applyCoverTile 填背景（避免巨型 data:URI 进 HTML 属性）
+      return `<div class="chn-cover chn-cover--tiled" data-cover-ready="1" style="--chn-tint:${tint}"></div>`;
     }
     if (window.Profile && Profile.isRef(c.cover)) {
-      return `<div class="chn-cover chn-cover--pending" data-cover-ref="${escapeHtml(c.cover)}" data-home="${escapeHtml(c.homeNode || "")}" style="--chn-tint:${tint};background:linear-gradient(135deg,${tint} 0%,color-mix(in srgb,${tint} 35%,#0d0d0d) 100%)"></div>`;
+      return `<div class="chn-cover chn-cover--pending" data-cover-ref="${escapeHtml(c.cover)}" data-home="${escapeHtml(c.homeNode || "")}" style="--chn-tint:${tint};background-image:linear-gradient(135deg,${tint} 0%,color-mix(in srgb,${tint} 35%,#0d0d0d) 100%)"></div>`;
     }
-    return `<div class="chn-cover chn-cover--tint" style="--chn-tint:${tint};background:
+    return `<div class="chn-cover chn-cover--tint" style="--chn-tint:${tint};background-image:
       radial-gradient(ellipse 70% 80% at 18% 30%, color-mix(in srgb, ${tint} 55%, transparent), transparent 60%),
       radial-gradient(ellipse 50% 60% at 88% 70%, color-mix(in srgb, ${tint} 28%, transparent), transparent 55%),
       linear-gradient(145deg, color-mix(in srgb, ${tint} 42%, #121212), #0e0e0e)"></div>`;
@@ -178,8 +195,7 @@
       tasks.push(Profile.resolveAvatar(c.cover, c.homeNode).then((uri) => {
         if (!uri) return;
         c.cover = uri;
-        const el = document.querySelector(".chn-cover");
-        if (el) { el.classList.remove("chn-cover--pending", "chn-cover--tint"); el.style.background = ""; el.innerHTML = `<img src="${uri}" alt="">`; }
+        applyCoverTile(document.querySelector(".chn-cover"), uri);
       }));
     }
     return Promise.all(tasks);
@@ -236,6 +252,9 @@
       <div class="log chn-feed" id="conv-log"></div>
       ${dockHtml(c)}
     </div>`;
+    if (window.Profile && Profile.isImg(c.cover)) {
+      applyCoverTile(conv.querySelector(".chn-cover[data-cover-ready]"), c.cover);
+    }
     bindHero(conv, c);
     resolveAssets(c);
     attachComposer(c);

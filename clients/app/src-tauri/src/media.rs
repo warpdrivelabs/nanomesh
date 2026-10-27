@@ -6,6 +6,7 @@ use crate::{AppState, data_dir, hex, parse_id, send_with_retry, session_of};
 /// 上传头像等内容寻址 blob。`data_b64` = 纯 base64（无 data: 前缀）。返回 "b3:<hash-hex>"。
 #[tauri::command]
 pub(crate) async fn blob_put(
+    app: AppHandle,
     state: State<'_, AppState>,
     data_b64: String,
     mime: String,
@@ -16,10 +17,13 @@ pub(crate) async fn blob_put(
         .map_err(|e| format!("非法 base64: {e}"))?;
     let session = session_of(&state).await?;
     let (hash, _home) = session
-        .blob_put(bytes, &mime)
+        .blob_put(bytes.clone(), &mime)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(format!("b3:{}", hex(&hash)))
+    let hash_hex = hex(&hash);
+    // 上传同时写入本机缓存，避免随后 blob_get 再走一轮网络。
+    write_blob_cache(&app, &hash_hex, &mime, &bytes);
+    Ok(format!("b3:{hash_hex}"))
 }
 
 fn blob_hex(reference: &str) -> Result<&str, String> {

@@ -56,6 +56,20 @@
       showRunning(null);
     }
 
+    // Grant 独立保存(落盘,聊天直聊与代理共用;不必开代理)。
+    const grantSave = document.getElementById("ed-grant-save");
+    if (grantSave) {
+      grantSave.onclick = async () => {
+        const b64 = ((document.getElementById("ed-proxy-grant") || {}).value || "").trim();
+        try {
+          const has = await NM.inv("llm_grant_save", { providerId, grantB64: b64 });
+          if (window.toast) toast(has ? "Grant 已保存(聊天/代理共用)" : "Grant 已清除");
+        } catch (e) {
+          if (window.toast) toast("保存失败:" + (e && e.message ? e.message : e));
+        }
+      };
+    }
+
     if (start) {
       start.onclick = async () => {
         const listen = (document.getElementById("ed-proxy-listen") || {}).value || "";

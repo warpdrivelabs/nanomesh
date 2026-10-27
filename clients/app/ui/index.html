@@ -220,10 +220,10 @@
   <div class="resize-handle rh-br" data-resize="SouthEast"></div>
 
   <div class="workspace">
-    <!-- 活动栏：消息 / 实体 / 智能体 / 大模型 / 模型代理 / 频道 -->
+    <!-- 活动栏：消息 / 实体 / 智能体工作台 / 大模型 / 模型代理 / 频道 -->
     <div class="activitybar">
       <div class="act active" id="act-im" data-act="showPanel" data-panel="im" title="即时通讯"><span class="ico" data-ico="chat"></span></div>
-      <div class="act" id="act-agents" data-act="showPanel" data-panel="agents" title="智能体"><span class="ico" data-ico="agent"></span></div>
+      <div class="act" id="act-cmx" data-act="showPanel" data-panel="cmx" title="智能体工作台"><span class="ico" data-ico="robot"></span></div>
       <div class="act" id="act-entities" data-act="showPanel" data-panel="entities" title="实体目录"><span class="ico" data-ico="contacts"></span></div>
       <div class="act" id="act-models" data-act="showPanel" data-panel="models" title="大模型"><span class="ico" data-ico="llm"></span></div>
       <div class="act" id="act-proxies" data-act="showPanel" data-panel="proxies" title="模型代理"><span class="ico" data-ico="proxy"></span></div>
@@ -258,14 +258,7 @@
         <div class="nodesvc-form entity-form" id="entity-form" style="display:none"></div>
         <div class="entity-list" id="entity-list"></div>
       </div>
-      <div class="panel agents-panel" id="panel-agents">
-        <div class="brand">
-          <span class="uname" data-i18n="panel.agents">智能体</span>
-          <span class="brand-tools"><button type="button" class="brand-refresh" data-act="imRefresh" title="刷新目录"><span class="ico" data-ico="refresh"></span></button></span>
-        </div>
-        <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="agent-search-input" type="text" placeholder="搜索智能体" data-i18n-ph="search.agents" /></div>
-        <div class="im-list" id="agents-list"></div>
-      </div>
+      <!-- 智能体工作台无左侧栏目:点活动栏图标整个工作区交给 cmx-agent(见 main 里的 cmx-stage) -->
       <div class="panel models-panel" id="panel-models">
         <div class="brand">
           <span class="uname">大模型</span>
@@ -346,6 +339,9 @@
         </div>
       </template>
       <div class="conv" id="conv"></div>
+      <!-- 智能体工作台舞台:iframe 常驻此处(重挂 DOM 会整页重载,故显隐而非重建);
+           cmx:workbench 标签活跃时显示并隐藏左侧栏(body.cmx-full),由 js/cmx_agent.js 驱动 -->
+      <div class="cmx-stage" id="cmx-stage" hidden></div>
     </main>
   </div>
   <div class="statusbar" id="statusbar">
@@ -551,6 +547,7 @@
 <script src="js/im_events.js" defer></script>
 <script src="js/im.js" defer></script>
 <script src="js/main.js" defer></script>
+<script src="js/cmx_agent.js" defer></script>
 <script src="js/auth.js" defer></script>
 <script src="js/pairing.js" defer></script>
 <script src="js/devices.js" defer></script>

@@ -27,8 +27,15 @@ nm-proto = { path = "../../../crates/nm-proto" }
 nm-crypto = { path = "../../../crates/nm-crypto" }
 # 云模型共享：复用 OpenAI 兼容 Backend（一模型一身份上线）
 nm-compute = { path = "../../../bin/nm-compute" }
+# 智能体工作台(cmx-agent 库内嵌,零复制零改动,全参数化适配):path 依赖其 app façade。
+# login=off 时构造不调 .auth()(其 CLI serve 同形态);=portal 时调 .auth() 恢复原版登录。
+cmx-agent-app = { path = "../../../../../../cmx-workspace/backend/cmx-agent/crates/cmx-agent-app" }
+tokio-stream = "0.1"  # cmx 工作台 SSE(/api/stream /api/subscribe)
 prost = "0.14"
 tracing = "0.1"
+# 应用日志（换网/重连可观测）：滚动文件 + 控制台；默认 info，RUST_LOG 可覆盖。
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 # 消费方本地 OpenAI 兼容代理（内嵌 axum）
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }

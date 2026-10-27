@@ -296,6 +296,55 @@ fn decode_grant(b64: &str) -> Result<Option<Grant>, String> {
     Ok(Some(g))
 }
 
+// ── per-provider Grant 落盘(聊天直聊与代理共用;「聊个天还得先开代理粘 Grant」的解法)──
+// 存 b64 原文于 <data>/llm_grants/<provider_hex>.grant(0600)。Grant 是对方签发的调用凭证
+// (自带签名/有效期,非本方密钥),明文落盘可接受;删除=撤回本机留存。
+
+fn grants_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = crate::data_dir(app)?.join("llm_grants");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+/// 落盘保存(b64 原文);空串=删除。
+pub(crate) fn save_grant_b64(app: &AppHandle, provider_hex: &str, b64: &str) -> Result<(), String> {
+    let p = grants_dir(app)?.join(format!("{provider_hex}.grant"));
+    let s = b64.trim();
+    if s.is_empty() {
+        let _ = std::fs::remove_file(&p);
+        return Ok(());
+    }
+    decode_grant(s)?; // 先验格式,坏的不落盘
+    std::fs::write(&p, s).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+/// 读盘解析(无文件/坏文件=None)。
+pub(crate) fn load_grant(app: &AppHandle, provider_hex: &str) -> Option<Grant> {
+    let p = grants_dir(app).ok()?.join(format!("{provider_hex}.grant"));
+    let b64 = std::fs::read_to_string(p).ok()?;
+    decode_grant(&b64).ok().flatten()
+}
+
+/// 保存/删除某 provider 的 Grant(UI 直存,不必开代理)。返回当前是否已存。
+#[tauri::command]
+pub(crate) async fn llm_grant_save(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    provider_id: String,
+    grant_b64: String,
+) -> Result<bool, String> {
+    let _ = vk_of(&state)?;
+    let provider_hex = hex(&parse_id(&provider_id)?);
+    save_grant_b64(&app, &provider_hex, &grant_b64)?;
+    Ok(!grant_b64.trim().is_empty())
+}
+
 async fn pick_listen(preferred: &str) -> Result<(SocketAddr, Option<tokio::net::TcpListener>), String> {
     if !preferred.trim().is_empty() {
         let addr = preferred
@@ -603,7 +652,14 @@ pub(crate) async fn llm_proxy_start(
         }
     }
 
-    let grant = decode_grant(&args.grant_b64)?;
+    // Grant:粘了 → 验格式并**落盘**(以后聊天/重开代理都免再粘);没粘 → 读盘上留存的。
+    let grant = match decode_grant(&args.grant_b64)? {
+        Some(g) => {
+            let _ = save_grant_b64(&app, &provider_hex, args.grant_b64.trim());
+            Some(g)
+        }
+        None => load_grant(&app, &provider_hex),
+    };
     let (addr, held) = pick_listen(&args.listen).await?;
     let listen = addr.to_string();
     let local_token = if args.local_token.trim().is_empty() {

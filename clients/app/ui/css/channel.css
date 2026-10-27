@@ -10,12 +10,18 @@
 
 /* Hero */
 .chn-hero { flex: 0 0 auto; border-bottom: 1px solid var(--border); background: var(--panel); }
+/* 高度不变；图居中，四周空白用同一图平铺填充。 */
 .chn-cover {
   height: clamp(56px, 7vw, 88px); position: relative; overflow: hidden;
-  background: var(--panel2);
+  background-color: var(--panel2);
+  background-repeat: repeat;
+  background-position: center center;
+  background-size: auto;
 }
-.chn-cover img {
-  width: 100%; height: 100%; object-fit: cover; display: block;
+.chn-cover--tiled {
+  background-repeat: repeat;
+  background-position: center center;
+  background-size: auto;
 }
 .chn-cover--tint::after {
   content: ""; position: absolute; inset: 0;

@@ -1,8 +1,8 @@
 use tauri::Manager;
 
 use crate::{
-    AppState, auth_commands, connection, devices, directory, identity, llm_chat, llm_proxy,
-    llm_share, local_store, media, pairing, registry, social,
+    AppState, auth_commands, cmx_host, connection, devices, directory, identity, llm_chat,
+    llm_proxy, llm_share, local_store, media, pairing, registry, social,
 };
 
 #[cfg(desktop)]
@@ -12,6 +12,35 @@ use crate::tray;
 #[tauri::command]
 fn platform() -> &'static str {
     std::env::consts::OS // "macos" | "windows" | "linux"
+}
+
+/// 非阻塞日志 worker 守卫：须活到进程结束，否则缓冲日志不落盘。进全局，随进程存活。
+static TRACING_GUARD: std::sync::OnceLock<tracing_appender::non_blocking::WorkerGuard> =
+    std::sync::OnceLock::new();
+
+/// 初始化应用日志：滚动到 `app_data_dir/logs/app.log.<date>` + 控制台（终端启动可见）。
+/// 默认 `info`，并把换网/重连相关 target 调到 debug；`RUST_LOG` 环境变量可整体覆盖。
+/// 这样换网后"卡在连 relay / pkarr 解析 / online"哪一层，日志里一目了然（此前 app 根本没装
+/// subscriber，nm-transport/nm-client 的 tracing 日志全被丢弃，无从排障）。
+fn init_tracing(app: &tauri::AppHandle) {
+    use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+    let Ok(dir) = crate::data_dir(app) else { return };
+    let logs = dir.join("logs");
+    if std::fs::create_dir_all(&logs).is_err() {
+        return;
+    }
+    let file = tracing_appender::rolling::daily(&logs, "app.log");
+    let (nb, guard) = tracing_appender::non_blocking(file);
+    let _ = TRACING_GUARD.set(guard);
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("info,nmspace_app_lib=debug,nm_client=debug,nm_transport=debug,iroh=warn")
+    });
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt::layer().with_writer(nb).with_ansi(false))
+        .with(fmt::layer().with_writer(std::io::stderr))
+        .try_init();
+    tracing::info!("nmspace app 日志已启动 → {}", logs.display());
 }
 
 pub(crate) fn run() {
@@ -32,6 +61,7 @@ pub(crate) fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(AppState::default())
         .setup(|_app| {
+            init_tracing(_app.handle());
             // 系统交通灯改由标题栏右侧的红黄绿按钮承担，各平台都关掉原生装饰。
             if let Some(w) = _app.get_webview_window("main") {
                 let _ = w.set_decorations(false);
@@ -39,6 +69,25 @@ pub(crate) fn run() {
             }
             #[cfg(desktop)]
             tray::setup(_app.handle())?;
+            // 云模型纳管:app 启动即收养上个生命周期遗留的 gatewayd 孤儿(pidfile+命令行指纹),
+            // UI 第一屏即见真实在线态;不需 VK。见 llm_share::adopt_on_boot。
+            {
+                let apph = _app.handle().clone();
+                tauri::async_runtime::spawn(llm_share::adopt_on_boot(apph));
+            }
+            // 智能体工作台:配置 autostart=true 时 app 启动即拉起(否则点标签懒启动)。
+            {
+                let apph = _app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let cfg = cmx_host::load_cfg(&apph);
+                    if cfg.enabled && cfg.autostart {
+                        let st = apph.state::<AppState>();
+                        if let Err(e) = cmx_host::cmx_start(apph.clone(), st).await {
+                            tracing::warn!("cmx workbench autostart failed: {e}");
+                        }
+                    }
+                });
+            }
             // 换网重连驱动（P1 入站主动重连）：建换网信号通道，存入 AppState 供哨兵发信号，
             // 启动长驻驱动任务收信号后主动重连。见 docs/NETWORK_ROAMING_RECOVERY_DESIGN.md §5.5。
             {
@@ -143,8 +192,14 @@ pub(crate) fn run() {
             llm_proxy::llm_proxy_update,
             llm_proxy::llm_proxy_clear_stats,
             llm_proxy::llm_proxy_probe,
+            llm_proxy::llm_grant_save,
             llm_chat::llm_chat_stream,
             llm_chat::llm_chat_cancel,
+            cmx_host::cmx_start,
+            cmx_host::cmx_status,
+            cmx_host::cmx_restart,
+            cmx_host::cmx_cfg_get,
+            cmx_host::cmx_cfg_set,
             auth_commands::auth_status,
             auth_commands::setup_master,
             auth_commands::unlock,

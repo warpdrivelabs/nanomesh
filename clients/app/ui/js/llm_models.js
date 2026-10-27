@@ -5,6 +5,9 @@
   let SEL = null; // localId or "r:"+entityId
   const FOLDED = new Set();
   let monTimer = null;
+  // 模型头像：档案里存内容寻址引用（b3:<hash>，与人/群头像同一套），展示前需解析成 data:URI。
+  const AV_URI = new Map(); // "b3:<hash>" -> data:URI
+  const AV_MISS = new Set(); // 已尝试且未取到的引用（不每次重绘都重走磁盘/网络）
 
   function ensureCss() {
     if (document.getElementById("llm-models-css")) return;
@@ -41,6 +44,10 @@
 .llm-base-row{display:flex;gap:8px;align-items:flex-end}
 .llm-base-row label{flex:1;min-width:0}
 .llm-base-row .ns-btn{flex:0 0 auto;height:34px}
+.llm-av-row{display:flex;align-items:center;gap:10px}
+.llm-av-prev{flex:0 0 auto;display:block;line-height:0}
+.llm-av-ops{display:flex;gap:6px;flex:0 0 auto}
+.llm-av-ops .ns-btn{height:30px;padding:0 10px}
 `;
     document.head.appendChild(st);
   }
@@ -76,6 +83,39 @@
 
   function find(id) {
     return CACHE.find((x) => x.localId === id) || null;
+  }
+
+  // 可直接交给 faceHtml 的头像值：内联 data:URI 原样用，b3: 引用查已解析缓存（未解析则空=回退首字）。
+  function avatarHint(m) {
+    const a = (m && m.avatar) || "";
+    if (!a) return "";
+    if (typeof Profile === "undefined" || !Profile.isRef) return a;
+    return Profile.isRef(a) ? AV_URI.get(a) || "" : a;
+  }
+
+  // 批量解析档案里的头像引用（命中 Profile 的 avCache/本地磁盘时零网络）。返回是否有新图。
+  async function resolveAvatars() {
+    if (typeof Profile === "undefined" || !Profile.resolveAvatar) return false;
+    const todo = [];
+    CACHE.forEach((m) => {
+      const a = m && m.avatar;
+      if (!a || !Profile.isRef(a) || AV_URI.has(a) || AV_MISS.has(a)) return;
+      todo.push(m);
+    });
+    if (!todo.length) return false;
+    let changed = false;
+    await Promise.all(
+      todo.map(async (m) => {
+        const uri = await Profile.resolveAvatar(m.avatar, m.homeNode || "");
+        if (uri) {
+          AV_URI.set(m.avatar, uri);
+          changed = true;
+        } else {
+          AV_MISS.add(m.avatar);
+        }
+      })
+    );
+    return changed;
   }
 
   function statusLabel(m) {
@@ -120,6 +160,7 @@
     if (!box) return;
     const q = ((document.getElementById("llm-search") || {}).value || "").trim().toLowerCase();
     await load();
+    await resolveAvatars();
 
     const localIds = new Set(
       CACHE.map((m) => (m.entityId || "").toLowerCase()).filter(Boolean)
@@ -148,7 +189,7 @@
       .map((m) => {
         const face =
           typeof Profile !== "undefined" && Profile.faceHtml
-            ? Profile.faceHtml(m.entityId || m.localId, m.displayName, 40, "", m.avatar)
+            ? Profile.faceHtml(m.entityId || m.localId, m.displayName, 40, "", avatarHint(m))
             : `<span class="av">${esc((m.displayName || "?")[0])}</span>`;
         const on = SEL === m.localId ? " on" : "";
         return `<div class="im-item${on}" data-kind="local" data-id="${esc(m.localId)}" data-eid="${esc(m.entityId || "")}" title="${esc(statusLabel(m))}">
@@ -433,9 +474,18 @@
       conv.innerHTML = `<div class="im-center"><div class="txt" style="color:var(--muted)">模型不存在或已删除</div></div>`;
       return;
     }
+    const faceHint = avatarHint(m);
+    // 头像引用尚未解析（首次打开）→ 解析后重绘本页；解析成功会写 AV_URI，故不会自激循环。
+    if (!faceHint && m.avatar) {
+      resolveAvatars().then((changed) => {
+        if (changed && window.Tabs && Tabs.active && Tabs.active() === "llm:" + localId) {
+          renderView(localId);
+        }
+      });
+    }
     const face =
       typeof Profile !== "undefined" && Profile.faceHtml
-        ? Profile.faceHtml(m.entityId || m.localId, m.displayName, 72, "", m.avatar)
+        ? Profile.faceHtml(m.entityId || m.localId, m.displayName, 72, "", faceHint)
         : `<div class="ed-avatar" style="background:var(--accent-soft);color:var(--aqua)">${esc((m.displayName || "?")[0])}</div>`;
     const online = !!m.online;
 
@@ -601,6 +651,17 @@
           <label>显示名称
             <input class="ns-inp" id="llm-f-name" value="${esc((m && m.displayName) || "")}" placeholder="对端目录里显示的名字" />
           </label>
+          <label>模型头像
+            <div class="llm-av-row">
+              <span class="llm-av-prev" id="llm-f-av-prev"></span>
+              <span class="llm-av-ops">
+                <button type="button" class="ns-btn" id="llm-f-av-pick">选择图片</button>
+                <button type="button" class="ns-btn" id="llm-f-av-clear">移除</button>
+              </span>
+            </div>
+            <input type="file" id="llm-f-av-file" accept="image/*" hidden />
+            <span class="llm-hint">正方形最佳；保存后随档案发布到对端目录（与人/群头像同一套内容寻址存储）</span>
+          </label>
           <label>API Key${m && m.hasKey ? "（已保存，留空不改）" : ""}
             <input class="ns-inp" id="llm-f-key" type="password" placeholder="${m && m.hasKey ? "••••••••" : "sk-…"}" autocomplete="off" />
             <span class="llm-hint" id="llm-f-key-hint"></span>
@@ -660,6 +721,7 @@
               </label>
             </div>
             <label class="llm-check"><input type="checkbox" id="llm-f-grant" ${!m || m.requireGrant !== false ? "checked" : ""} /> 需要 Grant 才能调用</label>
+            <label class="llm-check"><input type="checkbox" id="llm-f-auto" ${m && m.autostart ? "checked" : ""} /> 解锁后自动上线(期望态自启)</label>
           </div>
         </div>
         <div class="detail-actions" style="margin-top:20px">
@@ -686,6 +748,76 @@
     let nameTouched = !!(m && m.displayName);
     let baseManual = false;
     let applying = false;
+
+    // ── 模型头像：null=未改动 / ""=移除 / 字符串=新引用(b3: 或内联 data:URI) ──
+    let pendingAvatar = null;
+    let avCur = avatarHint(m || {}); // 当前预览（可直接显示的 data:URI）
+    const avPrev = document.getElementById("llm-f-av-prev");
+    const avFile = document.getElementById("llm-f-av-file");
+    function paintAv() {
+      if (!avPrev) return;
+      const src = pendingAvatar === "" ? "" : pendingAvatar || avCur;
+      const name = (nameEl && nameEl.value.trim()) || (m && (m.displayName || m.model)) || "?";
+      avPrev.innerHTML =
+        typeof Profile !== "undefined" && Profile.avatarHtml
+          ? Profile.avatarHtml(src, name.slice(0, 1), 56)
+          : `<span class="av" style="width:56px;height:56px;flex:0 0 56px">${esc(name.slice(0, 1))}</span>`;
+    }
+    // 已有档案且头像为内容寻址引用 → 解析后补画预览。
+    if (m && m.avatar && !avCur && typeof Profile !== "undefined" && Profile.resolveAvatar) {
+      Profile.resolveAvatar(m.avatar, m.homeNode || "").then((uri) => {
+        if (!uri || pendingAvatar !== null) return;
+        avCur = uri;
+        paintAv();
+      });
+    }
+    paintAv();
+    const avPick = document.getElementById("llm-f-av-pick");
+    if (avPick && avFile) avPick.onclick = () => avFile.click();
+    if (avFile) {
+      avFile.onchange = async () => {
+        const f = avFile.files && avFile.files[0];
+        avFile.value = "";
+        if (!f || typeof Profile === "undefined" || !Profile.fileToAvatar) return;
+        try {
+          let data = await Profile.fileToAvatar(f, 256, 0.85);
+          if (!data) return;
+          // 超限则降质重编码（与群/个人头像一致）
+          if (data.length > 200 * 1024) {
+            data = await new Promise((resolve, reject) => {
+              const img = new Image();
+              img.onload = () => {
+                const c = document.createElement("canvas");
+                c.width = 192;
+                c.height = 192;
+                c.getContext("2d").drawImage(img, 0, 0, 192, 192);
+                resolve(c.toDataURL("image/jpeg", 0.72));
+              };
+              img.onerror = () => reject(new Error("重编码失败"));
+              img.src = data;
+            });
+          }
+          if (data.length > 200 * 1024) {
+            if (window.toast) toast("图片太大，请换更简单的图");
+            return;
+          }
+          let ref = Profile.putBlob ? await Profile.putBlob(data) : null;
+          pendingAvatar = ref || data;
+          avCur = data; // 预览立刻生效（引用需等 resolve 才能显示）
+          paintAv();
+        } catch (e) {
+          if (window.toast) toast("设置头像失败：" + (e && e.message ? e.message : e));
+        }
+      };
+    }
+    const avClear = document.getElementById("llm-f-av-clear");
+    if (avClear) {
+      avClear.onclick = () => {
+        pendingAvatar = "";
+        avCur = "";
+        paintAv();
+      };
+    }
 
     if (nameEl) {
       nameEl.addEventListener("input", () => {
@@ -880,9 +1012,10 @@
           const el = document.getElementById("llm-f-grant");
           return el ? !!el.checked : true;
         })(),
+        autostart: !!((document.getElementById("llm-f-auto") || {}).checked),
         concurrency: Number((document.getElementById("llm-f-conc") || {}).value) || 4,
         maxContext: Number((document.getElementById("llm-f-ctx") || {}).value) || 0,
-        avatar: (m && m.avatar) || "",
+        avatar: pendingAvatar === null ? (m && m.avatar) || "" : pendingAvatar,
         links: (m && m.links) || [],
         locale: (m && m.locale) || "",
         relayUrls: (m && m.relayUrls) || (homeDef && homeDef.relayUrls) || [],
@@ -940,6 +1073,8 @@
     const k = (eid || "").toLowerCase();
     return CACHE.find((m) => (m.entityId || "").toLowerCase() === k) || null;
   };
+  // 会话头/列表用：把档案里的头像（可能是 b3: 引用）换成可直接显示的值。
+  window.LlmModels.avatarOf = (m) => avatarHint(m);
   document.addEventListener("DOMContentLoaded", bind);
   if (document.readyState !== "loading") bind();
 

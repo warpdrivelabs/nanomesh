@@ -53,6 +53,8 @@ pub(crate) struct AppState {
     pub(crate) llm_proxies: crate::llm_proxy::LlmProxies,
     /// 聊天直聊模型：进行中的流(streamId → 取消句柄)。
     pub(crate) llm_chats: crate::llm_chat::LlmChats,
+    /// 智能体工作台(cmx-agent 库内嵌)宿主。
+    pub(crate) cmx: crate::cmx_host::CmxHost,
 }
 
 pub(crate) fn hex(b: &[u8]) -> String {

@@ -1,7 +1,6 @@
 function renderPanels() {
   renderConversations();
   renderEntities();
-  renderAgents();
   renderModels();
   paintActUnread();
   if (window.Tray) Tray.sync();
@@ -12,8 +11,6 @@ function bindPanelUI() {
   if (s1 && !s1._bound) { s1._bound = true; s1.addEventListener("input", renderConversations); }
   const s2 = document.getElementById("entity-search-input");
   if (s2 && !s2._bound) { s2._bound = true; s2.addEventListener("input", renderEntities); }
-  const s3 = document.getElementById("agent-search-input");
-  if (s3 && !s3._bound) { s3._bound = true; s3.addEventListener("input", renderAgents); }
   const s4 = document.getElementById("llm-search");
   if (s4 && !s4._bound) { s4._bound = true; s4.addEventListener("input", renderModels); }
   const add = document.getElementById("ent-add-btn");
@@ -96,26 +93,6 @@ function renderEntities() {
   );
 }
 
-// ── 🤖 智能体：目录里的 agent.* 实体，点击直接开聊（复用联系人会话管线）──
-function renderAgents() {
-  const box = document.getElementById("agents-list");
-  if (!box) return;
-  const q = (document.getElementById("agent-search-input").value || "").trim().toLowerCase();
-  const list = mergedEntities().filter((c) =>
-    c.id !== MY_ID && kindType(c.kind) === "agent" &&
-    (!q || (c.name || "").toLowerCase().includes(q) || (c.id || "").includes(q) || (c.handle || "").toLowerCase().includes(q)));
-  if (!list.length) {
-    const hint = window.t ? t("list.noAgent") : "未发现智能体。在节点上运行 nm-agentd --serve，刷新后即可在此对话。";
-    box.innerHTML = `<div class="im-empty">${hint}</div>`;
-    return;
-  }
-  box.innerHTML = list.map((c) => {
-    const sub = c.model ? escapeHtml(c.model) : (window.t ? t("agent.sub") : "AI 助手");
-    return itemHtml(c, sub, UNREAD[c.id] || 0, ACTIVE, { inlineHandle: false });
-  }).join("");
-  wireItems(box, selectContact);
-}
-
 // ── 大模型列表：由 llm_models.js 渲染（本地 / 远端分组）──
 function renderModels() {
   if (window.renderLlmModelList) window.renderLlmModelList();
@@ -188,7 +165,7 @@ function peerOf(id) {
   if (last && last.channel) return { id, name: "频道", kind: "channel", avatar: "" };
   // 本地大模型会话:会话头显示模型名(模型不在 roster/目录,entityById 查不到)。
   const lm = window.LlmModels && LlmModels.byEntity ? LlmModels.byEntity(id) : null;
-  if (lm) return { id, name: lm.displayName || lm.model || "本地模型", kind: "model.llm", avatar: lm.avatar || "" };
+  if (lm) return { id, name: lm.displayName || lm.model || "本地模型", kind: "model.llm", avatar: (window.LlmModels && LlmModels.avatarOf ? LlmModels.avatarOf(lm) : lm.avatar) || "" };
   return entityById(id) || { id, name: "", kind: "" };
 }
 function wireItems(box, handler) {
@@ -235,7 +212,7 @@ function renderEntityDetail(id) {
         <div class="detail-row" style="font-size:11px;color:var(--muted)"><span class="k"></span><span class="v">进程内 · 使用当前登录身份转发</span></div>
         <div class="detail-row"><span class="k">监听</span><span class="v"><input id="ed-proxy-listen" class="ns-inp" style="width:100%" placeholder="空=自动 18081+" value=""></span></div>
         <div class="detail-row"><span class="k">Token</span><span class="v"><input id="ed-proxy-token" class="ns-inp" style="width:100%" value="nm-local-token"></span></div>
-        <div class="detail-row"><span class="k">Grant</span><span class="v"><input id="ed-proxy-grant" class="ns-inp" style="width:100%" placeholder="可选 base64 Grant"></span></div>
+        <div class="detail-row"><span class="k">Grant</span><span class="v" style="display:flex;gap:6px"><input id="ed-proxy-grant" class="ns-inp" style="flex:1" placeholder="可选 base64 Grant(存后聊天/代理共用)"><button type="button" class="ns-btn" id="ed-grant-save" title="保存 Grant(聊天直聊与代理共用,无需开代理)">存</button></span></div>
         <div class="detail-actions" style="padding:8px 0">
           <button type="button" class="ns-btn ns-ico ns-primary" id="ed-proxy-start" title="启动代理">${nmIcon("play")}</button>
           <button type="button" class="ns-btn ns-ico" id="ed-proxy-stop" style="display:none" title="停止代理">${nmIcon("stop")}</button>

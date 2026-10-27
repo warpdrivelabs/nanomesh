@@ -276,6 +276,8 @@
     if (window.imOnTabChange) imOnTabChange();
     if (window.Groups && Groups.syncSelection) Groups.syncSelection();
     if (window.Channels && Channels.syncSelection) Channels.syncSelection();
+    // 全区视图(如智能体工作台舞台)随活跃 tab 显隐:每次切换/关闭广播一次(cmx_agent.js 监听)。
+    document.dispatchEvent(new CustomEvent("nm-tab-changed", { detail: { key: ACTIVE } }));
   }
 
   showEmpty();

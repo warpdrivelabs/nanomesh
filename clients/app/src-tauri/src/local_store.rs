@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
-use tauri::AppHandle;
+use tauri::{AppHandle, State};
 
-use crate::data_dir;
+use crate::{AppState, auth, data_dir, load_identity_seed, vk_of};
 
 // ── UI 状态持久化 KV：前端 localStorage 的耐久镜像，跨 webview 源/重建不丢（存 app_data_dir/ui-state.json）。 ──
 #[tauri::command]
@@ -217,9 +217,84 @@ pub(crate) fn server_save(app: AppHandle, data: String) -> Result<(), String> {
     tx.commit().map_err(|e| e.to_string())
 }
 
-/// 本机资料（按公钥）。返回 {公钥: 资料}。
+/// 扩展属性落盘字段：明文 `extAttrs` 仅在内存/前端；库内写 `extAttrsEnc`(用户身份种子密封的 base64)。
+const EXT_ATTRS: &str = "extAttrs";
+const EXT_ATTRS_ENC: &str = "extAttrsEnc";
+
+fn b64_enc(b: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(b)
+}
+fn b64_dec(s: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(s.as_bytes())
+        .map_err(|e| format!("extAttrsEnc base64: {e}"))
+}
+
+/// 用该用户身份种子密封扩展属性 JSON；失败则原样返回错误。
+fn seal_ext_attrs(seed: &[u8; 32], attrs: &Value) -> Result<String, String> {
+    let pt = serde_json::to_vec(attrs).map_err(|e| e.to_string())?;
+    let ct = auth::encrypt_blob(seed, &pt)?;
+    Ok(b64_enc(&ct))
+}
+
+/// 解密 `extAttrsEnc` → JSON Value（数组）；损坏/密钥不对则报错。
+fn open_ext_attrs(seed: &[u8; 32], enc_b64: &str) -> Result<Value, String> {
+    let ct = b64_dec(enc_b64)?;
+    let pt = auth::decrypt_blob(seed, &ct)?;
+    serde_json::from_slice(&pt).map_err(|e| format!("extAttrs 明文损坏: {e}"))
+}
+
+/// 读出时：有密文则解密成 `extAttrs` 交给前端；密文字段不回传。
+/// 兼容旧版明文 `extAttrs`（无密文时原样返回，下次 save 会升密）。
+fn profile_body_for_ui(app: &AppHandle, vk: &[u8; 32], id: &str, mut body: Value) -> Value {
+    let Some(obj) = body.as_object_mut() else {
+        return body;
+    };
+    if let Some(enc) = obj.remove(EXT_ATTRS_ENC) {
+        // 密文优先；解密成功则覆盖任何残留明文。
+        if let Some(s) = enc.as_str() {
+            match load_identity_seed(app, vk, id).and_then(|seed| open_ext_attrs(&seed, s)) {
+                Ok(attrs) => {
+                    obj.insert(EXT_ATTRS.to_string(), attrs);
+                }
+                Err(e) => {
+                    tracing::warn!(id = %id, "扩展属性解密失败: {e}");
+                    obj.remove(EXT_ATTRS); // 避免误把过期明文当有效
+                }
+            }
+        }
+    }
+    // 无密文、仅有明文：留给 UI；下次 profile_save 会封存。
+    body
+}
+
+/// 写入前：把明文 `extAttrs` 封成 `extAttrsEnc`（用户身份种子），库内不留明文。
+fn profile_body_for_disk(app: &AppHandle, vk: &[u8; 32], id: &str, mut body: Value) -> Result<Value, String> {
+    let Some(obj) = body.as_object_mut() else {
+        return Ok(body);
+    };
+    // 先清旧密文，再按本次明文重封（空数组 / null / 缺省 → 删除密文，表示无扩展属性）。
+    obj.remove(EXT_ATTRS_ENC);
+    let attrs = obj.remove(EXT_ATTRS);
+    match attrs {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(a)) if a.is_empty() => {}
+        Some(Value::Array(a)) => {
+            let seed = load_identity_seed(app, vk, id)?;
+            let enc = seal_ext_attrs(&seed, &Value::Array(a))?;
+            obj.insert(EXT_ATTRS_ENC.to_string(), Value::String(enc));
+        }
+        Some(_) => return Err("extAttrs 须为数组".into()),
+    }
+    Ok(body)
+}
+
+/// 本机资料（按公钥）。返回 {公钥: 资料}；扩展属性已用对应用户种子解密为明文 `extAttrs`。
 #[tauri::command]
-pub(crate) fn profile_load(app: AppHandle) -> Result<String, String> {
+pub(crate) fn profile_load(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+    let vk = vk_of(&state)?; // 未解锁不能解扩展属性
     let conn = open_catalog(&app)?;
     let mut stmt = conn
         .prepare("SELECT id, body FROM profile")
@@ -231,23 +306,31 @@ pub(crate) fn profile_load(app: AppHandle) -> Result<String, String> {
     for row in rows {
         let (id, body) = row.map_err(|e| e.to_string())?;
         if let Ok(v) = serde_json::from_str::<Value>(&body) {
-            map.insert(id, v);
+            map.insert(id.clone(), profile_body_for_ui(&app, &vk, &id, v));
         }
     }
     serde_json::to_string(&Value::Object(map)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub(crate) fn profile_save(app: AppHandle, id: String, data: String) -> Result<(), String> {
+pub(crate) fn profile_save(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    data: String,
+) -> Result<(), String> {
     if data.len() > 2 * 1024 * 1024 {
         return Err("too_large".into());
     }
     let id = identity_key(&id)?;
-    serde_json::from_str::<Value>(&data).map_err(|_| "bad_json".to_string())?;
+    let vk = vk_of(&state)?;
+    let parsed: Value = serde_json::from_str(&data).map_err(|_| "bad_json".to_string())?;
+    let sealed = profile_body_for_disk(&app, &vk, &id, parsed)?;
+    let out = serde_json::to_string(&sealed).map_err(|e| e.to_string())?;
     let conn = open_catalog(&app)?;
     conn.execute(
         "INSERT OR REPLACE INTO profile(id, body) VALUES (?1, ?2)",
-        rusqlite::params![id, data],
+        rusqlite::params![id, out],
     )
     .map_err(|e| e.to_string())?;
     Ok(())

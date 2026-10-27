@@ -13,16 +13,16 @@ use std::process::{Child, Command, Stdio};
 use nm_compute::METHOD_INFER;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 
 use crate::{AppState, auth, data_dir, hex, pubkey_of_seed, vk_of};
 
-/// 已拉起的 gateway 子进程。
+/// 已拉起的 gateway 子进程。`child=None`=收养的孤儿(app 重启前拉起的进程,无句柄,按 pid 管理)。
 pub(crate) struct Running {
     pub(crate) entity_id: [u8; 32],
     pub(crate) pid: u32,
-    child: Child,
+    child: Option<Child>,
 }
 
 /// local_id → 子进程。
@@ -84,6 +84,9 @@ pub struct ModelShare {
     pub concurrency: u32,
     #[serde(default)]
     pub has_key: bool,
+    /// 期望态自启:解锁后若未在跑则自动上线(app 重启后状态自愈;默认关)。
+    #[serde(default)]
+    pub autostart: bool,
     #[serde(default)]
     pub online: bool,
     /// 运行中进程 PID（仅 list 填充）。
@@ -156,6 +159,105 @@ fn child_alive(child: &mut Child) -> bool {
         Ok(None) => true,
         Ok(Some(_)) | Err(_) => false,
     }
+}
+
+// ── 孤儿纳管(app 崩溃/退出后 gatewayd 仍在跑):pidfile + 命令行指纹收养 ──────────────
+// 收养凭据=「<run>/gateway.pid 里的 pid」+「ps 该 pid 的命令行含本模型唯一 config 全路径」,
+// 双因子杜绝 PID 复用误收养。收养不需要 VK(纯进程检查),app 启动即恢复状态。
+
+fn path_pid(dir: &Path, id: &str) -> PathBuf {
+    runtime_dir(dir, id).join("gateway.pid")
+}
+
+fn write_pidfile(dir: &Path, id: &str, pid: u32) {
+    let p = path_pid(dir, id);
+    let body = json!({ "pid": pid, "startedMs": nm_proto::now_ms() }).to_string();
+    if std::fs::write(&p, body).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+}
+
+fn read_pidfile(dir: &Path, id: &str) -> Option<u32> {
+    let raw = std::fs::read_to_string(path_pid(dir, id)).ok()?;
+    serde_json::from_str::<Value>(&raw).ok()?.get("pid")?.as_u64().map(|p| p as u32)
+}
+
+fn remove_pidfile(dir: &Path, id: &str) {
+    let _ = std::fs::remove_file(path_pid(dir, id));
+}
+
+/// pid 活着**且**命令行含本模型的 config 全路径(身份指纹)才算本尊。
+/// Linux:直读 /proc/PID/cmdline(零子进程,精简环境无 procps 也可用);其余 unix(macOS):BSD ps。
+#[cfg(target_os = "linux")]
+fn pid_is_ours(dir: &Path, id: &str, pid: u32) -> bool {
+    let cfg = runtime_dir(dir, id).join("gateway.toml");
+    match std::fs::read(format!("/proc/{pid}/cmdline")) {
+        Ok(raw) => {
+            let args = String::from_utf8_lossy(&raw).replace('\0', " ");
+            args.contains("nm-llm-gatewayd") && args.contains(&cfg.to_string_lossy().to_string())
+        }
+        Err(_) => false, // 进程不存在(或 /proc 不可读)→ 不是本尊
+    }
+}
+#[cfg(all(unix, not(target_os = "linux")))]
+fn pid_is_ours(dir: &Path, id: &str, pid: u32) -> bool {
+    let cfg = runtime_dir(dir, id).join("gateway.toml");
+    let out = Command::new("ps").args(["-p", &pid.to_string(), "-o", "args="]).output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let args = String::from_utf8_lossy(&o.stdout);
+            args.contains("nm-llm-gatewayd") && args.contains(&cfg.to_string_lossy().to_string())
+        }
+        _ => false,
+    }
+}
+#[cfg(not(unix))]
+fn pid_is_ours(_dir: &Path, _id: &str, _pid: u32) -> bool {
+    false // Windows 暂不收养(桌面当前只发 mac/Linux);显示未启动,可手动重新上线
+}
+
+/// 收养的孤儿是否仍活(unix kill -0 + 指纹复核;指纹复核防收养期间 pid 被复用)。
+#[cfg(unix)]
+fn orphan_alive(dir: &Path, id: &str, pid: u32) -> bool {
+    pid_is_ours(dir, id, pid)
+}
+#[cfg(not(unix))]
+fn orphan_alive(_dir: &Path, _id: &str, _pid: u32) -> bool {
+    false
+}
+
+/// 扫描全部模型的 pidfile,把仍在跑的孤儿 gatewayd 收回运行表(child=None)。幂等;
+/// 死进程/指纹不符则清陈旧 pidfile。返回新收养的 (local_id, entity_hex) 列表(供发事件)。
+pub(crate) fn adopt_orphans(
+    dir: &Path,
+    map: &mut HashMap<String, Running>,
+) -> Vec<(String, String)> {
+    let mut adopted = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir) else { return adopted };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let Some(id) = name.strip_suffix(".json") else { continue };
+        if map.contains_key(id) {
+            continue; // 已纳管(本次 app 生命周期内 spawn 的)
+        }
+        let Some(pid) = read_pidfile(dir, id) else { continue };
+        if !pid_is_ours(dir, id, pid) {
+            remove_pidfile(dir, id); // 死进程/PID 已被复用 → 清陈旧 pidfile
+            continue;
+        }
+        let Ok(share) = load_share(dir, id) else { continue };
+        let Ok(eid_arr) = crate::parse_id(&share.entity_id) else { continue };
+        map.insert(
+            id.to_string(),
+            Running { entity_id: eid_arr, pid, child: None },
+        );
+        adopted.push((id.to_string(), share.entity_id.clone()));
+    }
+    adopted
 }
 
 /// 解析 nm-llm-gatewayd 可执行文件（与 Qwen/`nm-compute` 同级的独立二进制）。
@@ -348,15 +450,21 @@ fn write_runtime_files(
     Ok((cfg_path, run.join("gateway.log"), key_env))
 }
 
-fn reaping_offline(map: &mut HashMap<String, Running>) -> Vec<String> {
+/// 清扫运行表里的死进程(spawn 的查句柄;收养的查 pid+指纹)。`dir` 供收养项指纹复核与清 pidfile。
+fn reaping_offline_at(dir: &Path, map: &mut HashMap<String, Running>) -> Vec<String> {
     let mut dead = Vec::new();
     for (id, r) in map.iter_mut() {
-        if !child_alive(&mut r.child) {
+        let alive = match r.child.as_mut() {
+            Some(c) => child_alive(c),
+            None => orphan_alive(dir, id, r.pid),
+        };
+        if !alive {
             dead.push(id.clone());
         }
     }
     for id in &dead {
         map.remove(id);
+        remove_pidfile(dir, id);
     }
     dead
 }
@@ -370,7 +478,14 @@ pub(crate) async fn llm_model_list(
     let _ = vk_of(&state)?;
     let dir = models_dir(&app)?;
     let mut running = state.llm_runtime.lock().await;
-    let dead = reaping_offline(&mut running);
+    // 先收养孤儿(app 重启前拉起的 gatewayd),再清死进程——重启后列表立即反映真实在线态。
+    for (lid, eid) in adopt_orphans(&dir, &mut running) {
+        let _ = app.emit(
+            "core://event",
+            json!({ "type": "llm_model", "event": "online", "localId": lid, "entityId": eid, "adopted": true }),
+        );
+    }
+    let dead = reaping_offline_at(&dir, &mut running);
     for id in dead {
         let _ = app.emit(
             "core://event",
@@ -514,9 +629,11 @@ pub(crate) async fn llm_model_online(
 
     {
         let mut g = state.llm_runtime.lock().await;
-        reaping_offline(&mut g);
+        // 先收养再判重:app 重启后旧 gatewayd 仍在跑时,此处把它纳回而**不是**同身份双开。
+        let _ = adopt_orphans(&dir, &mut g);
+        reaping_offline_at(&dir, &mut g);
         if g.contains_key(&local_id) {
-            return Err("该模型进程已在运行".into());
+            return Err("该模型进程已在运行(已重新纳管)".into());
         }
     }
 
@@ -562,12 +679,14 @@ pub(crate) async fn llm_model_online(
         ));
     }
 
+    // pidfile:app 崩溃/退出后据此收养(见 adopt_orphans)。
+    write_pidfile(&dir, &local_id, pid);
     state.llm_runtime.lock().await.insert(
         local_id.clone(),
         Running {
             entity_id,
             pid,
-            child,
+            child: Some(child),
         },
     );
 
@@ -607,7 +726,8 @@ pub(crate) async fn llm_model_runtime(
     let mut pid: Option<u32> = None;
     {
         let mut g = state.llm_runtime.lock().await;
-        reaping_offline(&mut g);
+        let _ = adopt_orphans(&dir, &mut g);
+        reaping_offline_at(&dir, &mut g);
         if let Some(r) = g.get(&local_id) {
             online = true;
             pid = Some(r.pid);
@@ -649,10 +769,32 @@ pub(crate) async fn llm_model_offline(
     local_id: String,
 ) -> Result<(), String> {
     let _ = vk_of(&state)?;
+    let dir = models_dir(&app)?;
     if let Some(mut r) = state.llm_runtime.lock().await.remove(&local_id) {
         let eid = hex(&r.entity_id);
-        let _ = r.child.kill();
-        let _ = r.child.wait();
+        match r.child.as_mut() {
+            Some(c) => {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+            None => {
+                // 收养的孤儿:无句柄,按 pid 停(TERM → 等 ≤3s → KILL)。unix only(收养亦然)。
+                #[cfg(unix)]
+                {
+                    let _ = Command::new("kill").arg(r.pid.to_string()).status();
+                    for _ in 0..30 {
+                        if !orphan_alive(&dir, &local_id, r.pid) {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    if orphan_alive(&dir, &local_id, r.pid) {
+                        let _ = Command::new("kill").args(["-9", &r.pid.to_string()]).status();
+                    }
+                }
+            }
+        }
+        remove_pidfile(&dir, &local_id);
         let _ = app.emit(
             "core://event",
             json!({
@@ -664,6 +806,50 @@ pub(crate) async fn llm_model_offline(
         );
     }
     Ok(())
+}
+
+/// app 启动即收养孤儿(不需 VK,纯进程检查)——重启后 UI 第一屏即反映真实在线态。
+pub(crate) async fn adopt_on_boot(app: AppHandle) {
+    let Ok(dir) = models_dir(&app) else { return };
+    let state = app.state::<AppState>();
+    let mut g = state.llm_runtime.lock().await;
+    for (lid, eid) in adopt_orphans(&dir, &mut g) {
+        tracing::info!(local_id = %lid, "adopted orphan nm-llm-gatewayd");
+        let _ = app.emit(
+            "core://event",
+            json!({ "type": "llm_model", "event": "online", "localId": lid, "entityId": eid, "adopted": true }),
+        );
+    }
+}
+
+/// 解锁后期望态自启:autostart=true 且未在跑的模型自动上线(上线需 VK 解 Key,故挂解锁后)。
+pub(crate) async fn autostart_models(app: AppHandle) {
+    let Ok(dir) = models_dir(&app) else { return };
+    let state = app.state::<AppState>();
+    // 先收养+清死,拿到"确实没在跑"的集合。
+    let pending: Vec<String> = {
+        let mut g = state.llm_runtime.lock().await;
+        let _ = adopt_orphans(&dir, &mut g);
+        reaping_offline_at(&dir, &mut g);
+        let Ok(rd) = std::fs::read_dir(&dir) else { return };
+        rd.flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                let id = name.strip_suffix(".json")?.to_string();
+                if g.contains_key(&id) {
+                    return None;
+                }
+                let share = load_share(&dir, &id).ok()?;
+                (share.autostart && share.has_key).then_some(id)
+            })
+            .collect()
+    };
+    for id in pending {
+        match llm_model_online(app.clone(), app.state::<AppState>(), id.clone()).await {
+            Ok(_) => tracing::info!(local_id = %id, "autostart: model online"),
+            Err(e) => tracing::warn!(local_id = %id, "autostart failed: {e}"),
+        }
+    }
 }
 
 /// 用该模型身份签发 Grant（不必进程在线；用 seed 本地签发）。

@@ -6,7 +6,9 @@
   const MEM = {};
   const STATUS_OPTS = [["", "（不设置）"], ["online", "在线"], ["away", "离开"], ["busy", "忙碌"], ["dnd", "勿扰"]];
   const AV_MAX = 200 * 1024; // 缩放后原始图上限（内容寻址，节点侧约 1MiB 硬限）
-  const avCache = new Map(); // "b3:<hash>" -> data:URI（会话内缓存，避免重复 blob_get）
+  const avCache = new Map(); // "b3:<hash>" -> data:URI（内存；磁盘另有 app_data/blobs）
+  // 实体当前头像：id -> { ref, uri }。ref 未变则直接用 uri，不调网络；仅头像变更时重拉并更新。
+  const entityAv = new Map();
   let pendingAvatar = null;  // 模态框内待保存头像：null=未改动 / ""=移除 / data:URI=新图
 
   async function load() {
@@ -16,6 +18,8 @@
       const obj = JSON.parse((await NM.inv("profile_load")) || "{}");
       if (obj && typeof obj === "object") Object.assign(MEM, obj);
     } catch (_) {}
+    // 解锁后资料进内存 → 同步当前用户扩展属性到 Identity.user，供全局随时访问。
+    if (window.Identity && Identity.hydrateUser) Identity.hydrateUser();
     return MEM;
   }
   function get(pk) { if (!pk || !MEM[pk] || typeof MEM[pk] !== "object") return {}; return Object.assign({}, MEM[pk]); }
@@ -23,22 +27,44 @@
     if (!pk) return;
     MEM[pk] = obj;
     if (window.NM) NM.inv("profile_save", { id: pk, data: JSON.stringify(obj) }).catch(() => {});
+    // 当前用户资料变更（含扩展属性）→ 刷新 Identity.user 内存镜像。
+    if (window.Identity && Identity.current && Identity.current() === pk && Identity.hydrateUser) {
+      Identity.hydrateUser(pk);
+    }
+  }
+  /** 某用户扩展属性行（已规范化）；供 Identity.hydrateUser / 编辑器共用。 */
+  function extAttrRows(pk) {
+    return normalizeExtAttrs(get(pk).extAttrs);
   }
   function statusLabel(v) { const o = STATUS_OPTS.find((x) => x[0] === v); return o ? o[1] : v || ""; }
   function isImg(a) { return typeof a === "string" && /^data:image\//.test(a); }
   function isRef(a) { return typeof a === "string" && /^b3:[0-9a-fA-F]{64}$/.test(a); }
 
-  // 某个用户当前能直接显示的头像：本人优先本地原图，其次目录里已解析的 data:URI。
+  // 记下实体头像（展示层与缓存层共用）。
+  function rememberEntityAvatar(id, ref, uri) {
+    if (!id || !isImg(uri)) return;
+    const r = isRef(ref) ? ref : (isImg(ref) ? "" : String(ref || ""));
+    entityAv.set(id, { ref: r || ref || "", uri });
+    if (isRef(ref)) avCache.set(ref, uri);
+  }
+
+  // 某个用户当前能直接显示的头像：本人优先本地原图 → 实体缓存 → hint/目录里的 data:URI。
   function displayAvatar(id, hint) {
     if (id && window.Identity && Identity.current && id === Identity.current()) {
       const own = ownAvatar(id);
       if (isImg(own)) return own;
     }
     if (isImg(hint)) return hint;
+    if (id && entityAv.has(id)) {
+      const hit = entityAv.get(id);
+      // hint 为新 b3: 且与缓存 ref 不同 → 视为已变更，不返回旧图（等 resolve 更新）。
+      if (hit && isImg(hit.uri) && !(isRef(hint) && hint !== hit.ref)) return hit.uri;
+    }
     if (id && typeof window.entityById === "function") {
       const c = entityById(id);
       if (c && isImg(c.avatar)) return c.avatar;
     }
+    if (isRef(hint) && avCache.has(hint)) return avCache.get(hint);
     return "";
   }
 
@@ -237,12 +263,20 @@
     catch (e) { if (window.toast) toast("头像上传失败：" + (e && e.message ? e.message : e)); return null; }
   }
 
-  // 把一个头像引用解析为可直接展示的 data:URI（data:→原样；b3:→缓存/blob_get；其它→空）。
-  async function resolveAvatar(ref, home) {
+  // 把一个头像引用解析为可直接展示的 data:URI。
+  // 顺序：内存 → 本机磁盘(blob_cached，不联网) → blob_get(仅未命中时联网，并写磁盘)。
+  // opts.cacheOnly=true 时不联网；opts.force=true 时跳过内存（仍可用磁盘）。
+  async function resolveAvatar(ref, home, opts) {
+    opts = opts || {};
     if (isImg(ref)) return ref;
     if (!isRef(ref)) return "";
-    if (avCache.has(ref)) return avCache.get(ref);
+    if (!opts.force && avCache.has(ref)) return avCache.get(ref);
     if (!window.NM || !NM.hasTauri || !NM.hasTauri()) return "";
+    try {
+      const disk = await NM.inv("blob_cached", { references: [ref] });
+      if (disk && isImg(disk[0])) { avCache.set(ref, disk[0]); return disk[0]; }
+    } catch (_) {}
+    if (opts.cacheOnly) return "";
     try {
       const uri = await NM.inv("blob_get", { reference: ref, homeNode: home || "" });
       if (isImg(uri)) { avCache.set(ref, uri); return uri; }
@@ -250,12 +284,80 @@
     return "";
   }
 
-  // 批量解析一组联系人的 b3: 头像（就地把 c.avatar 换成 data:URI），完成后回调重渲染。
+  // 批量解析联系人/群/频道头像：
+  // - ref 未变且已有缓存 → 直接套用，零 IO
+  // - 仅对「新 ref / 缓存未命中」批量读盘，再对仍缺的联网 blob_get
+  // - 头像变更（新 b3:）会替换 entityAv 并触发重绘
   async function resolveList(list, onDone) {
-    const pend = Array.isArray(list) ? list.filter((c) => c && isRef(c.avatar)) : [];
-    if (!pend.length) { if (onDone) onDone(); return; }
-    await Promise.all(pend.map(async (c) => { const uri = await resolveAvatar(c.avatar, c.homeNode); if (uri) c.avatar = uri; }));
-    if (onDone) onDone();
+    const rows = Array.isArray(list) ? list.filter((c) => c && c.id) : [];
+    if (!rows.length) { if (onDone) onDone(); return; }
+
+    const needNet = [];
+    const needDisk = [];
+    let applied = false;
+
+    rows.forEach((c) => {
+      const ref = c.avatar;
+      if (isImg(ref)) {
+        rememberEntityAvatar(c.id, "", ref);
+        return;
+      }
+      if (!isRef(ref)) return;
+      const prev = entityAv.get(c.id);
+      // 同 ref 已缓存 → 直接写回对象，不访问磁盘/网络
+      if (prev && prev.ref === ref && isImg(prev.uri)) {
+        c.avatar = prev.uri;
+        applied = true;
+        return;
+      }
+      if (avCache.has(ref)) {
+        const uri = avCache.get(ref);
+        c.avatar = uri;
+        rememberEntityAvatar(c.id, ref, uri);
+        applied = true;
+        return;
+      }
+      needDisk.push(c);
+    });
+
+    if (needDisk.length && window.NM && NM.hasTauri && NM.hasTauri()) {
+      try {
+        const refs = needDisk.map((c) => c.avatar);
+        const uris = await NM.inv("blob_cached", { references: refs });
+        needDisk.forEach((c, i) => {
+          const uri = uris && uris[i];
+          if (isImg(uri)) {
+            avCache.set(c.avatar, uri);
+            rememberEntityAvatar(c.id, c.avatar, uri);
+            c.avatar = uri;
+            applied = true;
+          } else {
+            needNet.push(c);
+          }
+        });
+      } catch (_) {
+        needDisk.forEach((c) => needNet.push(c));
+      }
+    }
+
+    if (needNet.length) {
+      await Promise.all(needNet.map(async (c) => {
+        const ref = c.avatar;
+        const uri = await resolveAvatar(ref, c.homeNode);
+        if (!uri) return;
+        rememberEntityAvatar(c.id, ref, uri);
+        c.avatar = uri;
+        applied = true;
+      }));
+    }
+
+    if (onDone && applied) onDone();
+    else if (onDone && !applied) onDone();
+  }
+
+  /** 头像引用变更时调用：清掉该实体旧缓存记忆，下次 resolve 会按新 ref 拉（磁盘按 hash 命中则仍不联网）。 */
+  function invalidateEntityAvatar(id) {
+    if (id) entityAv.delete(id);
   }
 
   // 本人头像（用于 chip/下拉，免拉取）：优先本地 data 缓存，其次 P0 遗留内联。
@@ -285,9 +387,137 @@
       await NM.inv("update_profile", {
         displayName, bio: p.bio || "", statusText: p.statusText || "",
         links, locale: p.locale || "", status: p.status || "", avatar,
+        attributes: normalizeExtAttrs(p.extAttrs),
       });
       return true;
     } catch (e) { if (window.toast) toast("资料发布失败：" + (e && e.message ? e.message : e)); return false; }
+  }
+
+  // 扩展属性规范化：去空 key、禁系统保留键；供本地存储与 update_profile 共用。
+  const RESERVED_ATTR = { status: 1, presence: 1, name: 1 };
+  function normalizeExtAttrs(rows) {
+    const out = [];
+    const seen = Object.create(null);
+    (Array.isArray(rows) ? rows : []).forEach((r) => {
+      if (!r || typeof r !== "object") return;
+      const key = String(r.key || "").trim();
+      if (!key || RESERVED_ATTR[key] || key.indexOf("__note:") === 0 || seen[key]) return;
+      seen[key] = 1;
+      out.push({
+        key,
+        value: String(r.value != null ? r.value : ""),
+        note: String(r.note != null ? r.note : ""),
+      });
+    });
+    return out;
+  }
+
+  // 扩展属性对话框：三列 key / value / note，增删改 + 保存/关闭。
+  function openExtAttrsEditor() {
+    const pk = window.Identity && Identity.current();
+    if (!pk) { if (window.toast) toast("未登录"); return; }
+    let old = document.getElementById("pf-attrs-modal");
+    if (old) old.remove();
+    const draft = normalizeExtAttrs(get(pk).extAttrs).map((r) => ({ key: r.key, value: r.value, note: r.note }));
+    const m = document.createElement("div");
+    m.className = "sec-overlay on";
+    m.id = "pf-attrs-modal";
+    m.innerHTML = `
+      <div class="dlg pf-attrs-dlg" role="dialog" aria-label="扩展属性">
+        <div class="dlg-head">
+          <span class="ico">${nmIcon("list")}</span>
+          <span class="dlg-title">扩展属性</span>
+          <span class="dlg-sub">键 / 值 / 备注 · 保存后随资料发布</span>
+          <button type="button" class="sec-x pf-attrs-x" title="关闭">${nmIcon("close")}</button>
+        </div>
+        <div class="dlg-body pf-attrs-body">
+          <div class="pf-attrs-toolbar">
+            <button type="button" class="ns-btn pf-attrs-add">${nmIcon("plus")} 添加</button>
+            <span class="pf-attrs-hint">勿使用 status / presence / name（系统保留）</span>
+          </div>
+          <div class="pf-attrs-table-wrap">
+            <table class="pf-attrs-table">
+              <thead><tr><th class="c-key">Key</th><th class="c-val">Value</th><th class="c-note">Note</th><th class="c-act"></th></tr></thead>
+              <tbody class="pf-attrs-tbody"></tbody>
+            </table>
+            <div class="pf-attrs-empty" hidden>暂无扩展属性，点击「添加」新建一行</div>
+          </div>
+        </div>
+        <div class="dlg-foot">
+          <div class="sec-msg"></div>
+          <button type="button" class="ns-btn pf-attrs-close">关闭</button>
+          <button type="button" class="ns-btn ns-primary pf-attrs-save">保存</button>
+        </div>
+      </div>`;
+    document.body.appendChild(m);
+    const tbody = m.querySelector(".pf-attrs-tbody");
+    const empty = m.querySelector(".pf-attrs-empty");
+    const esc = typeof escapeHtml === "function" ? escapeHtml : (s) => String(s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+
+    function paint() {
+      tbody.innerHTML = draft.map((r, i) => `
+        <tr data-i="${i}">
+          <td class="c-key"><input class="sec-input pf-a-key" data-f="key" value="${esc(r.key)}" placeholder="key" spellcheck="false"></td>
+          <td class="c-val"><input class="sec-input pf-a-val" data-f="value" value="${esc(r.value)}" placeholder="value"></td>
+          <td class="c-note"><input class="sec-input pf-a-note" data-f="note" value="${esc(r.note)}" placeholder="备注（可选）"></td>
+          <td class="c-act"><button type="button" class="ns-btn ns-ico pf-a-del" title="删除">${nmIcon("trash")}</button></td>
+        </tr>`).join("");
+      empty.hidden = draft.length > 0;
+      tbody.querySelectorAll("input").forEach((inp) => {
+        inp.addEventListener("input", () => {
+          const i = Number(inp.closest("tr").dataset.i);
+          const f = inp.dataset.f;
+          if (!draft[i] || !f) return;
+          draft[i][f] = inp.value;
+        });
+      });
+      tbody.querySelectorAll(".pf-a-del").forEach((btn) => {
+        btn.onclick = () => {
+          const i = Number(btn.closest("tr").dataset.i);
+          draft.splice(i, 1);
+          paint();
+        };
+      });
+    }
+    function syncFromDom() {
+      tbody.querySelectorAll("tr").forEach((tr) => {
+        const i = Number(tr.dataset.i);
+        if (!draft[i]) return;
+        draft[i].key = (tr.querySelector(".pf-a-key") || {}).value || "";
+        draft[i].value = (tr.querySelector(".pf-a-val") || {}).value || "";
+        draft[i].note = (tr.querySelector(".pf-a-note") || {}).value || "";
+      });
+    }
+    function close() { m.remove(); }
+    m.querySelector(".pf-attrs-add").onclick = () => {
+      syncFromDom();
+      draft.push({ key: "", value: "", note: "" });
+      paint();
+      const last = tbody.querySelector("tr:last-child .pf-a-key");
+      if (last) last.focus();
+    };
+    m.querySelector(".pf-attrs-save").onclick = async () => {
+      syncFromDom();
+      const rows = normalizeExtAttrs(draft);
+      const dup = draft.filter((r) => String(r.key || "").trim()).length !== rows.length;
+      const bad = draft.some((r) => {
+        const k = String(r.key || "").trim();
+        return k && (RESERVED_ATTR[k] || k.indexOf("__note:") === 0);
+      });
+      if (bad) { if (window.toast) toast("含系统保留键，已跳过；请改名后再保存"); }
+      else if (dup && window.toast) toast("已去除空键或重复键");
+      const prev = get(pk);
+      save(pk, Object.assign({}, prev, { extAttrs: rows }));
+      refreshAttrsTip();
+      close();
+      const ok = await publish();
+      if (window.toast) toast(ok ? "扩展属性已保存并发布" : "扩展属性已本地保存（连接后随资料发布）");
+    };
+    m.querySelector(".pf-attrs-close").onclick = close;
+    m.querySelector(".pf-attrs-x").onclick = close;
+    m.addEventListener("click", (e) => { if (e.target === m) close(); });
+    paint();
   }
 
   // 横幅封面：交互裁剪 JPEG（频道 Hero 用，比例约 3:1）。
@@ -382,7 +612,21 @@
       const cp = m.querySelector(".me-cover-prev");
       if (!cp) return;
       const src = pendingCover === "" ? "" : (pendingCover || coverPreview);
-      cp.innerHTML = isImg(src) ? `<img src="${src}" alt="">` : `<span>未设置封面</span>`;
+      if (isImg(src)) {
+        cp.classList.add("me-cover-tiled");
+        cp.style.backgroundImage = "url(" + JSON.stringify(String(src)) + ")";
+        cp.style.backgroundRepeat = "repeat";
+        cp.style.backgroundPosition = "center center";
+        cp.style.backgroundSize = "auto";
+        cp.innerHTML = "";
+      } else {
+        cp.classList.remove("me-cover-tiled");
+        cp.style.backgroundImage = "";
+        cp.style.backgroundRepeat = "";
+        cp.style.backgroundPosition = "";
+        cp.style.backgroundSize = "";
+        cp.innerHTML = `<span>未设置封面</span>`;
+      }
     };
     m.querySelector(".me-name").value = opts.name || "";
     m.querySelector(".me-bio").value = opts.bio || "";
@@ -468,6 +712,11 @@
               <label for="pf-bio">简介</label><input id="pf-bio" class="sec-input" placeholder="一句话介绍自己">
               <label for="pf-links">链接</label><input id="pf-links" class="sec-input" placeholder="主页 / 社交，逗号分隔">
               <label for="pf-locale">语言</label><input id="pf-locale" class="sec-input" placeholder="如 zh-CN">
+              <label>扩展</label>
+              <div class="fm-attrs-row">
+                <button type="button" class="ns-btn" id="pf-attrs">${nmIcon("list")} 管理扩展属性</button>
+                <span class="fm-attrs-tip" id="pf-attrs-tip"></span>
+              </div>
             </div>
           </div>
         </div>
@@ -479,6 +728,7 @@
     m.querySelector("#pf-cancel").addEventListener("click", close);
     m.addEventListener("click", (e) => { if (e.target === m) close(); });
     m.querySelector("#pf-save").addEventListener("click", onSave);
+    m.querySelector("#pf-attrs").addEventListener("click", () => openExtAttrsEditor());
     m.querySelector("#pf-av-pick").addEventListener("click", () => m.querySelector("#pf-av-file").click());
     m.querySelector("#pf-av-clear").addEventListener("click", () => { pendingAvatar = ""; renderPreview(""); });
     m.querySelector("#pf-av-file").addEventListener("change", async (e) => {
@@ -524,6 +774,7 @@
       bio: q("pf-bio").value.trim(),
       links: q("pf-links").value.split(/[,\n]/).map((s) => s.trim()).filter(Boolean),
       locale: q("pf-locale").value.trim(), avatar, avatarData,
+      extAttrs: normalizeExtAttrs(prev.extAttrs), // 保留已维护的扩展属性
     });
     if (displayName && window.Identity) Identity.setName(pk, displayName);
     if (typeof updateUserChip === "function") updateUserChip();
@@ -531,6 +782,14 @@
     const ok = await publish();
     applyPresence(); // P2：把所选状态应用为 live presence
     if (window.toast) toast(ok ? "资料已保存并发布" : "资料已本地保存（连接后自动发布）");
+  }
+
+  function refreshAttrsTip() {
+    const tip = document.getElementById("pf-attrs-tip");
+    if (!tip) return;
+    const pk = window.Identity && Identity.current();
+    const n = normalizeExtAttrs(get(pk).extAttrs).length;
+    tip.textContent = n ? `已配置 ${n} 项` : "未配置";
   }
 
   function open() {
@@ -546,6 +805,7 @@
     q("pf-links").value = Array.isArray(p.links) ? p.links.join(", ") : (p.links || "");
     q("pf-locale").value = p.locale || "";
     renderPreview(ownAvatar(pk));
+    refreshAttrsTip();
     m.classList.add("on");
   }
 
@@ -564,7 +824,7 @@
     });
   }
 
-  window.Profile = { load, get, save, publish, open, statusLabel, avatarHtml, faceHtml, displayAvatar, isImg, isRef, resolveAvatar, resolveList, ownAvatar, presenceColor, presenceLabel, presenceDot, applyPresence, metaEditor, openAvatarCrop, openImageCrop };
+  window.Profile = { load, get, save, publish, open, statusLabel, avatarHtml, faceHtml, displayAvatar, isImg, isRef, resolveAvatar, resolveList, ownAvatar, fileToAvatar, putBlob, presenceColor, presenceLabel, presenceDot, applyPresence, metaEditor, openAvatarCrop, openImageCrop, extAttrRows, normalizeExtAttrs, invalidateEntityAvatar, rememberEntityAvatar };
   window.openProfileModal = open;
 
   // ── P2 在线状态 ──

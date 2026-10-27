@@ -191,6 +191,11 @@ async function imStart(myId) {
   if (window.Groups && Groups.hydrate) Groups.hydrate(snap.groups || []);
   if (window.Channels && Channels.hydrate) Channels.hydrate(snap.channels || []);
   renderPanels();
+  // 启动先用本机头像缓存铺开（磁盘命中不联网），有变更再由 imRefresh 补拉。
+  if (window.Profile) {
+    Profile.resolveList(CONTACTS, () => renderPanels());
+    Profile.resolveList(ADDED, () => renderPanels());
+  }
   if (window.Tabs) Tabs.closeAll(); // 每次连接（含切换身份）重置多 tab 工作区
   if (typeof updateUserChip === "function") updateUserChip();
   if (typeof window.renderNodeSvcList === "function") window.renderNodeSvcList(); // 连接后刷新节点服务面板（hydrate 后数据已就绪）
@@ -198,6 +203,8 @@ async function imStart(myId) {
   if (typeof window.renderChannelsList === "function") window.renderChannelsList(); // P4：刷新频道列表
   if (window.Channels && Channels.primeChannels) Channels.primeChannels(); // P4：订阅已知频道 + 回填历史
   if (window.Profile) { Profile.publish(); Profile.applyPresence(); } // 连接后发布资料 + 应用在线状态(P2)
+  // 登录就绪：把本用户扩展属性灌进 Identity.user（attrs），全局随时可读。
+  if (window.Identity && Identity.hydrateUser) Identity.hydrateUser(MY_ID);
   if (window._nmPresenceTimer) clearInterval(window._nmPresenceTimer);
   window._nmPresenceTimer = setInterval(() => { if (MY_ID) imRefresh(); }, 15000); // P2：定期刷新在线状态
   if (!_coreUnlisten) _coreUnlisten = await NM.onCoreEvent(onCoreEvent);
@@ -211,14 +218,31 @@ async function imStart(myId) {
 }
 
 function dirSig(list) {
-  return (list || []).map((c) => [c.id, c.name, c.presence, c.statusText, c.handle, c.kind].join("\u0001")).join("\n");
+  // 含 avatar：他人改头像时能触发重绘；resolveList 仅对变更的 b3: 联网。
+  return (list || []).map((c) => [c.id, c.name, c.presence, c.statusText, c.handle, c.kind, c.avatar || ""].join("\u0001")).join("\n");
 }
 let lastDirSig = "";
 async function imRefresh() {
   try {
     const next = await NM.inv("directory_query", { kindPrefix: "" });
     const sig = dirSig(next);
-    if (sig === lastDirSig) return;
+    if (sig === lastDirSig) {
+      refreshPresence(); // 目录无变仍刷新在线态
+      return;
+    }
+    // 头像 ref 变更的实体：清掉旧记忆，迫使按新 hash 解析（同 hash 磁盘命中则不联网）。
+    if (window.Profile && Profile.invalidateEntityAvatar && Array.isArray(next)) {
+      const prevById = {};
+      (CONTACTS || []).forEach((c) => { if (c && c.id) prevById[c.id] = c.avatar || ""; });
+      next.forEach((c) => {
+        if (!c || !c.id) return;
+        const oldRef = prevById[c.id];
+        const newRef = c.avatar || "";
+        if (oldRef && newRef && oldRef !== newRef && Profile.isRef(newRef)) {
+          Profile.invalidateEntityAvatar(c.id);
+        }
+      });
+    }
     lastDirSig = sig;
     CONTACTS = next || [];
     if (window.ListCache) ListCache.put({ directory: CONTACTS });
@@ -226,7 +250,10 @@ async function imRefresh() {
     if (!CONTACTS.length && window.toast) toast("目录刷新失败：" + (e && e.message ? e.message : e));
   }
   renderPanels();
-  if (window.Profile) Profile.resolveList(CONTACTS, () => renderPanels());
+  if (window.Profile) {
+    Profile.resolveList(CONTACTS, () => renderPanels());
+    Profile.resolveList(ADDED, () => renderPanels());
+  }
   refreshPresence(); // A：每次刷新都重查在线态（不受 dir-sig 早退影响）
 }
 
@@ -255,6 +282,7 @@ async function imDisconnect() {
   if (window.ChatLog) ChatLog.setUnread(UNREAD);
   try { await NM.inv("disconnect"); } catch (_) {}
   MY_ID = ""; CONTACTS = []; ADDED = []; PRESENCE = {}; CONVOS = {}; UNREAD = {}; ACTIVE = null; DETAIL_ID = null;
+  if (window.Identity && Identity.clearUser) Identity.clearUser();
   window.CURRENT_SVC = null;
   paintActUnread();
   if (typeof paintHomeNode === "function") paintHomeNode();

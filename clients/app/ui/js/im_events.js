@@ -168,6 +168,11 @@ function handleReceipt(ev) {
 function onCoreEvent(ev) {
   if (!ev) return;
   // 重连生命周期：后端发送失败→自动重连时 emit 这些，驱动状态行进度提示。
+  if (ev.type === "roaming") {
+    // 换网后连接失活，进入后台退避自愈：持续显示"重连中"，直到 reconnected 复位。
+    if (window.setReconnecting) setReconnecting(true);
+    return;
+  }
   if (ev.type === "reconnecting") {
     if (window.setReconnecting) setReconnecting(true);
     if (window.toast) toast("连接已断，正在重连…");

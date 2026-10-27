@@ -109,6 +109,22 @@ pub(crate) async fn directory_query(
     Ok(entities.iter().map(person_entity_json).collect())
 }
 
+/// 用户扩展属性一行（编辑资料里的三列表：key / value / note）。
+/// note 写入 attributes 时用保留前缀 `__note:<key>`，与 value 一并 LWW 扩散。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ExtAttrRow {
+    pub key: String,
+    pub value: String,
+    #[serde(default)]
+    pub note: String,
+}
+
+/// 系统占用的 attributes 键：用户扩展属性不得覆盖（status/presence/name 由资料/在线态写入）。
+fn is_reserved_attr_key(k: &str) -> bool {
+    matches!(k, "status" | "presence" | "name") || k.starts_with("__note:")
+}
+
 /// 更新本人资料（P0 富属性）：重新以 person 身份注册一份带完整 PersonProfile + 标签的 Entity。
 /// 节点侧按 updated_at 做 LWW 收敛并经联邦扩散；前端需传全量当前值（本地持久，连接后回推）。
 #[tauri::command]
@@ -121,6 +137,7 @@ pub(crate) async fn update_profile(
     locale: String,
     status: String, // 可发现标签：online / away / busy / dnd …（P2 presence 前的静态占位）
     avatar: String, // 头像：前端已缩放压缩的小图 data:URI（P0 内联随档案分发；P1 迁移为内容寻址 blob）
+    attributes: Option<Vec<ExtAttrRow>>, // 用户扩展属性（前端始终传数组；None/空=仅系统 status）
 ) -> Result<(), String> {
     // 内联头像体量上限（防止撑爆目录/gossip 负载）：约 128KB data:URI。更大者应走 P1 内容寻址。
     if avatar.len() > 128 * 1024 {
@@ -138,6 +155,20 @@ pub(crate) async fn update_profile(
     let status = status.trim();
     if !status.is_empty() {
         attrs.insert("status".to_string(), status.to_string());
+    }
+    // 用户扩展属性：key→value；有 note 时另写 `__note:<key>`（跳过空 key / 系统保留键）。
+    if let Some(rows) = attributes {
+        for row in rows {
+            let key = row.key.trim().to_string();
+            if key.is_empty() || is_reserved_attr_key(&key) {
+                continue;
+            }
+            attrs.insert(key.clone(), row.value);
+            let note = row.note.trim();
+            if !note.is_empty() {
+                attrs.insert(format!("__note:{key}"), note.to_string());
+            }
+        }
     }
     session
         .register_as::<nm_entity::kinds::Person>(&profile, display_name.trim(), attrs)

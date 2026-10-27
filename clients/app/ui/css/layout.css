@@ -63,6 +63,15 @@
   /* 侧栏折叠 */
   body.sidebar-collapsed aside{display:none}
 
+  /* ── 智能体工作台(cmx-agent 内嵌)──
+     cmx-full:工作台活跃时左侧栏整体退场,整个工作区交给 iframe;
+     cmx-stage:常驻 main 的覆盖层(iframe 重挂 DOM 会整页重载,故显隐而非重建)。 */
+  body.cmx-full aside,body.cmx-full .splitter{display:none}
+  main{position:relative}
+  .cmx-stage{position:absolute;inset:0;z-index:6;background:var(--bg)}
+  .cmx-stage[hidden]{display:none}
+  .cmx-stage iframe{width:100%;height:100%;border:0;display:block}
+
   /* ── 左侧栏 ── */
   aside{width:var(--aside-w);flex:0 0 var(--aside-w);background:var(--panel);
     display:flex;flex-direction:column;padding:0 10px;position:relative}
