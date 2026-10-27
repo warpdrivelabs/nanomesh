@@ -29,9 +29,11 @@ nm-crypto = { path = "../../../crates/nm-crypto" }
 nm-compute = { path = "../../../bin/nm-compute" }
 # 智能体工作台(cmx-agent 库内嵌,零复制零改动,全参数化适配):git 依赖其 app façade。
 # login=off 时构造不调 .auth()(其 CLI serve 同形态);=portal 时调 .auth() 恢复原版登录。
+# 跟踪 main 最新(不锁 rev)。注意 cargo 仍会在 Cargo.lock 记住当前 commit——
+# 要拉上游新提交:cargo update -p cmx-agent-app(或删 lock 对应段重建)。
 # 本地有 checkout 时可用 path 覆盖(免拉网):
-#   cmx-agent-app = { path = "../../../cmx-agent/crates/cmx-agent-app" }
-cmx-agent-app = { git = "https://gitee.com/warpdrivelabs/cmx-agent.git", rev = "844baa9" }
+#   cmx-agent-app = { path = "../../../../../../cmx-workspace/backend/cmx-agent/crates/cmx-agent-app" }
+cmx-agent-app = { git = "https://gitee.com/warpdrivelabs/cmx-agent.git", branch = "main" }
 tokio-stream = "0.1"  # cmx 工作台 SSE(/api/stream /api/subscribe)
 prost = "0.14"
 tracing = "0.1"

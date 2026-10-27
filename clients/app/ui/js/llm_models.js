@@ -54,6 +54,7 @@
 .llm-mini{width:24px;height:24px;min-width:24px;padding:0;display:inline-flex;align-items:center;justify-content:center}
 .llm-mini .nm-ico{width:13px;height:13px}
 .llm-mini.on .nm-ico{color:var(--ok,#1fb182)}
+.llm-mini:disabled{opacity:.35;cursor:default;pointer-events:none;color:var(--muted)}
 `;
     document.head.appendChild(st);
   }
@@ -198,6 +199,18 @@
         .includes(q);
     });
 
+    // 孤儿代理:代理还在跑,但其模型已从目录消失(对方下线被清/换节点)。仍补一行(离线态),
+    // 保证「已启动的代理永远停得掉」——否则列表无行、代理面板标签已移除,就没地方停了。
+    {
+      const seen = new Set(remotes.map((c) => (c.id || "").toLowerCase()));
+      Object.values(PROXY_RUN).forEach((p) => {
+        const pid = (p.providerId || "").toLowerCase();
+        if (!pid || seen.has(pid) || localIds.has(pid)) return;
+        if (q && !(((p.displayName || "") + " " + (p.model || "") + " " + pid).toLowerCase().includes(q))) return;
+        remotes.push({ id: p.providerId, name: p.displayName || "", model: p.model || "", presence: "" });
+      });
+    }
+
     const localRows = localFiltered
       .map((m) => {
         const face =
@@ -229,13 +242,22 @@
           typeof itemHtml === "function"
             ? itemHtml(c, sub, 0, SEL === "r:" + c.id ? c.id : DETAIL_ID, { inlineHandle: false })
             : `<div class="im-item" data-id="${esc(c.id)}"><span class="mid"><span class="nm">${esc(c.name || c.id)}</span></span></div>`;
-        // 在线的远端模型:行尾加「对话」+「启停代理」两个小号按钮(离线不画,保持行干净)。
-        // presence 语义与实体详情一致:truthy=在线。
-        if (c.presence && typeof nmIcon === "function") {
+        // 远端模型行尾:「对话」+「启停代理」两个小号按钮。
+        // 在线可点;离线置灰禁用(presence 语义与实体详情一致:truthy=在线)。
+        // 特例:离线但本地代理还在跑 → 「停止」保持可点,否则没法关掉已打不通的代理。
+        if (typeof nmIcon === "function") {
+          const online = !!c.presence;
           const run = PROXY_RUN[(c.id || "").toLowerCase()];
+          const chatDis = online ? "" : " disabled";
+          const pxDis = online || run ? "" : " disabled";
+          const pxTitle = run
+            ? "停止代理 · " + esc(run.listen || "")
+            : online
+              ? "启动本地代理"
+              : "离线,无法启动代理";
           const ops = `<span class="llm-mini-ops">
-            <button type="button" class="ns-btn ns-ico llm-mini llm-rchat" data-id="${esc(c.id)}" title="对话">${nmIcon("chat")}</button>
-            <button type="button" class="ns-btn ns-ico llm-mini llm-rproxy${run ? " on" : ""}" data-id="${esc(c.id)}" data-run="${run ? "1" : ""}" data-name="${esc(c.name || "")}" data-model="${esc(c.model || "")}" title="${run ? "停止代理 · " + esc(run.listen || "") : "启动本地代理"}">${nmIcon(run ? "stop" : "play")}</button>
+            <button type="button" class="ns-btn ns-ico llm-mini llm-rchat" data-id="${esc(c.id)}" title="${online ? "对话" : "离线,无法对话"}"${chatDis}>${nmIcon("chat")}</button>
+            <button type="button" class="ns-btn ns-ico llm-mini llm-rproxy${run ? " on" : ""}" data-id="${esc(c.id)}" data-run="${run ? "1" : ""}" data-name="${esc(c.name || "")}" data-model="${esc(c.model || "")}" title="${pxTitle}"${pxDis}>${nmIcon(run ? "stop" : "play")}</button>
           </span>`;
           item = item.replace(/<\/div>\s*$/, ops + "</div>");
         }

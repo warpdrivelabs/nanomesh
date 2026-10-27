@@ -36,6 +36,7 @@
   .tb-btn{display:flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border-radius:var(--r-ctrl);color:var(--ink2);
     font-size:12px;background:transparent;border:1px solid transparent}
   .tb-btn:hover{background:var(--hover);color:var(--ink);border-color:var(--border)}
+  .tb-btn[hidden]{display:none} /* display:flex 会压过 hidden 属性，显式关掉（跑马灯配置按钮暂隐藏用） */
   .tb-btn .ico{font-size:14px;line-height:1}
   .tb-update{color:var(--aqua)} .tb-update:hover{border-color:var(--aqua)}
   /* Windows/Linux 窗口控件（最小化/最大化/关闭）：默认隐藏，initPlatformChrome 探测非 macOS 后 display:flex */

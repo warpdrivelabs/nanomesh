@@ -1,7 +1,18 @@
 // 标题栏跑马灯。勾选结果记在本机，数字和要闻只来自接口，失败的一路不显示。
+// 2026-10-28 起默认停用(全源关=不拉接口、整条隐藏)；机制与功能完整保留——
+// 右下角跑马灯配置按钮随时可重新勾选开启。
 (function () {
   const KEY = "nmspace-ticker";
-  const DEFAULTS = { fx: true, crypto: true, news: true, weather: true, speed: 5 };
+  const DEFAULTS = { fx: false, crypto: false, news: false, weather: false, speed: 5 };
+
+  // 一次性迁移：把历史勾选过的源统一关掉(只执行一次；之后用户在配置里重新勾选照常保存生效)。
+  try {
+    if (!localStorage.getItem(KEY + "-off1")) {
+      const old = JSON.parse(localStorage.getItem(KEY) || "{}");
+      localStorage.setItem(KEY, JSON.stringify(Object.assign({}, old, { fx: false, crypto: false, news: false, weather: false })));
+      localStorage.setItem(KEY + "-off1", "1");
+    }
+  } catch (_) {}
 
   function cfg() {
     try { return Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem(KEY) || "{}")); }

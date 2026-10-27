@@ -220,13 +220,12 @@
   <div class="resize-handle rh-br" data-resize="SouthEast"></div>
 
   <div class="workspace">
-    <!-- 活动栏：消息 / 实体 / 智能体工作台 / 大模型 / 模型代理 / 频道 -->
+    <!-- 活动栏：消息 / 实体 / 智能体工作台 / 大模型 / 频道 -->
     <div class="activitybar">
       <div class="act active" id="act-im" data-act="showPanel" data-panel="im" title="即时通讯"><span class="ico" data-ico="chat"></span></div>
       <div class="act" id="act-cmx" data-act="showPanel" data-panel="cmx" title="智能体工作台"><span class="ico" data-ico="robot"></span></div>
       <div class="act" id="act-entities" data-act="showPanel" data-panel="entities" title="实体目录"><span class="ico" data-ico="contacts"></span></div>
       <div class="act" id="act-models" data-act="showPanel" data-panel="models" title="大模型"><span class="ico" data-ico="llm"></span></div>
-      <div class="act" id="act-proxies" data-act="showPanel" data-panel="proxies" title="模型代理"><span class="ico" data-ico="proxy"></span></div>
       <div class="act" id="act-channels" data-act="showPanel" data-panel="channels" title="频道"><span class="ico" data-ico="channels"></span></div>
       <div class="act-sp"></div>
       <!-- 活动栏底部：当前用户头像（点开切换身份/编辑资料；昵称见悬浮提示与下拉）-->
@@ -270,7 +269,8 @@
         <div class="im-search"><span class="im-search-ico" data-ico="search"></span><input id="llm-search" type="text" placeholder="搜索模型" /></div>
         <div class="im-list" id="llm-list"></div>
       </div>
-      <div class="panel proxies-panel" id="panel-proxies">
+      <!-- 模型代理独立面板已取消：启停入口在大模型列表行/实体详情，详情页在主区 tab；DOM 保留供内部刷新 -->
+      <div class="panel proxies-panel" id="panel-proxies" style="display:none" aria-hidden="true">
         <div class="brand">
           <span class="uname">代理</span>
           <span class="brand-tools">
@@ -349,10 +349,12 @@
       <span class="sb-dot" id="sb-dot"></span>
       <span class="sb-node-text" id="sb-node-text">未登录</span>
     </div>
-    <div class="tb-marquee">
+    <!-- 跑马灯默认停用(ticker.js 源全关即隐藏)；初始 hidden 防"正在获取…"闪现，重开勾选后自动显示 -->
+    <div class="tb-marquee" hidden>
       <div class="tb-marquee-track" id="tb-marquee-track">正在获取状态栏内容…</div>
     </div>
-    <button class="tb-btn" id="tb-ticker-cfg" type="button" title="定制跑马灯"><span class="ico" data-ico="ticker"></span></button>
+    <!-- 跑马灯配置按钮随跑马灯一起暂时隐藏(机制保留，去掉 hidden 即恢复) -->
+    <button class="tb-btn" id="tb-ticker-cfg" type="button" title="定制跑马灯" hidden><span class="ico" data-ico="ticker"></span></button>
     <div class="tb-ticker-pop" id="tb-ticker-pop" hidden>
       <label><input type="checkbox" data-ticker="fx" /> 主要货币汇率</label>
       <label><input type="checkbox" data-ticker="crypto" /> 主要数字货币</label>
