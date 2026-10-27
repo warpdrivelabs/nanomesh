@@ -5,6 +5,8 @@
   let SEL = null; // localId or "r:"+entityId
   const FOLDED = new Set();
   let monTimer = null;
+  // 远端模型行上的代理运行表:providerId(小写) -> ProxyInfo(running 才入表)。renderList 时经 llm_proxy_list 刷新。
+  let PROXY_RUN = {};
   // 模型头像：档案里存内容寻址引用（b3:<hash>，与人/群头像同一套），展示前需解析成 data:URI。
   const AV_URI = new Map(); // "b3:<hash>" -> data:URI
   const AV_MISS = new Set(); // 已尝试且未取到的引用（不每次重绘都重走磁盘/网络）
@@ -48,6 +50,10 @@
 .llm-av-prev{flex:0 0 auto;display:block;line-height:0}
 .llm-av-ops{display:flex;gap:6px;flex:0 0 auto}
 .llm-av-ops .ns-btn{height:30px;padding:0 10px}
+.llm-mini-ops{display:flex;gap:2px;flex:0 0 auto;align-items:center}
+.llm-mini{width:24px;height:24px;min-width:24px;padding:0;display:inline-flex;align-items:center;justify-content:center}
+.llm-mini .nm-ico{width:13px;height:13px}
+.llm-mini.on .nm-ico{color:var(--ok,#1fb182)}
 `;
     document.head.appendChild(st);
   }
@@ -161,6 +167,13 @@
     const q = ((document.getElementById("llm-search") || {}).value || "").trim().toLowerCase();
     await load();
     await resolveAvatars();
+    // 本机为远端模型开的代理:一次列表调用拿全部运行态(供远端行的启停按钮画状态)。
+    PROXY_RUN = {};
+    try {
+      ((await NM.inv("llm_proxy_list")) || []).forEach((p) => {
+        if (p && p.running && p.providerId) PROXY_RUN[p.providerId.toLowerCase()] = p;
+      });
+    } catch (_) {}
 
     const localIds = new Set(
       CACHE.map((m) => (m.entityId || "").toLowerCase()).filter(Boolean)
@@ -212,10 +225,20 @@
         if (c.price) bits.push(c.price);
         const tag = c.added ? " · 手动" : "";
         const sub = esc((bits.join(" · ") || "远端模型") + tag);
-        const item =
+        let item =
           typeof itemHtml === "function"
             ? itemHtml(c, sub, 0, SEL === "r:" + c.id ? c.id : DETAIL_ID, { inlineHandle: false })
             : `<div class="im-item" data-id="${esc(c.id)}"><span class="mid"><span class="nm">${esc(c.name || c.id)}</span></span></div>`;
+        // 在线的远端模型:行尾加「对话」+「启停代理」两个小号按钮(离线不画,保持行干净)。
+        // presence 语义与实体详情一致:truthy=在线。
+        if (c.presence && typeof nmIcon === "function") {
+          const run = PROXY_RUN[(c.id || "").toLowerCase()];
+          const ops = `<span class="llm-mini-ops">
+            <button type="button" class="ns-btn ns-ico llm-mini llm-rchat" data-id="${esc(c.id)}" title="对话">${nmIcon("chat")}</button>
+            <button type="button" class="ns-btn ns-ico llm-mini llm-rproxy${run ? " on" : ""}" data-id="${esc(c.id)}" data-run="${run ? "1" : ""}" data-name="${esc(c.name || "")}" data-model="${esc(c.model || "")}" title="${run ? "停止代理 · " + esc(run.listen || "") : "启动本地代理"}">${nmIcon(run ? "stop" : "play")}</button>
+          </span>`;
+          item = item.replace(/<\/div>\s*$/, ops + "</div>");
+        }
         return item.replace(/class="im-item/, 'data-kind="remote" class="im-item');
       })
       .join("");
@@ -255,6 +278,42 @@
         SEL = "r:" + el.dataset.id;
         if (typeof showEntityDetail === "function") showEntityDetail(el.dataset.id);
       };
+      const chat = el.querySelector(".llm-rchat");
+      if (chat)
+        chat.onclick = (ev) => {
+          ev.stopPropagation(); // 别触发行点击(进详情)
+          if (typeof selectContact === "function") selectContact(chat.dataset.id);
+        };
+      const px = el.querySelector(".llm-rproxy");
+      if (px)
+        px.onclick = async (ev) => {
+          ev.stopPropagation();
+          px.disabled = true;
+          try {
+            if (px.dataset.run) {
+              await NM.inv("llm_proxy_stop", { providerId: px.dataset.id });
+              if (window.toast) toast("代理已停止");
+            } else {
+              // 空 listen=自动挑端口;空 token=默认;空 grant=用盘上留存的(详情页/代理面板保存过即生效)。
+              const info = await NM.inv("llm_proxy_start", {
+                args: {
+                  providerId: px.dataset.id,
+                  displayName: px.dataset.name || "",
+                  model: px.dataset.model || "",
+                  listen: "",
+                  localToken: "",
+                  grantB64: "",
+                  timeoutSecs: 120,
+                },
+              });
+              if (window.toast) toast("代理已启动 " + ((info && info.listen) || ""));
+            }
+            if (window.renderLlmProxies) renderLlmProxies();
+          } catch (e) {
+            if (window.toast) toast(String(e));
+          }
+          renderList(); // 重绘以刷新按钮状态(disabled 也随之复位)
+        };
     });
   }
 
@@ -1082,7 +1141,13 @@
 
   if (window.NM && NM.on) {
     NM.on("core://event", (ev) => {
-      if (!ev || ev.type !== "llm_model") return;
+      if (!ev) return;
+      // 代理在别处启停(实体详情/代理面板)→ 刷新远端行的启停按钮状态。
+      if (ev.type === "llm_proxy") {
+        renderList();
+        return;
+      }
+      if (ev.type !== "llm_model") return;
       load().then(() => {
         renderList();
         if (!window.Tabs || !Tabs.active) return;
