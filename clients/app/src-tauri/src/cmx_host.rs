@@ -170,15 +170,30 @@ async fn dispatch_on_net(app: Arc<AgentApp>, payload: String) -> String {
         .unwrap_or_else(|e| json!({"ok":false,"error":format!("task failed: {e}")}).to_string())
 }
 
-/// ui 目录解析:配置显式 > dev 源码路径(与 Cargo path 依赖同根)。打包 resources 版 P1 接线。
+/// ui 目录解析:配置显式 > build.rs 从 git/path 依赖定位 > 常见本地 checkout。
+/// 打包 resources 版 P1 接线。
 fn resolve_ui_dir(cfg: &CmxCfg) -> Option<PathBuf> {
     if !cfg.ui_dir.trim().is_empty() {
         let p = expand_home(cfg.ui_dir.trim());
         return p.join("index.html").is_file().then_some(p);
     }
-    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../../../cmx-workspace/backend/cmx-agent/crates/cmx-agent-web/ui");
-    dev.join("index.html").is_file().then_some(dev)
+    if let Some(p) = option_env!("CMX_AGENT_UI_DIR") {
+        let p = PathBuf::from(p);
+        if p.join("index.html").is_file() {
+            return Some(p);
+        }
+    }
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for rel in [
+        "../../../cmx-agent/crates/cmx-agent-web/ui",
+        "../../../../../../cmx-workspace/backend/cmx-agent/crates/cmx-agent-web/ui",
+    ] {
+        let p = manifest.join(rel);
+        if p.join("index.html").is_file() {
+            return Some(p);
+        }
+    }
+    None
 }
 
 /// 登录垫片(~20 行,nanomesh 适配层):拦 current_user/login/logout 返回合成本地用户 +
@@ -474,7 +489,10 @@ async fn start_inner(app: &AppHandle, state: &TState<'_, AppState>) -> Result<se
         return Err("工作台已在配置中停用(enabled=false)".into());
     }
     let Some(ui) = resolve_ui_dir(&cfg) else {
-        return Err("找不到 cmx-agent UI 资产(配置 uiDir,或 dev 下需 ~/cmx-workspace/backend/cmx-agent 存在)".into());
+        return Err(
+            "找不到 cmx-agent UI 资产(配置 uiDir，或确保已拉取 gitee.com/warpdrivelabs/cmx-agent 依赖)"
+                .into(),
+        );
     };
     // 数据目录:配置显式(可 ~/.cmx-agent 共享原 TrueMate) > nanomesh 隔离目录。
     let data_dir = if cfg.data_dir.trim().is_empty() {

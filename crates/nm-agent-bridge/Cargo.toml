@@ -15,8 +15,8 @@ description = "nanomesh 前门 façade：实现 cmx-agent 内核 ModelSeam，把
 # tools = 内置工具平面。二者**零网络**（serde/async-trait/tokio/chrono/regex/walkdir/…）。
 # 以 git rev 固定引用（可移植、随上游改 rev/tag 升级；rev 85fa2a6 已在 origin/main，公网可 clone、已验证 build+test 绿）。
 # 本地开发（有 cmx-agent 同级 checkout、免 clone）可临时改为 path：
-#   cmx-agent-core  = { path = "../../../../../cmx-workspace/backend/cmx-agent/crates/cmx-agent-core" }
-#   cmx-agent-tools = { path = "../../../../../cmx-workspace/backend/cmx-agent/crates/cmx-agent-tools" }
+#   cmx-agent-core  = { path = "../../../cmx-agent/crates/cmx-agent-core" }
+#   cmx-agent-tools = { path = "../../../cmx-agent/crates/cmx-agent-tools" }
 # cmx-agent-mcp（远程 MCP host，携 reqwest+rustls 网络栈）非 ModelSeam 所需，留待后续里程碑单独引用。
 cmx-agent-core = { git = "https://gitee.com/warpdrivelabs/cmx-agent.git", rev = "85fa2a6" }
 cmx-agent-tools = { git = "https://gitee.com/warpdrivelabs/cmx-agent.git", rev = "85fa2a6" }

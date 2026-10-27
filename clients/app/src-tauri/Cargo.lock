@@ -969,6 +969,7 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 [[package]]
 name = "cmx-agent-app"
 version = "0.1.0"
+source = "git+https://gitee.com/warpdrivelabs/cmx-agent.git?rev=844baa9#844baa951f557620a9362535bc887ac01f5e3211"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -996,6 +997,7 @@ dependencies = [
 [[package]]
 name = "cmx-agent-core"
 version = "0.1.0"
+source = "git+https://gitee.com/warpdrivelabs/cmx-agent.git?rev=844baa9#844baa951f557620a9362535bc887ac01f5e3211"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1012,6 +1014,7 @@ dependencies = [
 [[package]]
 name = "cmx-agent-lsp"
 version = "0.1.0"
+source = "git+https://gitee.com/warpdrivelabs/cmx-agent.git?rev=844baa9#844baa951f557620a9362535bc887ac01f5e3211"
 dependencies = [
  "async-trait",
  "cmx-agent-core",
@@ -1026,6 +1029,7 @@ dependencies = [
 [[package]]
 name = "cmx-agent-mcp"
 version = "0.1.0"
+source = "git+https://gitee.com/warpdrivelabs/cmx-agent.git?rev=844baa9#844baa951f557620a9362535bc887ac01f5e3211"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1049,6 +1053,7 @@ dependencies = [
 [[package]]
 name = "cmx-agent-model"
 version = "0.1.0"
+source = "git+https://gitee.com/warpdrivelabs/cmx-agent.git?rev=844baa9#844baa951f557620a9362535bc887ac01f5e3211"
 dependencies = [
  "async-trait",
  "cmx-agent-core",
@@ -1064,6 +1069,7 @@ dependencies = [
 [[package]]
 name = "cmx-agent-net"
 version = "0.1.0"
+source = "git+https://gitee.com/warpdrivelabs/cmx-agent.git?rev=844baa9#844baa951f557620a9362535bc887ac01f5e3211"
 dependencies = [
  "async-trait",
  "cmx-agent-core",
@@ -1077,6 +1083,7 @@ dependencies = [
 [[package]]
 name = "cmx-agent-office"
 version = "0.1.0"
+source = "git+https://gitee.com/warpdrivelabs/cmx-agent.git?rev=844baa9#844baa951f557620a9362535bc887ac01f5e3211"
 dependencies = [
  "async-trait",
  "calamine",
@@ -1095,6 +1102,7 @@ dependencies = [
 [[package]]
 name = "cmx-agent-tools"
 version = "0.1.0"
+source = "git+https://gitee.com/warpdrivelabs/cmx-agent.git?rev=844baa9#844baa951f557620a9362535bc887ac01f5e3211"
 dependencies = [
  "async-trait",
  "chrono",
