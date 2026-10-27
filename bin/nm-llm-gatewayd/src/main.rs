@@ -83,6 +83,11 @@ struct Config {
     /// 展示档案（与 Person 对齐）。
     #[serde(default)]
     avatar_url: String,
+    /// 头像原图文件（data:URI 文本）：上线时据此把 blob 传到**本模型 home**（gatewayd 所连节点），
+    /// 使 `avatar_url`(b3:hash) 能被其他用户按模型 home_node 拉到。
+    /// 否则 app 侧 blob 只落在 app 登录 home，模型挂靠别的 home 时他人拉不到 → 头像空。
+    #[serde(default)]
+    avatar_file: String,
     #[serde(default)]
     bio: String,
     #[serde(default)]
@@ -288,6 +293,27 @@ impl ModelRouter {
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// 解析 `data:<mime>;base64,<b64>` → (字节, mime)。非法/非 base64 则返回 None。
+/// 用于把 app 侧随 runtime 落盘的头像原图还原成字节，上线时 blob_put 到本模型 home。
+fn parse_data_uri(uri: &str) -> Option<(Vec<u8>, String)> {
+    let uri = uri.trim();
+    let rest = uri.strip_prefix("data:")?;
+    let (meta, b64) = rest.split_once(',')?;
+    if !meta.contains("base64") {
+        return None;
+    }
+    let mime = meta.split(';').next().unwrap_or("application/octet-stream");
+    let mime = if mime.is_empty() {
+        "application/octet-stream"
+    } else {
+        mime
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .ok()?;
+    Some((bytes, mime.to_string()))
 }
 
 fn parse_hex32(s: &str) -> anyhow::Result<[u8; 32]> {
@@ -518,6 +544,20 @@ async fn serve(config: String, node_override: String) -> anyhow::Result<()> {
 
     let display_name = cfg.display_name.clone();
     let avatar_url = cfg.avatar_url.clone();
+    // 头像内容寻址 blob 迁移：解析 avatar_file(data:URI) 得原图字节；上线时传到**本模型 home**。
+    // 内容寻址=同字节同 blake3 hash，故传到任何节点都与 avatar_url 的 b3:hash 对上。失败不阻断上线。
+    let avatar_blob: Option<(Vec<u8>, String)> =
+        if avatar_url.starts_with("b3:") && !cfg.avatar_file.trim().is_empty() {
+            match std::fs::read_to_string(cfg.avatar_file.trim()) {
+                Ok(uri) => parse_data_uri(&uri),
+                Err(e) => {
+                    eprintln!("头像原图读取失败（跳过，不影响上线）: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
     let bio = cfg.bio.clone();
     let status_text = cfg.status_text.clone();
     let links = cfg.links.clone();
@@ -547,7 +587,18 @@ async fn serve(config: String, node_override: String) -> anyhow::Result<()> {
         let metering = metering.clone();
         let billing = billing.clone();
         let price_label = price_label.clone();
+        let avatar_blob = avatar_blob.clone();
         async move {
+            // 头像 blob 先传到**本模型 home**（gatewayd 连的节点），再注册 profile。
+            // 内容寻址幂等：每次(重)连都传一遍，确保换网/重连后 blob 仍在当前 home，他人可拉。
+            if let Some((bytes, mime)) = &avatar_blob {
+                match sess.blob_put(bytes.clone(), mime).await {
+                    Ok((hash, _)) => {
+                        println!("头像 blob 已上传到本模型 home: b3:{}", hex(&hash))
+                    }
+                    Err(e) => eprintln!("头像 blob 上传失败（不影响注册）: {e}"),
+                }
+            }
             let mut attrs = HashMap::new();
             attrs.insert("model".to_string(), default_model.clone());
             attrs.insert("models".to_string(), models_csv);

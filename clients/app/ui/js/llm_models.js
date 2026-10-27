@@ -756,7 +756,9 @@
     const avFile = document.getElementById("llm-f-av-file");
     function paintAv() {
       if (!avPrev) return;
-      const src = pendingAvatar === "" ? "" : pendingAvatar || avCur;
+      // 预览只认 avCur（可直接显示的 data:URI；选图/移除/未改都已同步到它）。
+      // 不能用 pendingAvatar——putBlob 成功后它是 b3:hash 引用，avatarHtml 渲染不出图。
+      const src = avCur || "";
       const name = (nameEl && nameEl.value.trim()) || (m && (m.displayName || m.model)) || "?";
       avPrev.innerHTML =
         typeof Profile !== "undefined" && Profile.avatarHtml
@@ -801,10 +803,10 @@
             if (window.toast) toast("图片太大，请换更简单的图");
             return;
           }
-          let ref = Profile.putBlob ? await Profile.putBlob(data) : null;
-          pendingAvatar = ref || data;
-          avCur = data; // 预览立刻生效（引用需等 resolve 才能显示）
+          avCur = data; // 先画预览（零延迟），再后台上传
           paintAv();
+          let ref = Profile.putBlob ? await Profile.putBlob(data) : null;
+          pendingAvatar = ref || data; // 保存写 b3: 引用；putBlob 失败则内联 data:URI 兜底
         } catch (e) {
           if (window.toast) toast("设置头像失败：" + (e && e.message ? e.message : e));
         }

@@ -340,6 +340,29 @@ fn write_runtime_files(
         share.local_id.chars().take(8).collect::<String>().to_uppercase()
     );
 
+    // 头像原图随 runtime 落盘：供 gatewayd 上线时把 blob 传到**本模型 home**。
+    // app 侧 blob_put 把头像存在 app 登录 home，但模型以独立身份挂靠 share.home_node 上线；
+    // 他人按模型 home_node 拉 blob，若两 home 不同则拉不到 → 头像空。故把原图(本机 blob 缓存里的
+    // data:URI)交给 gatewayd，由它 blob_put 到自己所连的模型 home（内容寻址 → 同 hash，与 avatar_url 对上）。
+    let mut avatar_file = String::new();
+    if let Some(h) = share.avatar.strip_prefix("b3:") {
+        let h = h.trim();
+        if let Some(cache) = dir.parent().map(|p| p.join("blobs").join(format!("{h}.uri"))) {
+            if let Ok(uri) = std::fs::read_to_string(&cache) {
+                let p = run.join("avatar.uri");
+                if std::fs::write(&p, uri).is_ok() {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ =
+                            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+                    }
+                    avatar_file = p.to_string_lossy().to_string();
+                }
+            }
+        }
+    }
+
     // 连接参数：share 未配时继承 app 自身最近一次 connect 的 relay/pkarr/dns_origin——
     // 否则 selfhost 场景下 gatewayd 缺 pkarr 直接启动失败/落到 N0 公网设施,够不到自建 relay 上的 home。
     let mut relay_list: Vec<String> = share
@@ -416,6 +439,9 @@ fn write_runtime_files(
         toml.push_str(&format!("dns_origin = \"{}\"\n", toml_escape(d)));
     }
     toml.push_str(&format!("avatar_url = \"{}\"\n", toml_escape(&share.avatar)));
+    if !avatar_file.is_empty() {
+        toml.push_str(&format!("avatar_file = \"{}\"\n", toml_escape(&avatar_file)));
+    }
     toml.push_str(&format!("bio = \"{}\"\n", toml_escape(&share.bio)));
     toml.push_str(&format!(
         "status_text = \"{}\"\n",
