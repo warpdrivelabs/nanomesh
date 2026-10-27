@@ -4,6 +4,9 @@
 let MY_ID = "";
 let CONTACTS = [];              // 当前身份会话所见的发现实体 [{id,kind,name}]
 let ADDED = [];                 // 当前身份手动添加的实体 [{id,kind,name}]
+// 名片缓存：id -> {name,avatar,handle,kind}，累积「见过的非空档案」只进不退，持久化到 catalog(cards)。
+// 目录/联邦返回空档案（跨节点未收敛、刚连）时用它兜底，避免昵称/头像间歇性丢失。
+let CARDS = {};
 let PRESENCE = {};              // A：id -> 在线状态（含跨节点好友），presence_query 批量刷新
 let CONVOS = {};                // 当前身份的会话：id -> [{id,from,body,ts}]
 let ACTIVE = null;              // 当前打开的聊天对端 id（与主区聊天框一致；关闭 tab 后清空）
@@ -30,14 +33,50 @@ let UNREAD_BY_USER = {};
 
 
 // 发现实体 + 手动添加合并（去重；发现的以直播目录为准）。
+// 昵称/头像/handle 走「非空才覆盖 + 名片缓存兜底」：目录某次返回空档案不会抹掉已显示的名字/头像。
 function mergedEntities() {
   const map = {};
   ADDED.forEach((a) => { map[a.id] = { ...a, added: true }; });
-  CONTACTS.forEach((c) => { map[c.id] = { ...map[c.id], ...c, added: !!(map[c.id] && map[c.id].added) }; });
-  // A：用批量查到的 presence 盖到所有项（跨节点 ADDED 好友本来无 presence）；
-  // 本地 directory 已带非空 presence 时以其为准（同节点权威）。
-  Object.values(map).forEach((c) => { if (!c.presence && PRESENCE[c.id]) c.presence = PRESENCE[c.id]; });
+  CONTACTS.forEach((c) => {
+    const prev = map[c.id] || {};
+    const merged = { ...prev, ...c, added: !!prev.added };
+    // 保护：directory 的空 name/avatar/handle 不覆盖 ADDED/上一轮的非空值。
+    if (!c.name && prev.name) merged.name = prev.name;
+    if (!c.avatar && prev.avatar) merged.avatar = prev.avatar;
+    if (!c.handle && prev.handle) merged.handle = prev.handle;
+    map[c.id] = merged;
+  });
+  Object.values(map).forEach((c) => {
+    // 名片缓存兜底：ADDED 与 CONTACTS 都没给出的 name/avatar/handle，用历史见过的值补上。
+    const card = CARDS[c.id];
+    if (card) {
+      if (!c.name && card.name) c.name = card.name;
+      if (!c.avatar && card.avatar) c.avatar = card.avatar;
+      if (!c.handle && card.handle) c.handle = card.handle;
+    }
+    // A：用批量查到的 presence 盖到所有项（跨节点 ADDED 好友本来无 presence）；
+    // 本地 directory 已带非空 presence 时以其为准（同节点权威）。
+    if (!c.presence && PRESENCE[c.id]) c.presence = PRESENCE[c.id];
+  });
   return Object.values(map);
+}
+
+// 把一批实体里「非空的 name/avatar/handle/kind」累积进名片缓存（只进不退），并持久化。
+// 存 avatar 的原始引用(b3:)而非解析后的 data:URI——data:URI 由磁盘 blob 缓存按 hash 兜底。
+function absorbCards(list) {
+  if (!Array.isArray(list)) return;
+  let changed = false;
+  list.forEach((c) => {
+    if (!c || !c.id || c.id === MY_ID) return;
+    const card = CARDS[c.id] || { id: c.id };
+    let touched = false;
+    ["name", "avatar", "handle", "kind"].forEach((k) => {
+      const v = c[k];
+      if (v != null && v !== "" && v !== card[k]) { card[k] = v; touched = true; }
+    });
+    if (touched) { CARDS[c.id] = card; changed = true; }
+  });
+  if (changed && window.ListCache) ListCache.put({ cards: Object.values(CARDS) });
 }
 function entityById(id) { return mergedEntities().find((c) => c.id === id); }
 window.entityById = entityById;
@@ -173,6 +212,9 @@ async function imStart(myId) {
   ACTIVE = null; DETAIL_ID = null;
   if (window.ListCache) await ListCache.bind(MY_ID);
   const snap = window.ListCache ? ListCache.snapshot() : {};
+  // 名片缓存种子：先加载历史见过的昵称/头像，首屏即可兜底（目录/roster 还没回来也不空）。
+  CARDS = {};
+  (snap.cards || []).forEach((c) => { if (c && c.id) CARDS[c.id] = c; });
   ADDED = (snap.added || []).slice(); // local cache seed (fast start)
   // Roster: sync from home node (authoritative, multi-device). Merge: server wins on conflicts.
   try {
@@ -188,14 +230,15 @@ async function imStart(myId) {
   } catch (_) { /* home node unreachable: proceed with local cache */ }
   CONTACTS = snap.directory || [];
   lastDirSig = dirSig(CONTACTS);
+  // 把缓存种子里的非空档案并入名片缓存（ADDED/roster/directory 都算见过）。
+  absorbCards(ADDED);
+  absorbCards(CONTACTS);
   if (window.Groups && Groups.hydrate) Groups.hydrate(snap.groups || []);
   if (window.Channels && Channels.hydrate) Channels.hydrate(snap.channels || []);
   renderPanels();
   // 启动先用本机头像缓存铺开（磁盘命中不联网），有变更再由 imRefresh 补拉。
-  if (window.Profile) {
-    Profile.resolveList(CONTACTS, () => renderPanels());
-    Profile.resolveList(ADDED, () => renderPanels());
-  }
+  // 解析整张合并表（含名片缓存兜底的 b3: 头像），把 data:URI 填进 entityAv/avCache 供展示。
+  if (window.Profile) Profile.resolveList(mergedEntities(), () => renderPanels());
   if (window.Tabs) Tabs.closeAll(); // 每次连接（含切换身份）重置多 tab 工作区
   if (typeof updateUserChip === "function") updateUserChip();
   if (typeof window.renderNodeSvcList === "function") window.renderNodeSvcList(); // 连接后刷新节点服务面板（hydrate 后数据已就绪）
@@ -245,15 +288,13 @@ async function imRefresh() {
     }
     lastDirSig = sig;
     CONTACTS = next || [];
+    absorbCards(CONTACTS); // 累积本轮非空档案到名片缓存（空档案不覆盖已记住的）
     if (window.ListCache) ListCache.put({ directory: CONTACTS });
   } catch (e) {
     if (!CONTACTS.length && window.toast) toast("目录刷新失败：" + (e && e.message ? e.message : e));
   }
   renderPanels();
-  if (window.Profile) {
-    Profile.resolveList(CONTACTS, () => renderPanels());
-    Profile.resolveList(ADDED, () => renderPanels());
-  }
+  if (window.Profile) Profile.resolveList(mergedEntities(), () => renderPanels());
   refreshPresence(); // A：每次刷新都重查在线态（不受 dir-sig 早退影响）
 }
 

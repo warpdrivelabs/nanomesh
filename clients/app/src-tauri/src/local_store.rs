@@ -118,11 +118,13 @@ fn catalog_kind(kind: &str) -> Result<&'static str, String> {
         "added" => Ok("added"),
         "groups" => Ok("groups"),
         "channels" => Ok("channels"),
+        // 名片缓存：累积保存见过的实体昵称/头像引用（只进不退），供目录返回空档案时兜底展示。
+        "cards" => Ok("cards"),
         _ => Err("bad_kind".into()),
     }
 }
 
-/// 读出某个身份的实体目录、手动添加的实体、群和频道。
+/// 读出某个身份的实体目录、手动添加的实体、群、频道和名片缓存。
 #[tauri::command]
 pub(crate) fn catalog_load(app: AppHandle, user: String) -> Result<String, String> {
     let user = identity_key(&user)?;
@@ -132,6 +134,7 @@ pub(crate) fn catalog_load(app: AppHandle, user: String) -> Result<String, Strin
         "added": rows_of(&conn, &user, "added")?,
         "groups": rows_of(&conn, &user, "groups")?,
         "channels": rows_of(&conn, &user, "channels")?,
+        "cards": rows_of(&conn, &user, "cards")?,
     }))
     .map_err(|e| e.to_string())
 }
