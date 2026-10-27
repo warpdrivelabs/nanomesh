@@ -191,6 +191,10 @@ window.applyReadMarker = applyReadMarker;
 
 async function imStart(myId) {
   MY_ID = myId || "";
+  // 解锁后重新加载本机资料：启动时 routeStart 那次 Profile.load() 在解锁前跑（profile_load 需 vk），
+  // 会失败并清空 MEM；不在此重载，则 ownAvatar/updateUserChip 读到空 → 左下角头像按钮无图，
+  // 且随后的 Profile.publish() 会用空资料覆盖节点上的昵称/头像。此处已连接=已解锁，load 必成。
+  if (window.Profile && Profile.load) { try { await Profile.load(); } catch (_) {} }
   CONVOS = CONVOS_BY_USER[MY_ID] = {};
   UNREAD = UNREAD_BY_USER[MY_ID] = {};
   READ_UPTO = {}; // P1-6：每次（切身份）连接重置已读位，随后经 read_list 追平
