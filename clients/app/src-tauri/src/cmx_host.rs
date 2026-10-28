@@ -149,6 +149,9 @@ struct CmxRunning {
     app: Arc<AgentApp>,
     port: u16,
     token: String,
+    /// 组件 invoke 桥的用户垫片:true=「agent」命令拦 current_user/login/logout 返回合成本地用户
+    /// (对齐 BOOT_SHIM 语义;login=portal 时 false,透传内核认证)。
+    shim_user: bool,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -253,6 +256,17 @@ fn token_ok(st: &HttpState, headers: &HeaderMap, query: Option<&str>) -> bool {
     if st.token.is_empty() {
         return true; // 配置显式关闭
     }
+    // 组件化嵌入:组件持 token 属性时所有 HTTP 请求带 Authorization: Bearer <token>
+    // (bridge.js embHeaders;附件上传/SSE 兜底经此过闸,静态装配面不带凭证故已豁免 token)。
+    if headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|t| t == st.token)
+        .unwrap_or(false)
+    {
+        return true;
+    }
     let tok = format!("t={}", st.token);
     let q_has = |q: &str| q.split('&').any(|kv| kv == tok);
     if query.map(q_has).unwrap_or(false) {
@@ -326,15 +340,20 @@ async fn serve_static(st: &HttpState, rel: &str, set_cookie: bool) -> axum::resp
     }
 }
 
-async fn h_index(State(st): State<HttpState>, headers: HeaderMap, uri: axum::http::Uri) -> axum::response::Response {
-    if !loopback_ok(&headers) || !token_ok(&st, &headers, uri.query()) {
+// 静态资产(index/css/js/vendor/embed):只做回环校验,**不进 token 闸**。
+// 组件化嵌入的装配 fetch(拉 index.html 解析 css/js 清单)不带 ?t=、跨源无 cookie,
+// Origin 形态又因 webview 实现而异(macOS WKWebView 非 tauri://localhost)——按凭证放行不可靠。
+// 静态文件只是 cmx-agent 的 UI 代码,无敏感数据;敏感面是 /api*(命令总线/附件),token 闸照守。
+// (组件在 Tauri 桥环境下 API 走 invoke,不打 HTTP /api;浏览器直开形态带 ?t= 过 /api 闸,不受影响。)
+async fn h_index(State(st): State<HttpState>, headers: HeaderMap, _uri: axum::http::Uri) -> axum::response::Response {
+    if !loopback_ok(&headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
     serve_static(&st, "", true).await
 }
 
 async fn h_asset(State(st): State<HttpState>, headers: HeaderMap, uri: axum::http::Uri) -> axum::response::Response {
-    if !loopback_ok(&headers) || !token_ok(&st, &headers, uri.query()) {
+    if !loopback_ok(&headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
     serve_static(&st, uri.path(), false).await
@@ -576,6 +595,7 @@ async fn start_inner(app: &AppHandle, state: &TState<'_, AppState>) -> Result<se
         .route("/css/{*p}", get(h_asset))
         .route("/js/{*p}", get(h_asset))
         .route("/vendor/{*p}", get(h_asset))
+        .route("/embed/{*p}", get(h_asset)) // 嵌入组件入口 truemate-app.js(组件化嵌入)
         .route("/cmx.png", get(h_asset))
         .route("/api", post(h_api))
         .route("/api/stream", post(h_stream))
@@ -583,6 +603,9 @@ async fn start_inner(app: &AppHandle, state: &TState<'_, AppState>) -> Result<se
         .route("/api/attachment", get(h_attachment))
         .route("/api/att/upload", post(h_upload))
         .with_state(http)
+        // 组件化嵌入:组件在宿主 webview(tauri://localhost)里按基址 fetch 本服务,属跨源——
+        // 放开 CORS(回环守卫 + token/宿主源闸仍在,permissive 只解浏览器侧预检)。
+        .layer(tower_http::cors::CorsLayer::permissive())
         .layer(axum::extract::DefaultBodyLimit::max(96 * 1024 * 1024));
     let (sd_tx, sd_rx) = tokio::sync::oneshot::channel::<()>();
     tauri::async_runtime::spawn(async move {
@@ -595,7 +618,9 @@ async fn start_inner(app: &AppHandle, state: &TState<'_, AppState>) -> Result<se
     });
 
     *state.cmx.inner.lock().await =
-        Some(CmxRunning { app: agent, port, token: token.clone(), shutdown: Some(sd_tx) });
+        Some(CmxRunning { app: agent.clone(), port, token: token.clone(), shim_user: inject_shim, shutdown: Some(sd_tx) });
+    // 组件化嵌入:会话事件总线 → Tauri session_event(组件 main.js __TAURI__ 分支实时渲染)。
+    spawn_session_event_forwarder(app.clone(), agent);
     tracing::info!(port, login = %cfg.login, shim = inject_shim, "cmx-agent workbench started");
     Ok(json!({ "running": true, "port": port,
         "url": format!("http://127.0.0.1:{port}/?t={token}") }))
@@ -641,4 +666,172 @@ pub(crate) async fn cmx_cfg_get(app: AppHandle) -> Result<CmxCfg, String> {
 #[tauri::command]
 pub(crate) async fn cmx_cfg_set(app: AppHandle, cfg: CmxCfg) -> Result<(), String> {
     save_cfg(&app, &cfg)
+}
+
+// ── 组件化嵌入(truemate-app Web Component)的 Tauri invoke 桥 ────────────────
+// 组件在宿主页面(nanomesh 自己的 webview)里运行,bridge.js 检测到 window.__TAURI__
+// 即走 invoke 直连内核(对接指南 §二 Tauri 桥环境):invoke("agent") 命令总线 +
+// invoke("send_stream") 流式回合(事件经 channel emit)。HTTP 面保留(SSE 订阅 /
+// 附件上传下载仍走 axum,组件 server 属性指向它);iframe 整页承载则不再需要。
+
+/// 取运行中的内核句柄(未启动则报错;前端先 cmx_start 再装配组件)。
+async fn running_app(state: &TState<'_, AppState>) -> Result<(Arc<AgentApp>, bool), String> {
+    let g = state.cmx.inner.lock().await;
+    let r = g.as_ref().ok_or("工作台未启动")?;
+    Ok((r.app.clone(), r.shim_user))
+}
+
+/// 命令总线(组件 bridge.js 的 invoke("agent") 分支)。
+/// shim_user 时拦 current_user/login/logout 合成本地用户——语义对齐 HTTP 面的 BOOT_SHIM。
+#[tauri::command]
+pub(crate) async fn agent(state: TState<'_, AppState>, payload: String) -> Result<String, String> {
+    let (app, shim_user) = running_app(&state).await?;
+    if shim_user {
+        let cmd = serde_json::from_str::<serde_json::Value>(&payload)
+            .ok()
+            .and_then(|v| v.get("cmd").and_then(|c| c.as_str()).map(str::to_owned))
+            .unwrap_or_default();
+        // auth_token/auth_user:组件认证契约命令(我们给组件传了 token 属性,它会先发 auth_token)。
+        // 免登录态直接认通过并返回合成用户,随后 current_user 探测同样命中,组件进入已认证态。
+        if matches!(cmd.as_str(), "current_user" | "login" | "logout" | "auth_token" | "auth_user") {
+            return Ok(json!({
+                "ok": true,
+                "data": { "user": {
+                    "user_id": "local", "username": "local", "nickname": "NanoMesh",
+                    "roles": [], "must_change_password": false
+                } }
+            })
+            .to_string());
+        }
+    }
+    Ok(dispatch_on_net(app, payload).await)
+}
+
+/// 流式回合(组件 bridge.js 的 invoke("send_stream") 分支):事件经 Tauri 事件 `channel`
+/// 逐帧 emit,末尾 stream_done/stream_error。实现对齐 cmx-agent-shell 同名命令。
+#[tauri::command]
+pub(crate) async fn send_stream(
+    app: AppHandle,
+    state: TState<'_, AppState>,
+    session_id: String,
+    text: String,
+    channel: String,
+    images: Option<Vec<cmx_agent_app::IncomingImage>>,
+    files: Option<Vec<cmx_agent_app::IncomingFile>>,
+) -> Result<(), String> {
+    let (agent, _) = running_app(&state).await?;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+    // 转发:rx → Tauri emit(Tauri 运行时上)。
+    let apph = app.clone();
+    let chan = channel.clone();
+    let fwd = tauri::async_runtime::spawn(async move {
+        use tauri::Emitter;
+        while let Some(v) = rx.recv().await {
+            let _ = apph.emit(&chan, v);
+        }
+    });
+    // 跑回合:spawn_blocking + net_rt(模型网络调用必须离开 Tauri 运行时,见 net_rt 注释)。
+    let run = tauri::async_runtime::spawn_blocking(move || {
+        net_rt().block_on(async move {
+            let sink = Arc::new(cmx_agent_app::ChannelSink::new(tx.clone()));
+            let r = agent
+                .send_streaming_with_attachments(
+                    &session_id,
+                    &text,
+                    images.unwrap_or_default(),
+                    files.unwrap_or_default(),
+                    sink,
+                )
+                .await;
+            match &r {
+                Ok(_) => {
+                    let _ = tx.send(json!({"kind":"stream_done"}));
+                }
+                Err(e) => {
+                    let _ = tx.send(json!({"kind":"stream_error","message": e.to_string()}));
+                }
+            }
+            r.map(|_| ()).map_err(|e| e.to_string())
+        })
+    })
+    .await
+    .map_err(|e| format!("task failed: {e}"))?;
+    let _ = fwd.await;
+    run
+}
+
+/// 会话事件总线 → Tauri `session_event` 事件(组件 main.js 的 __TAURI__ 分支监听;
+/// IM 桥等非本地回合的事件也实时到达)。工作台启动后由 start_inner 拉起,随内核 Arc 存活。
+pub(crate) fn spawn_session_event_forwarder(app: AppHandle, agent: Arc<AgentApp>) {
+    tauri::async_runtime::spawn(async move {
+        use tauri::Emitter;
+        use tokio::sync::broadcast::error::RecvError;
+        let mut rx = agent.event_bus().subscribe();
+        loop {
+            match rx.recv().await {
+                Ok(env) => {
+                    let _ = app.emit("session_event", &env);
+                }
+                Err(RecvError::Lagged(_)) => {
+                    let _ = app.emit("session_resync", json!({}));
+                }
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+/// 原生多选附件(组件 session.js 的 invoke("pick_attachment_files") 分支):
+/// rfd 弹窗 → {path,name,bytes} 列表,前端只传路径引用(零拷贝,不经 base64)。
+#[tauri::command]
+pub(crate) async fn pick_attachment_files(
+) -> Result<Option<Vec<cmx_agent_app::workspace::PickedFileMeta>>, String> {
+    tauri::async_runtime::spawn_blocking(cmx_agent_app::workspace::native_pick_attachments)
+        .await
+        .map_err(|e| format!("附件选择任务失败：{e}"))?
+}
+
+/// 原生选工作区文件夹(组件 workspace.js 的 invoke 分支)。
+#[tauri::command]
+pub(crate) async fn pick_local_directory() -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(cmx_agent_app::workspace::native_pick_local_directory)
+        .await
+        .map_err(|e| format!("文件夹选择任务失败：{e}"))?
+}
+
+/// 原生选插件包(组件 market.js 的 invoke 分支)。
+#[tauri::command]
+pub(crate) async fn pick_plugin_package() -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(cmx_agent_app::workspace::native_pick_plugin_package)
+        .await
+        .map_err(|e| format!("插件包选择任务失败：{e}"))?
+}
+
+/// 原生选专家包(组件 market.js 的 invoke 分支)。
+#[tauri::command]
+pub(crate) async fn pick_expert_package() -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(cmx_agent_app::workspace::native_pick_expert_package)
+        .await
+        .map_err(|e| format!("专家包选择任务失败：{e}"))?
+}
+
+/// 外链用系统浏览器打开(组件「获取 API Key ↗」等;webview 里 window.open 被拦)。只放行 http(s)。
+#[tauri::command]
+pub(crate) fn open_external(url: String) -> Result<(), String> {
+    let lower = url.to_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return Err(format!("不支持打开的链接：{url}"));
+    }
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("open").arg(&url).status();
+    #[cfg(target_os = "linux")]
+    let status = std::process::Command::new("xdg-open").arg(&url).status();
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let status: std::io::Result<std::process::ExitStatus> =
+        Err(std::io::Error::other("unsupported platform"));
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!("打开失败(status {s})")),
+        Err(e) => Err(format!("打开失败：{e}")),
+    }
 }

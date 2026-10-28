@@ -61,13 +61,14 @@
   .rh-tr{top:0;right:0;width:10px;height:10px;cursor:ne-resize}
   .rh-bl{bottom:0;left:0;width:10px;height:10px;cursor:sw-resize}
   .rh-br{bottom:0;right:0;width:10px;height:10px;cursor:se-resize}
-  /* 侧栏折叠 */
-  body.sidebar-collapsed aside{display:none}
+  /* 侧栏折叠:只隐藏工作区直属侧栏——裸 aside 会误杀对话框里的 <aside class="dlg-aside">
+     (编辑资料/群资料的头像区在 cmx-full/折叠态下消失,用户实测踩中) */
+  body.sidebar-collapsed .workspace>aside{display:none}
 
   /* ── 智能体工作台(cmx-agent 内嵌)──
      cmx-full:工作台活跃时左侧栏整体退场,整个工作区交给 iframe;
      cmx-stage:常驻 main 的覆盖层(iframe 重挂 DOM 会整页重载,故显隐而非重建)。 */
-  body.cmx-full aside,body.cmx-full .splitter{display:none}
+  body.cmx-full .workspace>aside,body.cmx-full .splitter{display:none}
   main{position:relative}
   .cmx-stage{position:absolute;inset:0;z-index:6;background:var(--bg)}
   .cmx-stage[hidden]{display:none}
@@ -82,7 +83,8 @@
   .actbar-items{display:contents}
 
   /* ── 左侧栏 ── */
-  aside{width:var(--aside-w);flex:0 0 var(--aside-w);background:var(--panel);
+  /* ── 左侧栏 ──(选择器限定工作区直属 aside:裸 aside 会把宽度/flex 钉到对话框的 .dlg-aside 上) */
+  .workspace>aside{width:var(--aside-w);flex:0 0 var(--aside-w);background:var(--panel);
     display:flex;flex-direction:column;padding:0 10px;position:relative}
   /* 左右分栏拖动条：单条分隔线（取代 aside 右边框），中间有可拖动手柄 */
   .splitter{flex:0 0 6px;align-self:stretch;cursor:col-resize;position:relative;z-index:5;background:transparent}
