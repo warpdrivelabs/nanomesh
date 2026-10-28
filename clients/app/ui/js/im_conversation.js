@@ -138,8 +138,15 @@ function msgHtml(m, showSender, cont) {
     : "";
   const stamp = (!sender && (time || ticks)) ? `<span class="im-time">${time}${ticks}</span>` : "";
   const face = window.Profile ? Profile.faceHtml(m.from, named, 32) : "";
-  const rich = window.Composer ? Composer.bubble(m) : { cls: "", html: escapeHtml(m.body || "") };
-  return `<div class="im-msg ${mine ? "me" : ""} with-av${cont ? " cont" : ""}" data-mid="${escapeHtml(m.id || "")}">
+  // 模型会话的对端消息(模型回复):完整 Markdown 渲染(复用频道 marked+消毒管线);
+  // 流式中也按 md 画(增量重渲,代码块/表格随 delta 长出)。用户自己的消息仍按普通文本/媒体。
+  const isModelMsg = !mine && typeof modelTarget === "function" && modelTarget(m.from);
+  const rich = isModelMsg && window.Composer && Composer.bubbleMd && !(m.media || (m.body || "").startsWith("NMCHAT1 "))
+    ? Composer.bubbleMd(m)
+    : (window.Composer ? Composer.bubble(m) : { cls: "", html: escapeHtml(m.body || "") });
+  // 宽度:模型 md 回复整行 100%(表格/代码块需要);其余消息 50%(im.css .im-msg/.im-msg--wide)。
+  const wide = rich.cls && rich.cls.indexOf("im-bubble--md") >= 0 ? " im-msg--wide" : "";
+  return `<div class="im-msg ${mine ? "me" : ""} with-av${cont ? " cont" : ""}${wide}" data-mid="${escapeHtml(m.id || "")}">
     ${face}
     <span class="im-stack">
       ${sender}
@@ -322,7 +329,14 @@ async function sendMsg(text) {
       await pushMsg(ACTIVE, { id: localId, from: MY_ID, body: text, ts: Date.now(), to: ACTIVE, status: 1 });
       const messages = await buildModelMessages(ACTIVE, text);
       const streamId = (crypto.randomUUID && crypto.randomUUID()) || "s" + Date.now() + Math.random().toString(16).slice(2);
-      await NM.inv("llm_chat_stream", { target: ACTIVE, messages, streamId });
+      // 「正在思考…Ns」:即刻显示,首个 delta(含错误帧)到达即撤(im_events.js)。
+      if (window.showModelThinking) showModelThinking(ACTIVE, streamId);
+      try {
+        await NM.inv("llm_chat_stream", { target: ACTIVE, messages, streamId });
+      } catch (e) {
+        if (window.hideModelThinking) hideModelThinking(streamId);
+        throw e;
+      }
     } else {
       // 乐观插入(status=0 发送中)；send_to 返回原 gram_id → 升单勾✓并写 gramId(后续双勾按它匹配)。
       // 必须 await pushMsg：agent 流式首包很快时，未入库的用户气泡会被回复抢跑到前面。

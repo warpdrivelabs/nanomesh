@@ -606,7 +606,10 @@ main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
     radial-gradient(ellipse 80% 40% at 50% 0%, color-mix(in srgb, var(--aqua) 7%, transparent), transparent 70%),
     var(--bg); }
 .im-empty--center { margin: auto; padding: 28px 16px; text-align: center; color: var(--muted); font-size: 13px; }
-.im-msg { display: flex; flex-direction: row; align-items: flex-start; max-width: min(78%, 560px); gap: 8px; }
+.im-msg { display: flex; flex-direction: row; align-items: flex-start; max-width: 50%; gap: 8px; }
+/* 模型 md 回复:整行 100%(表格/代码块需要;msgHtml 按 im-bubble--md 加 --wide) */
+.im-msg--wide { max-width: 100%; }
+.im-msg--wide .im-stack, .im-msg--wide .im-bubble--md { width: 100%; }
 .im-msg.me { align-self: flex-end; flex-direction: row-reverse; }
 .im-stack { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
 .im-msg.me .im-stack { align-items: flex-end; }
@@ -812,6 +815,31 @@ html[data-theme="light"] .home-feats li { background: color-mix(in srgb, var(--p
 .im-msg.me .im-bubble--media { background: var(--panel); color: var(--ink); border-color: var(--border); box-shadow: 0 1px 1px color-mix(in srgb, #000 12%, transparent); }
 .im-photo { display: block; max-width: 240px; max-height: 240px; border-radius: 12px; cursor: zoom-in; }
 .im-voice, .im-file, .im-card { display: flex; align-items: center; gap: 8px; min-width: 160px; padding: 6px 8px; }
+/* ── 多元消息:位置卡 ── */
+.im-location { display: flex; align-items: center; gap: 10px; min-width: 200px; padding: 8px 10px;
+  border: none; background: transparent; color: inherit; cursor: pointer; text-align: left; width: 100%; }
+.im-loc-map { flex: none; width: 40px; height: 40px; border-radius: 10px; display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent-soft); color: var(--aqua); }
+.im-loc-map .nm-ico { width: 20px; height: 20px; }
+.im-loc-meta { min-width: 0; }
+.im-loc-meta b { display: block; font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.im-loc-meta small { display: block; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* ── 多元消息:转账卡(品牌橙渐变,已处理态压灰) ── */
+.im-bubble--transfer { background: transparent; border: none; padding: 0; }
+.im-transfer { display: flex; align-items: center; gap: 10px; min-width: 210px; padding: 12px 14px; border-radius: 12px;
+  background: linear-gradient(135deg, #f7a23b, #ef7a3a); color: #fff; }
+.im-transfer--done { background: linear-gradient(135deg, color-mix(in srgb, #f7a23b 55%, var(--panel)), color-mix(in srgb, #ef7a3a 55%, var(--panel))); }
+.im-tf-ico { flex: none; width: 36px; height: 36px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(255,255,255,.22); }
+.im-tf-ico .nm-ico { width: 20px; height: 20px; }
+.im-tf-meta b { display: block; font-size: 15px; font-weight: 700; }
+.im-tf-meta small { display: block; font-size: 12px; opacity: .85; }
+/* ── 模型消息:完整 Markdown 气泡(复用频道 chn-post-md/chn-md-* 样式;channel.css 已定义)。
+   宽度由 .im-msg--wide 给到整行 100%,气泡自身不再设上限。 ── */
+.im-bubble--md { background: var(--panel); color: var(--ink); border: 1px solid var(--border); }
+.im-md { font-size: 13.5px; line-height: 1.65; }
+.im-md pre { overflow-x: auto; }
+.im-md table { display: block; max-width: 100%; overflow-x: auto; }
 .im-voice audio, .im-video video { display: block; max-width: 260px; }
 .im-video video { max-height: 180px; border-radius: 10px; background: #000; }
 .im-file, .im-card, .im-fetch { border: none; background: transparent; color: inherit; cursor: pointer; text-align: left; width: 100%; }
@@ -900,8 +928,9 @@ html[data-theme="light"] .home-feats li { background: color-mix(in srgb, var(--p
 }
 .conv-head .av, .conv-head .av-sm { width: var(--av-xs); height: var(--av-xs); flex-basis: var(--av-xs); }
 .conv-gear.is-on { color: var(--aqua); background: var(--accent-soft); }
-.im-msg { max-width: min(72%, 34em); width: max-content; align-self: flex-start; }
+.im-msg { max-width: 50%; width: max-content; align-self: flex-start; }
 .im-msg.me { align-self: flex-end; }
+.im-msg--wide { max-width: 100%; width: 100%; }
 .im-bubble { line-height: var(--lh-body); width: auto; }
 .log { gap: 0; align-items: stretch; }
 .log-flow { display: flex; flex-direction: column; gap: 10px; }
@@ -966,6 +995,12 @@ html[data-theme="light"] .home-feats li { background: color-mix(in srgb, var(--p
   border-top-color: transparent; border-radius: 50%; animation: im-spin 0.7s linear infinite; vertical-align: middle; }
 @keyframes im-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .im-spin { animation: none; } }
+/* 模型「正在思考…Ns」瞬态指示(左侧小药丸;首个 delta 到达即撤,见 im_events.js) */
+.im-think { align-self: flex-start; display: inline-flex; align-items: center; gap: 7px; margin: 4px 0 2px 40px;
+  padding: 7px 12px; border-radius: 6px 14px 14px 14px; background: var(--panel); border: 1px solid var(--border);
+  color: var(--muted); font-size: 12.5px; }
+.im-think .im-spin { width: 11px; height: 11px; }
+.im-think b { font-weight: 600; color: var(--ink2); font-variant-numeric: tabular-nums; min-width: 2ch; }
 .im-tick--pend { color: var(--muted, #8b949e); }
 .im-tick--sent { color: var(--muted, #8b949e); }
 .im-tick--read { color: var(--aqua, #58a6ff); font-weight: 600; }

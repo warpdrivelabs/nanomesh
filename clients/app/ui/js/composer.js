@@ -614,11 +614,11 @@ function imageSize(url) {
   });
 }
 
-const KIND_LABEL = { image: 1, voice: 1, video: 1, file: 1, card: 1 };
+const KIND_LABEL = { image: 1, voice: 1, video: 1, file: 1, card: 1, location: 1, transfer: 1 };
 function kindLabel(kind) {
-  const key = { image: "media.image", voice: "media.voice", video: "media.video", file: "media.file", card: "media.card" }[kind];
+  const key = { image: "media.image", voice: "media.voice", video: "media.video", file: "media.file", card: "media.card", location: "media.location", transfer: "media.transfer" }[kind];
   if (key && window.t) return t(key);
-  return { image: "[图片]", voice: "[语音]", video: "[视频]", file: "[文件]", card: "[名片]" }[kind] || (window.t ? t("media.msg") : "[消息]");
+  return { image: "[图片]", voice: "[语音]", video: "[视频]", file: "[文件]", card: "[名片]", location: "[位置]", transfer: "[转账]" }[kind] || (window.t ? t("media.msg") : "[消息]");
 }
 function fmtDur(ms) {
   const s = Math.max(0, Math.round((ms || 0) / 1000));
@@ -699,7 +699,45 @@ function bubble(m) {
       html: `<button type="button" class="im-card" data-act="open-card" data-id="${escapeHtml(media.card || "")}">${face}<span><b>${escapeHtml(who)}</b><small>${window.t ? t("media.cardName") : "名片"}</small></span></button>`,
     };
   }
+  // 位置消息:{kind:"location", lat, lng, name?, address?}。点开系统地图(经 open_https)。
+  if (media.kind === "location") {
+    const lat = Number(media.lat) || 0;
+    const lng = Number(media.lng) || 0;
+    const name = media.name || (window.t ? t("media.location") : "位置");
+    const addr = media.address || `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+    return {
+      cls: "im-bubble--media",
+      html: `<button type="button" class="im-location" data-act="open-location" data-lat="${lat}" data-lng="${lng}" data-name="${escapeHtml(name)}">
+        <span class="im-loc-map">${nmIcon("map")}</span>
+        <span class="im-loc-meta"><b>${escapeHtml(name)}</b><small>${escapeHtml(addr)}</small></span>
+      </button>`,
+    };
+  }
+  // 转账消息:{kind:"transfer", amount, currency?, note?, state?}。state: "" | accepted | refunded。
+  if (media.kind === "transfer") {
+    const amount = String(media.amount != null ? media.amount : "");
+    const cur = media.currency || "NMC";
+    const note = media.note || (window.t ? t("media.transferNote") : "转账给你");
+    const state = media.state === "accepted" ? "已收款" : media.state === "refunded" ? "已退回" : "";
+    return {
+      cls: "im-bubble--media im-bubble--transfer",
+      html: `<div class="im-transfer${state ? " im-transfer--done" : ""}" data-kind="transfer">
+        <span class="im-tf-ico">${nmIcon("coin")}</span>
+        <span class="im-tf-meta"><b>${escapeHtml(amount)} ${escapeHtml(cur)}</b><small>${escapeHtml(state || note)}</small></span>
+      </div>`,
+    };
+  }
   return { cls: "", html: escapeHtml(media.text || (window.t ? t("media.unsupported") : "不支持的消息")) };
+}
+
+// 模型(大模型/智能体)消息:完整 Markdown 渲染,复用频道的 marked+消毒管线(ChannelMd)。
+// 供 msgHtml 对「模型会话的对端消息」调用;ChannelMd 未加载时回退纯文本。
+function bubbleMd(m) {
+  const src = m.text || m.body || "";
+  if (window.ChannelMd && ChannelMd.render) {
+    return { cls: "im-bubble--md", html: `<div class="im-md chn-post-md">${ChannelMd.render(src)}</div>` };
+  }
+  return { cls: "", html: escapeHtml(src) };
 }
 
 const urlCache = new Map();
@@ -934,6 +972,15 @@ async function onMediaClick(e) {
   const card = e.target.closest("[data-act='open-card']");
   if (card && card.dataset.id && typeof window.selectContact === "function") {
     window.selectContact(card.dataset.id);
+    return;
+  }
+  const loc = e.target.closest("[data-act='open-location']");
+  if (loc) {
+    // 系统浏览器开 OpenStreetMap(无 Key、跨平台);经 open_https 走系统默认浏览器。
+    const lat = Number(loc.dataset.lat) || 0;
+    const lng = Number(loc.dataset.lng) || 0;
+    const url = `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=16/${lat}/${lng}`;
+    try { await NM.inv("open_https", { url }); } catch (err) { toast("打不开地图：" + errText(err)); }
   }
 }
 
@@ -947,7 +994,7 @@ function closeLight() {
 
 document.addEventListener("click", (e) => {
   if (e.target.closest && e.target.closest(".im-composer")) onComposerClick(e);
-  else if (e.target.closest && (e.target.closest(".im-media") || e.target.closest(".im-file") || e.target.closest(".im-card") || e.target.closest(".im-lightbox") || e.target.closest(".chn-md-img"))) onMediaClick(e);
+  else if (e.target.closest && (e.target.closest(".im-media") || e.target.closest(".im-file") || e.target.closest(".im-card") || e.target.closest(".im-location") || e.target.closest(".im-lightbox") || e.target.closest(".chn-md-img"))) onMediaClick(e);
 });
 
-window.Composer = { prepare, markup, attach, snapshot, absorb, preview, bubble, hydrate, encode, channelBody, toggleHistory };
+window.Composer = { prepare, markup, attach, snapshot, absorb, preview, bubble, bubbleMd, hydrate, encode, channelBody, toggleHistory };

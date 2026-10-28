@@ -31,6 +31,15 @@ function slimMsg(m) {
       parts: media.parts || [], home: media.home || "", thumb: media.thumb || "",
       card: media.card || "",
     };
+    // 多元消息扩展字段(位置/转账):有才带,落库后重开不丢。
+    if (media.kind === "location") {
+      o.media.lat = media.lat || 0; o.media.lng = media.lng || 0;
+      o.media.address = media.address || "";
+    } else if (media.kind === "transfer") {
+      o.media.amount = media.amount != null ? media.amount : "";
+      o.media.currency = media.currency || ""; o.media.note = media.note || "";
+      o.media.state = media.state || "";
+    }
   }
     if (m.seq) o.seq = m.seq;
     return o;

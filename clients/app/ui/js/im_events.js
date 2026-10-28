@@ -4,6 +4,49 @@ const AGENT_DELTA_TYPE = "nmspace.agent.delta.v1";
 // localId：落库/气泡 id；若 wire streamId 撞上历史消息则改用新 id，避免改旧气泡时间与位置。
 const STREAMS = {};
 
+// ── 模型「正在思考」指示:用户发送后到首个 delta 之间显示,按秒计时 ──
+// 瞬态 DOM(不入 VIEW/不落库);paintVirtual 重绘会抹掉,秒针 tick 时若在同会话则重挂。
+// 首个 delta(含错误帧)到达即移除;兜底 10 分钟自动消失(后端自身有超时,正常都会来帧)。
+const THINK = {}; // streamId -> {peer, start, timer}
+function showModelThinking(peer, streamId) {
+  hideModelThinking(streamId);
+  const st = { peer, start: Date.now(), timer: null };
+  THINK[streamId] = st;
+  const paint = () => {
+    if (!THINK[streamId]) return;
+    if (typeof VIEW === "undefined" || VIEW.id !== peer) return; // 不在该会话:不挂(回来时 tick 重挂)
+    const log = document.getElementById("conv-log");
+    if (!log) return;
+    let el = document.getElementById("im-think");
+    if (!el || el.dataset.sid !== streamId) {
+      if (el) el.remove();
+      el = document.createElement("div");
+      el.id = "im-think";
+      el.dataset.sid = streamId;
+      el.className = "im-think";
+      el.innerHTML = `<span class="im-spin"></span><span class="im-think-t">正在思考…</span><b class="im-think-s"></b>`;
+      (log.querySelector(".log-flow") || log).appendChild(el);
+      if (log.scrollHeight - log.scrollTop - log.clientHeight < 200) log.scrollTop = log.scrollHeight;
+    }
+    const s = Math.floor((Date.now() - st.start) / 1000);
+    const b = el.querySelector(".im-think-s");
+    if (b) b.textContent = s > 0 ? s + "s" : "";
+  };
+  paint();
+  st.timer = setInterval(() => {
+    if (Date.now() - st.start > 10 * 60 * 1000) { hideModelThinking(streamId); return; }
+    paint();
+  }, 1000);
+}
+function hideModelThinking(streamId) {
+  const st = THINK[streamId];
+  if (st) { clearInterval(st.timer); delete THINK[streamId]; }
+  const el = document.getElementById("im-think");
+  if (el && (!streamId || el.dataset.sid === streamId)) el.remove();
+}
+window.showModelThinking = showModelThinking;
+window.hideModelThinking = hideModelThinking;
+
 // 群/频道消息先于目录到达时，去抖拉一次列表，把假「私聊」行纠正过来。
 let _roomDirTimer = null;
 const _roomDirPend = { group: new Set(), channel: new Set() };
@@ -79,7 +122,29 @@ function growStreamBubble(localId, peer, text, ts) {
   const sel = (window.CSS && CSS.escape) ? CSS.escape(localId) : localId;
   const el = document.querySelector(`.im-msg[data-mid="${sel}"] .im-bubble`);
   if (el) {
-    el.textContent = text;                            // O(1) 原地更新，自动转义
+    // 模型流式回复:逐帧按 Markdown 重渲(表格/代码块随 delta 长出)。msgHtml 对模型消息
+    // 已走 bubbleMd(气泡带 im-bubble--md),这里跟它保持一致——否则流式中是纯文本、
+    // done 重绘才"跳"成 md,观感割裂(用户反馈)。节流 120ms:marked 全文重解析在长回复
+    // 下有成本,帧率高时合并渲染,尾帧必渲(done 后 ChatLog.append → renderPanels 还会终绘)。
+    const isMd = el.classList.contains("im-bubble--md");
+    if (isMd && window.Composer && Composer.bubbleMd) {
+      const now = Date.now();
+      el._mdQueue = text;
+      if (!el._mdLast || now - el._mdLast >= 120) {
+        el._mdLast = now;
+        el.innerHTML = Composer.bubbleMd({ text: el._mdQueue }).html;
+      } else if (!el._mdTimer) {
+        el._mdTimer = setTimeout(() => {
+          el._mdTimer = null;
+          el._mdLast = Date.now();
+          el.innerHTML = Composer.bubbleMd({ text: el._mdQueue }).html;
+          const lg = document.getElementById("conv-log");
+          if (lg && lg.scrollHeight - lg.scrollTop - lg.clientHeight < 160) lg.scrollTop = lg.scrollHeight;
+        }, 120);
+      }
+    } else {
+      el.textContent = text;                          // 非 md:O(1) 原地更新,自动转义
+    }
     const log = document.getElementById("conv-log");
     if (log && log.scrollHeight - log.scrollTop - log.clientHeight < 160) log.scrollTop = log.scrollHeight;
   } else {
@@ -91,6 +156,7 @@ function handleAgentDelta(m) {
   let d;
   try { d = JSON.parse(m.body || "{}"); } catch (_) { return; }
   if (!d || typeof d.streamId !== "string") return;
+  hideModelThinking(d.streamId); // 首帧(含错误帧)到达 → 撤「正在思考」
   const peer = m.from;
   const sid = d.streamId;
   const seq = typeof d.seq === "number" ? d.seq : 0;
