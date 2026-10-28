@@ -220,13 +220,9 @@
   <div class="resize-handle rh-br" data-resize="SouthEast"></div>
 
   <div class="workspace">
-    <!-- 活动栏：消息 / 实体 / 智能体工作台 / 大模型 / 频道 -->
+    <!-- 活动栏：标签由注册表驱动(内置 ui/actbar.json + 动态 app_data/activitybar.json)，js/actbar.js 渲染 -->
     <div class="activitybar">
-      <div class="act active" id="act-im" data-act="showPanel" data-panel="im" title="即时通讯"><span class="ico" data-ico="chat"></span></div>
-      <div class="act" id="act-cmx" data-act="showPanel" data-panel="cmx" title="智能体工作台"><span class="ico" data-ico="robot"></span></div>
-      <div class="act" id="act-entities" data-act="showPanel" data-panel="entities" title="实体目录"><span class="ico" data-ico="contacts"></span></div>
-      <div class="act" id="act-models" data-act="showPanel" data-panel="models" title="大模型"><span class="ico" data-ico="llm"></span></div>
-      <div class="act" id="act-channels" data-act="showPanel" data-panel="channels" title="频道"><span class="ico" data-ico="channels"></span></div>
+      <div id="actbar-items" class="actbar-items"></div>
       <div class="act-sp"></div>
       <!-- 活动栏底部：当前用户头像（点开切换身份/编辑资料；昵称见悬浮提示与下拉）-->
       <button class="act act-user" id="tb-user" title="切换用户身份 / 编辑资料">
@@ -342,6 +338,8 @@
       <!-- 智能体工作台舞台:iframe 常驻此处(重挂 DOM 会整页重载,故显隐而非重建);
            cmx:workbench 标签活跃时显示并隐藏左侧栏(body.cmx-full),由 js/cmx_agent.js 驱动 -->
       <div class="cmx-stage" id="cmx-stage" hidden></div>
+      <!-- 动态标签(iframe 型)全区舞台:每个标签一个常驻子层,显隐不重建(js/actbar.js 驱动) -->
+      <div class="ext-stage" id="ext-stage" hidden></div>
     </main>
   </div>
   <div class="statusbar" id="statusbar">
@@ -361,6 +359,11 @@
       <label><input type="checkbox" data-ticker="news" /> 最新要闻</label>
       <label><input type="checkbox" data-ticker="weather" /> 主要城市天气</label>
       <label class="tb-speed">速率<input id="tb-ticker-speed" type="range" min="1" max="10" step="1" value="5" /></label>
+    </div>
+    <!-- 所在联邦：状态栏最右侧，图标+名称（paintHomeNode 填充；未登录隐藏） -->
+    <div class="sb-fed" id="sb-fed" hidden title="所在联邦">
+      <span class="ico" data-ico="federation"></span>
+      <span class="sb-fed-name" id="sb-fed-name"></span>
     </div>
   </div>
 </div>
@@ -420,7 +423,9 @@
               <div class="acct-id">
                 <input id="acct-local" type="text" maxlength="63" autocomplete="username" placeholder="用户名" />
                 <span class="acct-at" aria-hidden="true">@</span>
-                <input id="acct-domain" type="text" maxlength="253" spellcheck="false" autocomplete="off" placeholder="域名" />
+                <select id="acct-domain" spellcheck="false" autocomplete="off" title="域名(来自注册中心)">
+                  <option value="">加载域名…</option>
+                </select>
               </div>
               <div class="acct-suggest" id="acct-suggest" hidden></div>
               <p class="acct-hint" id="acct-domain-hint"></p>
@@ -550,6 +555,8 @@
 <script src="js/im.js" defer></script>
 <script src="js/main.js" defer></script>
 <script src="js/cmx_agent.js" defer></script>
+<!-- actbar 须在 cmx_agent 之后:同听 nm-tab-changed,ext 标签激活时后执行者补回 cmx-full(全区接管) -->
+<script src="js/actbar.js" defer></script>
 <script src="js/auth.js" defer></script>
 <script src="js/pairing.js" defer></script>
 <script src="js/devices.js" defer></script>

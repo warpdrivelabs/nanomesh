@@ -564,6 +564,12 @@ main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 @media (prefers-reduced-motion: reduce) { .sb-dot.reconnecting { animation: none; opacity: 0.8; } }
 .statusbar .tb-marquee { flex: 1 1 0; }
 .statusbar .tb-btn { flex: none; }
+/* 所在联邦：状态栏最右侧(图标+名称)。margin-left:auto 兜底贴右——跑马灯隐藏时没有 flex:1 占位 */
+.sb-fed { display: flex; align-items: center; gap: 5px; flex: none; margin-left: auto; color: var(--ink2); font-size: 12px; }
+.sb-fed[hidden] { display: none; }
+.sb-fed .ico { display: inline-flex; line-height: 0; }
+.sb-fed .ico .nm-ico, .sb-fed .ico svg { width: 13px; height: 13px; }
+.sb-fed-name { white-space: nowrap; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
 .conv { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .tick-page { flex: 1; min-height: 0; overflow: auto; padding: 28px 32px 40px; display: flex; flex-direction: column; gap: 16px; }
 .tick-page h2 { margin: 0; font-size: 20px; font-weight: 650; }

@@ -188,7 +188,19 @@ pub(crate) async fn llm_chat_stream(
                 f = stream.next() => {
                     let Some(cr) = f else { break };
                     if !cr.ok {
-                        err = Some(if cr.error.is_empty() { "provider 流式错误".into() } else { cr.error });
+                        // 授权类失败(节点 "denied: missing grant"/issuer 不符/过期、provider 白名单拒绝)
+                        // 翻译成用户可读提示——直接显示在聊天气泡里,不再是英文协议串。
+                        let raw = if cr.error.is_empty() { "provider 流式错误".to_string() } else { cr.error };
+                        let low = raw.to_ascii_lowercase();
+                        err = Some(
+                            if low.contains("denied:") || low.contains("grant") || low.contains("allow_audiences") {
+                                format!(
+                                    "没有授权：该模型开启了 Grant 准入。请向模型提供方索取针对你公钥的 Grant，在该模型详情页粘贴保存后重试。(原因: {raw})"
+                                )
+                            } else {
+                                raw
+                            },
+                        );
                         break;
                     }
                     if cr.done {

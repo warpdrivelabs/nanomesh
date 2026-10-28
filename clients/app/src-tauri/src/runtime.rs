@@ -227,6 +227,9 @@ pub(crate) fn run() {
             local_store::chat_append_many,
             local_store::chat_unread_save,
             local_store::chat_search,
+            local_store::actbar_load,
+            local_store::actbar_register,
+            local_store::actbar_remove,
             #[cfg(desktop)]
             tray::commands::tray_sync,
             #[cfg(desktop)]

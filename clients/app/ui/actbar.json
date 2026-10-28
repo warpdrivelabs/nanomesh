@@ -1,0 +1,10 @@
+{
+  "$doc": "活动栏(左侧纵向标签)注册表——内置标签在此注册,随 app 打包。新增内置标签:加一项并重新构建。运行时动态注册走 API: 前端 window.Actbar.register(item) 或 tauri invoke('actbar_register',{item}),落盘到 app_data/activitybar.json(两表按 id 合并,用户表优先,order 排序)。item 字段: id(唯一), title(悬浮提示), icon(icons.js 名), type(panel=左侧面板切换 | workbench=智能体工作台 | iframe=全区内嵌页,需 url), panel(type=panel 时的面板名), url(type=iframe), order(排序), hidden(true=隐藏,可用于屏蔽内置项)。",
+  "items": [
+    { "id": "im", "title": "即时通讯", "icon": "chat", "type": "panel", "panel": "im", "order": 10 },
+    { "id": "cmx", "title": "智能体工作台", "icon": "robot", "type": "workbench", "order": 20 },
+    { "id": "entities", "title": "实体目录", "icon": "contacts", "type": "panel", "panel": "entities", "order": 30 },
+    { "id": "models", "title": "大模型", "icon": "llm", "type": "panel", "panel": "models", "order": 40 },
+    { "id": "channels", "title": "频道", "icon": "channels", "type": "panel", "panel": "channels", "order": 50 }
+  ]
+}

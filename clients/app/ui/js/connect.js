@@ -29,14 +29,27 @@ function paintHomeNode() {
   }
   if (dot) dot.classList.remove("reconnecting");
   const cur = window.Identity ? Identity.current() : "";
-  const nick = cur && window.Identity ? Identity.label(cur) : "";
+  // 真实昵称(可为空;不用 label——它会回退公钥前8位,导致下面优先级判断失真)。
+  const rawNick = cur && window.Identity && Identity.nameOf ? (Identity.nameOf(cur) || "") : "";
+  const nick = cur && window.Identity ? Identity.label(cur) : ""; // tooltip 用
   const fedId = (window.Account && Account.federationId(cur))
     || (window.Naming && Naming.myHandle(cur))
     || "";
   const fedName = (window.Account && Account.federationName()) || "nmspace";
   const svc = window.CURRENT_SVC;
-  // 左侧：昵称 · 联邦账号ID · 所在联邦（如 nmspace）；不再显示 n0/lan/自建。
-  const line = [nick, fedId, fedName].filter(Boolean).join(" · ");
+  // 所在联邦：状态栏最右侧独立显示(图标+名称)；未登录隐藏。
+  const fed = document.getElementById("sb-fed");
+  if (fed) {
+    const nameEl = document.getElementById("sb-fed-name");
+    if (nameEl) nameEl.textContent = fedName;
+    fed.hidden = !(cur && fedName);
+    fed.title = "所在联邦：" + fedName;
+  }
+  // 左侧显示规则：昵称与邮件地址(联邦ID)都有且不同 → 「昵称 · 邮件地址」两个都显示;
+  // 相同只显示一次(修重复);只有其一显示其一;都没有显示公钥缩写。完整信息在悬浮 tooltip。
+  const line =
+    (rawNick && fedId && rawNick !== fedId ? rawNick + " · " + fedId : "") ||
+    rawNick || fedId || (cur ? cur.slice(0, 8) + "…" : "");
   if (!svc || !svc.node) {
     text.textContent = line || "未连接";
     if (dot) dot.classList.remove("on");

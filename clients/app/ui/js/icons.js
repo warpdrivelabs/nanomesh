@@ -3,6 +3,7 @@ const NM_ICON_PATHS = {
   chat: '<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>',
   contacts: '<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="12" r="2"/><path d="M15 10h4M15 14h3"/>',
   nodes: '<rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/>',
+  federation: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
   groups: '<circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2.2"/><path d="M3.5 19c.7-3 2.8-4.5 5.5-4.5s4.8 1.5 5.5 4.5M15.5 14.6c1.6.3 2.9 1.2 3.5 2.9"/>',
   // 新建群：两人轮廓 + 加号，区别于普通 plus
   "group-new": '<circle cx="8" cy="8" r="2.3"/><path d="M3.4 17.2c.5-2.4 2.2-3.6 4.6-3.6s4.1 1.2 4.6 3.6"/><circle cx="16.2" cy="8.4" r="1.7"/><path d="M18.6 13.2v4.6M16.3 15.5h4.6"/>',

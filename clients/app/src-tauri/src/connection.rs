@@ -106,6 +106,17 @@ pub(crate) async fn finish_session(
                 let g = gram.clone();
                 async_runtime::spawn(async move { let _ = s.send_receipt(&g).await; });
             }
+            // RPC 协议帧绝不渲染为聊天消息：跨节点流式推理的 chunk 帧(CommandResult/openai.chat.chunk.v1)
+            // 在流已关闭后迟到/重复投递时会落到 inbox——设计即「投不到则丢弃，可靠性=客户端 pending+超时」
+            // (见 nm-node federation_runtime Routed 注释)。此前缺这层过滤，被当普通消息显示成乱码气泡
+            // (用户实测：模型重启后首次对话,整条回复的 delta 帧逐条变成乱码消息)。
+            if matches!(
+                gram.kind(),
+                nm_proto::GramKind::Command | nm_proto::GramKind::CommandResult
+            ) {
+                tracing::debug!(refid = ?gram.ref_gram_id, "丢弃落入 inbox 的游离 RPC 帧(非聊天消息)");
+                continue;
+            }
             // P1-6 多设备已读：StateSync 的"已读标记"gram（payload 是 protobuf，非 UTF-8）。须在通用消息分支前拦截，
             // 否则会被当普通消息乱显示。解出会话+已读位，发独立 read 事件给前端推进未读。
             if let Some(p) = gram

@@ -101,6 +101,12 @@
     .login-form input:focus { border-color: var(--accent); background: var(--hover); box-shadow: inset 0 0 0 1px var(--accent), 0 4px 16px color-mix(in srgb, var(--accent) 18%, transparent); }
     .acct-id { display: flex; align-items: center; gap: 8px; }
     .acct-id input { flex: 1 1 0; width: 0; min-width: 0; }
+    /* 域名下拉(从注册中心读取):与输入框同观感。
+       只设 background-color——background 简写会把全局 select 的箭头图 no-repeat/position 重置成平铺,
+       整个框铺满 chevron(已踩坑);右侧 padding 给全局规则画的单箭头留位。 */
+    .acct-id select { flex: 1 1 0; width: 0; min-width: 0; height: 40px; padding: 0 28px 0 10px; border-radius: 10px;
+      border: 1px solid var(--border); background-color: var(--surface); color: var(--ink); font-size: 14px; outline: none; }
+    .acct-id select:focus { border-color: var(--aqua); }
     .acct-at { flex: none; color: var(--ink2); font-size: 16px; font-weight: 600; line-height: 1; }
     .acct-id-wrap { position: relative; }
     .acct-suggest { position: absolute; z-index: 4; left: 0; right: 0; top: calc(100% - 18px);

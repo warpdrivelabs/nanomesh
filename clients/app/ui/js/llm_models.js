@@ -610,9 +610,10 @@
 
         <div class="llm-sec">授权 Grant</div>
         <div class="detail-rows">
-          <div class="detail-row"><span class="k">消费方公钥</span><span class="v"><input class="ns-inp" id="llm-g-aud" style="width:100%" placeholder="64 hex" /></span></div>
+          <div class="detail-row"><span class="k">消费方公钥</span><span class="v"><textarea class="ns-inp" id="llm-g-aud" rows="3" style="width:100%" placeholder="每行一个消费方公钥(64 hex)，数量不限；也可用逗号/空格分隔"></textarea></span></div>
           <div class="detail-row"><span class="k">有效天数</span><span class="v"><input class="ns-inp" id="llm-g-days" type="number" min="0" style="width:100%" value="7" /></span></div>
         </div>
+        <p class="llm-hint" style="margin:4px 0 0">Grant 一人一证：多个公钥会各签发一份。单个直接复制 Grant；多个复制「公钥 Grant」清单(每行一对)，分别发给对应消费方。</p>
         <div class="detail-actions" style="padding:8px 0">
           <button type="button" class="ns-btn ns-ico ns-primary" id="llm-grant" title="签发并复制 Grant">${nmIcon("key")}</button>
         </div>
@@ -656,24 +657,45 @@
     const grantBtn = document.getElementById("llm-grant");
     if (grantBtn) {
       grantBtn.onclick = async () => {
-        const audience = ((document.getElementById("llm-g-aud") || {}).value || "").trim();
-        if (!audience) {
-          if (window.toast) toast("请填写消费方公钥");
+        // 多公钥批量签发:按行/逗号/空格切分,数量不限;每个公钥各签一份(Grant 一人一证,audience 绑定)。
+        const raw = ((document.getElementById("llm-g-aud") || {}).value || "").trim();
+        const auds = Array.from(new Set(raw.split(/[\s,，;；]+/).map((s) => s.trim()).filter(Boolean)));
+        if (!auds.length) {
+          if (window.toast) toast("请填写消费方公钥(可多个,每行一个)");
+          return;
+        }
+        const bad = auds.filter((a) => !/^[0-9a-fA-F]{64}$/.test(a));
+        if (bad.length) {
+          if (window.toast) toast("公钥格式错误(须 64 hex): " + bad[0].slice(0, 16) + "…");
           return;
         }
         const days = parseInt((document.getElementById("llm-g-days") || {}).value || "7", 10);
-        try {
-          const out = await NM.inv("llm_model_issue_grant", {
-            localId: m.localId,
-            audience,
-            days: Number.isFinite(days) ? days : 7,
-          });
+        grantBtn.disabled = true;
+        const okLines = [];
+        const fails = [];
+        for (const audience of auds) {
           try {
-            await navigator.clipboard.writeText(out.grantB64 || "");
+            const out = await NM.inv("llm_model_issue_grant", {
+              localId: m.localId,
+              audience,
+              days: Number.isFinite(days) ? days : 7,
+            });
+            okLines.push({ audience, b64: out.grantB64 || "" });
+          } catch (e) {
+            fails.push(audience.slice(0, 12) + "…: " + (e && e.message ? e.message : e));
+          }
+        }
+        grantBtn.disabled = false;
+        if (okLines.length) {
+          // 单个:仅复制 Grant 本体(沿袭旧体验);多个:复制「公钥 Grant」清单,每行一对,便于分发。
+          const text = okLines.length === 1 ? okLines[0].b64 : okLines.map((x) => x.audience + " " + x.b64).join("\n");
+          try {
+            await navigator.clipboard.writeText(text);
           } catch (_) {}
-          if (window.toast) toast("Grant 已复制到剪贴板");
-        } catch (e) {
-          if (window.toast) toast(String(e));
+        }
+        if (window.toast) {
+          if (!fails.length) toast(okLines.length === 1 ? "Grant 已复制到剪贴板" : `已签发 ${okLines.length} 份 Grant,「公钥 Grant」清单已复制`);
+          else toast(`成功 ${okLines.length} 份,失败 ${fails.length}: ${fails[0]}`);
         }
       };
     }

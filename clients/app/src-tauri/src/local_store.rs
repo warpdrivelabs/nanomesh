@@ -722,3 +722,65 @@ pub(crate) fn chat_search(
     bodies.reverse();
     bodies_to_json(bodies)
 }
+
+// ── 活动栏动态注册表（VSCode 式）────────────────────────────────────────────
+// 内置标签在前端静态资源 actbar.json 注册；这里管**运行时动态注册**的用户表：
+// 落盘 app_data/activitybar.json，前端按 id 与内置表合并(用户表优先)。
+// API 注册入口：tauri invoke("actbar_register", { item })（前端封装 window.Actbar.register）。
+// 写入即 emit core://event {type:"actbar"} → 活动栏即刻重绘(动态安装标签内容)。
+
+fn actbar_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    Ok(data_dir(app)?.join("activitybar.json"))
+}
+
+fn actbar_read(app: &AppHandle) -> Vec<Value> {
+    let Ok(p) = actbar_path(app) else { return Vec::new() };
+    std::fs::read_to_string(p)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok())
+        .unwrap_or_default()
+}
+
+fn actbar_write(app: &AppHandle, items: &[Value]) -> Result<(), String> {
+    let p = actbar_path(app)?;
+    let s = serde_json::to_string_pretty(items).map_err(|e| e.to_string())?;
+    std::fs::write(&p, s).map_err(|e| e.to_string())?;
+    use tauri::Emitter;
+    let _ = app.emit("core://event", json!({ "type": "actbar" }));
+    Ok(())
+}
+
+/// 用户注册表全文（JSON 数组文本；无文件返回 "[]"）。
+#[tauri::command]
+pub(crate) fn actbar_load(app: AppHandle) -> Result<String, String> {
+    Ok(serde_json::to_string(&actbar_read(&app)).unwrap_or_else(|_| "[]".into()))
+}
+
+/// 注册/更新一个标签（按 id upsert）。item 须含字符串 id；其余字段见 ui/actbar.json 顶部文档。
+#[tauri::command]
+pub(crate) fn actbar_register(app: AppHandle, item: Value) -> Result<Value, String> {
+    let id = item
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s.len() <= 64)
+        .ok_or("item 须含非空 id")?;
+    if !item.is_object() {
+        return Err("item 须为 JSON 对象".into());
+    }
+    let mut items = actbar_read(&app);
+    match items.iter_mut().find(|x| x.get("id").and_then(|v| v.as_str()) == Some(id.as_str())) {
+        Some(slot) => *slot = item.clone(),
+        None => items.push(item.clone()),
+    }
+    actbar_write(&app, &items)?;
+    Ok(item)
+}
+
+/// 移除一个动态标签（内置标签不在此表；要隐藏内置项，注册 {id, hidden:true} 覆盖）。
+#[tauri::command]
+pub(crate) fn actbar_remove(app: AppHandle, id: String) -> Result<(), String> {
+    let mut items = actbar_read(&app);
+    items.retain(|x| x.get("id").and_then(|v| v.as_str()) != Some(id.trim()));
+    actbar_write(&app, &items)
+}

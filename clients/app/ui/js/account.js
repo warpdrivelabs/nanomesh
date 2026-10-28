@@ -448,13 +448,54 @@
   }
   window.openAccountPassword = openAccountPassword;
 
+  // ── 登录页域名下拉：从注册中心(robot.link)读取可用域名,不手动输入 ──
+  let domainsLoaded = false;
+  /** 给 select 设值:不在列表则临时补 option(回填历史账号/离线兜底)。 */
+  function setDomainValue(domain) {
+    const sel = document.getElementById("acct-domain");
+    if (!sel) return;
+    const v = String(domain || "").trim().toLowerCase();
+    if (!v) return;
+    if (![...sel.options].some((o) => o.value === v)) {
+      const opt = document.createElement("option");
+      opt.value = v;
+      opt.textContent = v;
+      sel.appendChild(opt);
+    }
+    sel.value = v;
+  }
+  /** 拉取注册中心域名列表填充下拉;失败保留占位并可点击重试。routeStart/打开登录页时调。 */
+  async function loadAccountDomains() {
+    const sel = document.getElementById("acct-domain");
+    if (!sel || !window.NM) return;
+    const prev = sel.value || (lastAccount() || {}).domain || "";
+    try {
+      const r = await NM.inv("account_domains", { registry: "" });
+      const items = ((r && r.items) || []).map((it) => String(it.domain || "").toLowerCase()).filter(Boolean);
+      if (!items.length) throw new Error("注册中心暂无可用域名");
+      sel.innerHTML = items.map((d) => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join("");
+      domainsLoaded = true;
+      if (prev) setDomainValue(prev);
+      else sel.selectedIndex = 0;
+      const hint = document.getElementById("acct-domain-hint");
+      if (hint && sel.value) { hint.textContent = "已登记"; hint.classList.add("ok"); }
+    } catch (e) {
+      domainsLoaded = false;
+      sel.innerHTML = `<option value="">域名加载失败,点击重试</option>`;
+      if (prev) setDomainValue(prev); // 离线兜底:历史域名仍可选可登录
+      const hint = document.getElementById("acct-domain-hint");
+      if (hint) { hint.classList.remove("ok"); hint.textContent = "无法连接注册中心(" + (e && e.message ? e.message : e) + ")"; }
+    }
+  }
+  window.loadAccountDomains = loadAccountDomains;
+
   function init() {
     const form = document.getElementById("account-form");
     if (!form) return;
     const last = lastAccount();
     if (last) {
       if (last.local) document.getElementById("acct-local").value = last.local;
-      if (last.domain) document.getElementById("acct-domain").value = last.domain;
+      if (last.domain) setDomainValue(last.domain);
     }
     form.addEventListener("submit", submit);
     document.getElementById("acct-import-open").addEventListener("click", () => {
@@ -485,9 +526,17 @@
       document.getElementById("acct-pass2").value = "";
       setMode("reset");
     });
-    document.getElementById("acct-domain").addEventListener("input", () => {
-      clearTimeout(suggestTimer);
-      suggestTimer = setTimeout(suggestDomains, 300);
+    // 域名改为下拉(从注册中心读取,不手输):change 即视为已登记;加载失败时点击重拉。
+    document.getElementById("acct-domain").addEventListener("change", () => {
+      const hint = document.getElementById("acct-domain-hint");
+      if (hint) {
+        const v = document.getElementById("acct-domain").value;
+        hint.textContent = v ? "已登记" : "";
+        hint.classList.toggle("ok", !!v);
+      }
+    });
+    document.getElementById("acct-domain").addEventListener("mousedown", () => {
+      if (!domainsLoaded) loadAccountDomains();
     });
     document.addEventListener("click", (ev) => {
       if (!ev.target.closest(".acct-id-wrap")) hideSuggest();
