@@ -34,6 +34,9 @@ nm-compute = { path = "../../../bin/nm-compute" }
 # 本地有 checkout 时可用 path 覆盖(免拉网):
 #   cmx-agent-app = { path = "../../../../../../cmx-workspace/backend/cmx-agent/crates/cmx-agent-app" }
 cmx-agent-app = { git = "https://gitee.com/warpdrivelabs/cmx-agent.git", branch = "main" }
+# zip 2.6 破坏 ZipFile API(semver 违规);cmx-agent-office 的 calamine 0.26 需 ≤2.5。
+# 上游 calamine≥0.27 后可删本钉。勿 `cargo update -p zip` 升到 2.6+。
+zip = { version = "=2.5.0", default-features = false, features = ["deflate"] }
 tokio-stream = "0.1"  # cmx 工作台 SSE(/api/stream /api/subscribe)
 prost = "0.14"
 tracing = "0.1"
