@@ -16,6 +16,9 @@
   .tb-app-icon,.titlebar .tb-title{-webkit-app-region:drag}
   .tb-app-icon{width:22px;height:22px;border-radius:var(--avatar-radius);corner-shape:squircle;object-fit:cover;display:block;flex:none}
   .titlebar .tb-title{font-size:13px;color:var(--ink);font-weight:700;letter-spacing:0.04em}
+  /* 品牌色标题:MESH 绿→蓝渐变(与首页 home-name 同款) */
+  .titlebar .tb-title span{-webkit-text-fill-color:transparent;
+    background:linear-gradient(90deg,var(--aqua),var(--blue));-webkit-background-clip:text;background-clip:text}
   .tb-ctrls{display:flex;align-items:center;gap:2px;-webkit-app-region:no-drag;flex:none}
   .tb-marquee{flex:1 1 0;width:0;min-width:0;align-self:stretch;overflow:hidden;display:flex;align-items:center}
   .tb-marquee-track{display:flex;width:max-content;white-space:nowrap;color:var(--ink2);font-size:12px;will-change:transform;
