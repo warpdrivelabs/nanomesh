@@ -14,7 +14,7 @@
 //!   (均为 nanomesh 适配层,serve 时内存追加,cmx-agent 零改动)。
 //! - **安全**:绑 127.0.0.1 + loopback Host 校验 + token 闸(默认每次启动随机;?t= 首访种 cookie)。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use axum::body::Body;
@@ -175,15 +175,28 @@ async fn dispatch_on_net(app: Arc<AgentApp>, payload: String) -> String {
 
 /// ui 目录解析:配置显式 > build.rs 从 git/path 依赖定位 > 常见本地 checkout。
 /// 打包 resources 版 P1 接线。
+/// 组件化嵌入后,合格 ui 目录须含 `embed/truemate-app.js`——旧本地 checkout(无 embed/)
+/// 会导致组件脚本 404「组件脚本加载失败」(cmxlinux 实测踩中),故逐候选校验,不合格跳过。
 fn resolve_ui_dir(cfg: &CmxCfg) -> Option<PathBuf> {
+    let ok = |p: &Path| p.join("index.html").is_file() && p.join("embed/truemate-app.js").is_file();
     if !cfg.ui_dir.trim().is_empty() {
         let p = expand_home(cfg.ui_dir.trim());
-        return p.join("index.html").is_file().then_some(p);
+        // 显式配置:只要 index 在就尊重(用户自担);缺 embed 打警告便于排障。
+        if p.join("index.html").is_file() {
+            if !p.join("embed/truemate-app.js").is_file() {
+                tracing::warn!(ui = %p.display(), "uiDir 缺 embed/truemate-app.js,组件化嵌入将 404(请更新该 checkout)");
+            }
+            return Some(p);
+        }
+        return None;
     }
     if let Some(p) = option_env!("CMX_AGENT_UI_DIR") {
         let p = PathBuf::from(p);
-        if p.join("index.html").is_file() {
+        if ok(&p) {
             return Some(p);
+        }
+        if p.join("index.html").is_file() {
+            tracing::warn!(ui = %p.display(), "build.rs 定位的 ui 缺 embed/,跳过并继续找(本地 checkout 过旧?)");
         }
     }
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -192,11 +205,43 @@ fn resolve_ui_dir(cfg: &CmxCfg) -> Option<PathBuf> {
         "../../../../../../cmx-workspace/backend/cmx-agent/crates/cmx-agent-web/ui",
     ] {
         let p = manifest.join(rel);
-        if p.join("index.html").is_file() {
+        if ok(&p) {
             return Some(p);
         }
     }
-    None
+    // 兜底:cargo git checkouts 里找**含 embed 的**最新 rev(运行期等价 build.rs 逻辑;
+    // build.rs 命中的本地 checkout 过旧时由此接住)。
+    find_ui_in_cargo_checkouts()
+}
+
+/// 运行期扫 ~/.cargo/git/checkouts/cmx-agent-*/<rev>/crates/cmx-agent-web/ui,
+/// 只认含 embed/truemate-app.js 的,取 mtime 最新。
+fn find_ui_in_cargo_checkouts() -> Option<PathBuf> {
+    let home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")))?;
+    let rd = std::fs::read_dir(home.join("git").join("checkouts")).ok()?;
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for ent in rd.flatten() {
+        if !ent.file_name().to_string_lossy().contains("cmx-agent") {
+            continue;
+        }
+        let Ok(revs) = std::fs::read_dir(ent.path()) else { continue };
+        for rev in revs.flatten() {
+            let ui = rev.path().join("crates/cmx-agent-web/ui");
+            if !(ui.join("index.html").is_file() && ui.join("embed/truemate-app.js").is_file()) {
+                continue;
+            }
+            let mtime = rev
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            if best.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true) {
+                best = Some((mtime, ui));
+            }
+        }
+    }
+    best.map(|(_, p)| p)
 }
 
 /// 登录垫片(~20 行,nanomesh 适配层):拦 current_user/login/logout 返回合成本地用户 +
