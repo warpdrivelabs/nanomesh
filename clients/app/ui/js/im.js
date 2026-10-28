@@ -33,24 +33,33 @@ let UNREAD_BY_USER = {};
 
 
 // 发现实体 + 手动添加合并（去重；发现的以直播目录为准）。
-// 昵称/头像/handle 走「非空才覆盖 + 名片缓存兜底」：目录某次返回空档案不会抹掉已显示的名字/头像。
+// 昵称/头像/handle 走「强值才覆盖 + 名片缓存兜底」：目录某次返回空档案不会抹掉已显示的名字/头像。
+// 「弱名字」= 空 或 等于 handle(local@domain)——好友节点换网/重注册时 display_name 常暂时回退成
+// 命名 claim(用户反馈:重连后昵称变邮件地址)，不该覆盖已知真实昵称；资料收敛后强名字照常更新。
+// 极少数用户真把昵称设成自己 handle 的情况会被旧名顶住，可接受。
+function weakName(name, handle) {
+  if (!name) return true;
+  return !!handle && name === handle;
+}
 function mergedEntities() {
   const map = {};
   ADDED.forEach((a) => { map[a.id] = { ...a, added: true }; });
   CONTACTS.forEach((c) => {
     const prev = map[c.id] || {};
     const merged = { ...prev, ...c, added: !!prev.added };
-    // 保护：directory 的空 name/avatar/handle 不覆盖 ADDED/上一轮的非空值。
-    if (!c.name && prev.name) merged.name = prev.name;
+    // 保护：directory 的空/弱 name、空 avatar/handle 不覆盖 ADDED/上一轮的强值。
+    const h = c.handle || prev.handle || "";
+    if (weakName(c.name, h) && prev.name && !weakName(prev.name, h)) merged.name = prev.name;
     if (!c.avatar && prev.avatar) merged.avatar = prev.avatar;
     if (!c.handle && prev.handle) merged.handle = prev.handle;
     map[c.id] = merged;
   });
   Object.values(map).forEach((c) => {
-    // 名片缓存兜底：ADDED 与 CONTACTS 都没给出的 name/avatar/handle，用历史见过的值补上。
+    // 名片缓存兜底：ADDED 与 CONTACTS 都没给出强值的 name/avatar/handle，用历史见过的补上。
     const card = CARDS[c.id];
     if (card) {
-      if (!c.name && card.name) c.name = card.name;
+      const h = c.handle || card.handle || "";
+      if (weakName(c.name, h) && card.name && !weakName(card.name, h)) c.name = card.name;
       if (!c.avatar && card.avatar) c.avatar = card.avatar;
       if (!c.handle && card.handle) c.handle = card.handle;
     }
@@ -63,6 +72,7 @@ function mergedEntities() {
 
 // 把一批实体里「非空的 name/avatar/handle/kind」累积进名片缓存（只进不退），并持久化。
 // 存 avatar 的原始引用(b3:)而非解析后的 data:URI——data:URI 由磁盘 blob 缓存按 hash 兜底。
+// 弱名字(=handle)不吸收：避免把回退名写进缓存顶掉真实昵称(自愈:强名字到来时会覆盖旧缓存)。
 function absorbCards(list) {
   if (!Array.isArray(list)) return;
   let changed = false;
@@ -71,7 +81,8 @@ function absorbCards(list) {
     const card = CARDS[c.id] || { id: c.id };
     let touched = false;
     ["name", "avatar", "handle", "kind"].forEach((k) => {
-      const v = c[k];
+      let v = c[k];
+      if (k === "name" && weakName(v, c.handle || card.handle)) v = "";
       if (v != null && v !== "" && v !== card[k]) { card[k] = v; touched = true; }
     });
     if (touched) { CARDS[c.id] = card; changed = true; }
