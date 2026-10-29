@@ -98,10 +98,22 @@ pub(crate) fn https_get_json(url: &str) -> Result<Value, String> {
     let _ = tcp.set_write_timeout(Some(std::time::Duration::from_secs(20)));
     let mut builder = openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls())
         .map_err(|e| format!("TLS 初始化失败: {e}"))?;
+    // Linux/macOS 用系统 cert.pem;其他平台用编译期内嵌的 Mozilla CA 包
+    // (vendored OpenSSL 无默认 CA 根,robot.link 的 Let's Encrypt 链验证不了)。
     if std::path::Path::new("/etc/ssl/cert.pem").exists() {
         builder
             .set_ca_file("/etc/ssl/cert.pem")
             .map_err(|e| format!("无法加载系统证书: {e}"))?;
+    } else {
+        // set_ca_file 需要磁盘文件;内嵌内容经 OpenSSL 内存 BIO 直接灌入证书库。
+        let certs = openssl::x509::X509::stack_from_pem(include_bytes!("ca-bundle.pem"))
+            .map_err(|e| format!("内置 CA 证书解析失败: {e}"))?;
+        let store = builder.cert_store_mut();
+        for cert in certs {
+            store
+                .add_cert(cert)
+                .map_err(|e| format!("内置 CA 证书解析失败: {e}"))?;
+        }
     }
     let connector = builder.build();
     let mut stream = connector
@@ -189,6 +201,13 @@ pub(crate) fn https_get_raw(url: &str) -> Result<(u16, String), String> {
         .map_err(|e| e.to_string())?;
     if std::path::Path::new("/etc/ssl/cert.pem").exists() {
         let _ = builder.set_ca_file("/etc/ssl/cert.pem");
+    } else {
+        if let Ok(certs) = openssl::x509::X509::stack_from_pem(include_bytes!("ca-bundle.pem")) {
+            let store = builder.cert_store_mut();
+            for cert in certs {
+                let _ = store.add_cert(cert);
+            }
+        }
     }
     let mut stream = builder
         .build()
