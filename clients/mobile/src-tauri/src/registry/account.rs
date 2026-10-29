@@ -9,6 +9,40 @@ use crate::{
 use super::http::{http_get_json, query_escape, registry_base, registry_phrase, resolve_home_node};
 use super::vault::open_device_vault;
 
+// 全网已切自建 relay/pkarr（见部署记录）：home node 只把地址发布到自建 pkarr，不在 N0。
+// 故账户登录/注册一律走 selfhost，经自建 pkarr 按公钥发现 home node；否则 N0 发现不到→超时。
+// relay/pkarr **可配置**：前端经命令参数传入（存 localStorage，可改）；为空则回退到下方默认
+// （照 registry_base 的"空→默认、非空→用传入"模式，换 relay 域名无需重编 app）。
+const DEFAULT_SELFHOST_RELAY: &str = "https://relay.robot.link:8443";
+const DEFAULT_SELFHOST_PKARR: &str = "https://relay.robot.link:8444/pkarr";
+/// 归一化账户流程的自建基础设施参数：传入为空则用默认。返回 (mode, relay_urls, pkarr_url, dns_origin)。
+pub(crate) fn selfhost_infra(
+    relay_urls: &[String],
+    pkarr_url: &Option<String>,
+    dns_origin: &Option<String>,
+) -> (&'static str, Vec<String>, Option<String>, Option<String>) {
+    let relays: Vec<String> = relay_urls
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let relays = if relays.is_empty() {
+        vec![DEFAULT_SELFHOST_RELAY.to_string()]
+    } else {
+        relays
+    };
+    let pkarr = pkarr_url
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_SELFHOST_PKARR.to_string());
+    let dns = dns_origin
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    ("selfhost", relays, Some(pkarr), dns)
+}
+
 pub(crate) fn norm_account(local: &str, domain: &str) -> Result<(String, String), String> {
     let local = local.trim().to_lowercase();
     let domain = domain.trim().to_lowercase();
@@ -33,8 +67,12 @@ async fn node_account(
     seed: [u8; 32],
     method: &str,
     body: &str,
+    relay_urls: &[String],
+    pkarr_url: &Option<String>,
+    dns_origin: &Option<String>,
 ) -> Result<String, String> {
-    let (_client, session) = dial(seed, "nat", node, Vec::new(), None, None, None).await?;
+    let (m, relays, pkarr, dns) = selfhost_infra(relay_urls, pkarr_url, dns_origin);
+    let (_client, session) = dial(seed, m, node, relays, pkarr, dns, None).await?;
     let out = session
         .name_account(method, body)
         .await
@@ -58,6 +96,9 @@ pub(crate) async fn account_register(
     nickname: String,
     password: String,
     registry: String,
+    relay_urls: Vec<String>,
+    pkarr_url: Option<String>,
+    dns_origin: Option<String>,
 ) -> Result<Value, String> {
     open_device_vault(&app, &state)?;
     if password.chars().count() < 8 {
@@ -67,7 +108,9 @@ pub(crate) async fn account_register(
     let node = resolve_home_node(&registry, &domain).await?;
     let probe = nm_transport::SecretKey::generate().to_bytes();
     let body = json!({ "local": local, "domain": domain }).to_string();
-    match node_account(&node, probe, "name.lookup", &body).await {
+    match node_account(&node, probe, "name.lookup", &body, &relay_urls, &pkarr_url, &dns_origin)
+        .await
+    {
         Ok(exists) if exists.trim() == "1" => return Err("name_taken".into()),
         Ok(_) => {}
         Err(e) if e.contains("unknown method") => {}
@@ -79,16 +122,17 @@ pub(crate) async fn account_register(
     } else {
         nickname.trim().to_string()
     };
+    let (m, relays, pkarr, dns) = selfhost_infra(&relay_urls, &pkarr_url, &dns_origin);
     connect(
         app,
         state.clone(),
         user.clone(),
-        "nat".into(),
+        m.into(),
         node.clone(),
         nick,
-        Vec::new(),
-        None,
-        None,
+        relays,
+        pkarr,
+        dns,
     )
     .await?;
     let session = session_of(&state).await?;
@@ -110,6 +154,9 @@ pub(crate) async fn account_login(
     user: String,
     nickname: String,
     registry: String,
+    relay_urls: Vec<String>,
+    pkarr_url: Option<String>,
+    dns_origin: Option<String>,
 ) -> Result<Value, String> {
     open_device_vault(&app, &state)?;
     let (local, domain) = norm_account(&local, &domain)?;
@@ -121,7 +168,8 @@ pub(crate) async fn account_login(
         false => load_identity_seed(&app, &vk, &user).ok(),
     }
     .unwrap_or_else(|| nm_transport::SecretKey::generate().to_bytes());
-    let (_probe_client, probe) = dial(seed, "nat", &node, Vec::new(), None, None, None).await?;
+    let (m, relays, pkarr, dns) = selfhost_infra(&relay_urls, &pkarr_url, &dns_origin);
+    let (_probe_client, probe) = dial(seed, m, &node, relays.clone(), pkarr.clone(), dns.clone(), None).await?;
     let body = json!({ "local": local, "domain": domain, "password": password }).to_string();
     let got = probe
         .name_account("name.login", &body)
@@ -148,12 +196,12 @@ pub(crate) async fn account_login(
         app,
         state,
         user.clone(),
-        "nat".into(),
+        m.into(),
         node.clone(),
         nick,
-        Vec::new(),
-        None,
-        None,
+        relays,
+        pkarr,
+        dns,
     )
     .await?;
     Ok(json!({ "user": user, "name": format!("{local}@{domain}"), "node": node }))
@@ -194,6 +242,9 @@ pub(crate) async fn account_reset(
     password: String,
     user: String,
     registry: String,
+    relay_urls: Vec<String>,
+    pkarr_url: Option<String>,
+    dns_origin: Option<String>,
 ) -> Result<String, String> {
     open_device_vault(&app, &state)?;
     if password.chars().count() < 8 {
@@ -207,14 +258,17 @@ pub(crate) async fn account_reset(
     if !user.is_empty() {
         let seed =
             load_identity_seed(&app, &vk, &user).map_err(|_| "not_admin_device".to_string())?;
-        node_account(&node, seed, "name.reset", &body).await?;
+        node_account(&node, seed, "name.reset", &body, &relay_urls, &pkarr_url, &dns_origin)
+            .await?;
         return Ok(user);
     }
     for pk in list_identities(app.clone(), state.clone())? {
         let Ok(seed) = load_identity_seed(&app, &vk, &pk) else {
             continue;
         };
-        match node_account(&node, seed, "name.reset", &body).await {
+        match node_account(&node, seed, "name.reset", &body, &relay_urls, &pkarr_url, &dns_origin)
+            .await
+        {
             Ok(_) => return Ok(pk),
             Err(e) if e.contains("not_key_owner") => {}
             Err(e) => return Err(e),

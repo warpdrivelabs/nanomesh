@@ -139,6 +139,7 @@ pub(crate) fn run() {
             local_store::chat_around,
             local_store::chat_append,
             local_store::chat_append_many,
+            local_store::chat_mark,
             local_store::chat_unread_save,
             local_store::chat_search,
             #[cfg(desktop)]

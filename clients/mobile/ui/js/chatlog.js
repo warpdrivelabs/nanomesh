@@ -84,8 +84,21 @@
     enqueue(() => NM.inv("chat_unread_save", { user: USER, data: JSON.stringify(INDEX.unread) }).catch(() => {}));
   }
 
+  // 更新本人消息送达状态落库。sel:{id,gramId}(单勾,按id定位+写gramId) | {gramId}(双勾,按gramId匹配)。
+  async function mark(conv, sel, status) {
+    if (!USER || !conv || !window.NM) return false;
+    return enqueue(async () => {
+      try {
+        return !!(await NM.inv("chat_mark", {
+          user: USER, conv, id: (sel && sel.id) || "",
+          gramId: (sel && sel.gramId) || 0, status, me: (window.MY_ID || ""),
+        }));
+      } catch (_) { return false; }
+    });
+  }
+
   window.ChatLog = {
     open, index: () => INDEX, meta, unread: () => INDEX.unread || {}, setUnread,
-    tail, before, around, append, appendMany, search,
+    tail, before, around, append, appendMany, search, mark,
   };
 })();

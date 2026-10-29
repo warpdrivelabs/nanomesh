@@ -590,6 +590,8 @@ html[data-theme="light"] .home-feats li { background: color-mix(in srgb, var(--p
 .im-pop button:hover { background: var(--hover); }
 .im-pop button small { margin-left: 8px; color: var(--muted); }
 .im-pop--wide { width: 304px; }
+/* 表情面板固定高度：分组表情数量不同，不锁定会随切换跳动 */
+.im-pop--emoji { height: 280px; }
 .im-emoji-tabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px; position: sticky; top: 0; background: var(--panel2); }
 .im-emoji-tabs button { flex: 0 0 auto; width: auto; white-space: nowrap; padding: 0 8px; color: var(--muted); }
 .im-emoji-tabs button.is-on { color: var(--ink); background: var(--hover); }
@@ -720,3 +722,15 @@ html[data-theme="light"] .home-feats li { background: color-mix(in srgb, var(--p
 .um-meta small.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .um-av.um-plus { background: var(--hover); border: none; color: var(--ink2); }
 .dlg-pane > label.set-row { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); margin-top: 4px; }
+
+/* 送达对号：紧跟在时间(.im-time)后面，行内显示。 */
+.im-tick { margin-left: 4px; font-size: 11px; line-height: 1; opacity: 0.85; vertical-align: middle; white-space: nowrap; }
+/* 发送中：转动的小圆圈 */
+.im-spin { display: inline-block; width: 9px; height: 9px; border: 1.5px solid var(--muted, #8b949e);
+  border-top-color: transparent; border-radius: 50%; animation: im-spin 0.7s linear infinite; vertical-align: middle; }
+@keyframes im-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .im-spin { animation: none; } }
+.im-tick--pend { color: var(--muted, #8b949e); }
+.im-tick--sent { color: var(--muted, #8b949e); }
+.im-tick--read { color: var(--aqua, #58a6ff); font-weight: 600; }
+.im-tick--fail { color: var(--danger, #f85149); font-weight: 700; }

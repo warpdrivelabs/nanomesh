@@ -7,6 +7,8 @@
   const STATUS_OPTS = [["", "（不设置）"], ["online", "在线"], ["away", "离开"], ["busy", "忙碌"], ["dnd", "勿扰"]];
   const AV_MAX = 200 * 1024; // 缩放后原始图上限（内容寻址，节点侧约 1MiB 硬限）
   const avCache = new Map(); // "b3:<hash>" -> data:URI（会话内缓存，避免重复 blob_get）
+  // 实体当前头像：id -> { ref, uri }。ref 未变则直接用 uri，不调网络；仅头像变更时重拉并更新。
+  const entityAv = new Map();
   let pendingAvatar = null;  // 模态框内待保存头像：null=未改动 / ""=移除 / data:URI=新图
 
   async function load() {
@@ -28,17 +30,31 @@
   function isImg(a) { return typeof a === "string" && /^data:image\//.test(a); }
   function isRef(a) { return typeof a === "string" && /^b3:[0-9a-fA-F]{64}$/.test(a); }
 
-  // 某个用户当前能直接显示的头像：本人优先本地原图，其次目录里已解析的 data:URI。
+  // 记下实体头像（展示层与缓存层共用）。
+  function rememberEntityAvatar(id, ref, uri) {
+    if (!id || !isImg(uri)) return;
+    const r = isRef(ref) ? ref : (isImg(ref) ? "" : String(ref || ""));
+    entityAv.set(id, { ref: r || ref || "", uri });
+    if (isRef(ref)) avCache.set(ref, uri);
+  }
+
+  // 某个用户当前能直接显示的头像：本人优先本地原图 → 实体缓存 → hint/目录里的 data:URI。
   function displayAvatar(id, hint) {
     if (id && window.Identity && Identity.current && id === Identity.current()) {
       const own = ownAvatar(id);
       if (isImg(own)) return own;
     }
     if (isImg(hint)) return hint;
+    if (id && entityAv.has(id)) {
+      const hit = entityAv.get(id);
+      // hint 为新 b3: 且与缓存 ref 不同 → 视为已变更，不返回旧图（等 resolve 更新）。
+      if (hit && isImg(hit.uri) && !(isRef(hint) && hint !== hit.ref)) return hit.uri;
+    }
     if (id && typeof window.entityById === "function") {
       const c = entityById(id);
       if (c && isImg(c.avatar)) return c.avatar;
     }
+    if (isRef(hint) && avCache.has(hint)) return avCache.get(hint);
     return "";
   }
 
@@ -91,12 +107,20 @@
     catch (e) { if (window.toast) toast("头像上传失败：" + (e && e.message ? e.message : e)); return null; }
   }
 
-  // 把一个头像引用解析为可直接展示的 data:URI（data:→原样；b3:→缓存/blob_get；其它→空）。
-  async function resolveAvatar(ref, home) {
+  // 把一个头像引用解析为可直接展示的 data:URI。
+  // 顺序：内存 → 本机磁盘(blob_cached，不联网) → blob_get(仅未命中时联网，并写磁盘)。
+  // opts.cacheOnly=true 时不联网；opts.force=true 时跳过内存（仍可用磁盘）。
+  async function resolveAvatar(ref, home, opts) {
+    opts = opts || {};
     if (isImg(ref)) return ref;
     if (!isRef(ref)) return "";
-    if (avCache.has(ref)) return avCache.get(ref);
+    if (!opts.force && avCache.has(ref)) return avCache.get(ref);
     if (!window.NM || !NM.hasTauri || !NM.hasTauri()) return "";
+    try {
+      const disk = await NM.inv("blob_cached", { references: [ref] });
+      if (disk && isImg(disk[0])) { avCache.set(ref, disk[0]); return disk[0]; }
+    } catch (_) {}
+    if (opts.cacheOnly) return "";
     try {
       const uri = await NM.inv("blob_get", { reference: ref, homeNode: home || "" });
       if (isImg(uri)) { avCache.set(ref, uri); return uri; }
@@ -104,12 +128,79 @@
     return "";
   }
 
-  // 批量解析一组联系人的 b3: 头像（就地把 c.avatar 换成 data:URI），完成后回调重渲染。
+  // 批量解析联系人/群/频道头像：
+  // - ref 未变且已有缓存 → 直接套用，零 IO
+  // - 仅对「新 ref / 缓存未命中」批量读盘，再对仍缺的联网 blob_get
+  // - 头像变更（新 b3:）会替换 entityAv 并触发重绘
   async function resolveList(list, onDone) {
-    const pend = Array.isArray(list) ? list.filter((c) => c && isRef(c.avatar)) : [];
-    if (!pend.length) { if (onDone) onDone(); return; }
-    await Promise.all(pend.map(async (c) => { const uri = await resolveAvatar(c.avatar, c.homeNode); if (uri) c.avatar = uri; }));
+    const rows = Array.isArray(list) ? list.filter((c) => c && c.id) : [];
+    if (!rows.length) { if (onDone) onDone(); return; }
+
+    const needNet = [];
+    const needDisk = [];
+    let applied = false;
+
+    rows.forEach((c) => {
+      const ref = c.avatar;
+      if (isImg(ref)) {
+        rememberEntityAvatar(c.id, "", ref);
+        return;
+      }
+      if (!isRef(ref)) return;
+      const prev = entityAv.get(c.id);
+      // 同 ref 已缓存 → 直接写回对象，不访问磁盘/网络
+      if (prev && prev.ref === ref && isImg(prev.uri)) {
+        c.avatar = prev.uri;
+        applied = true;
+        return;
+      }
+      if (avCache.has(ref)) {
+        const uri = avCache.get(ref);
+        c.avatar = uri;
+        rememberEntityAvatar(c.id, ref, uri);
+        applied = true;
+        return;
+      }
+      needDisk.push(c);
+    });
+
+    if (needDisk.length && window.NM && NM.hasTauri && NM.hasTauri()) {
+      try {
+        const refs = needDisk.map((c) => c.avatar);
+        const uris = await NM.inv("blob_cached", { references: refs });
+        needDisk.forEach((c, i) => {
+          const uri = uris && uris[i];
+          if (isImg(uri)) {
+            avCache.set(c.avatar, uri);
+            rememberEntityAvatar(c.id, c.avatar, uri);
+            c.avatar = uri;
+            applied = true;
+          } else {
+            needNet.push(c);
+          }
+        });
+      } catch (_) {
+        needDisk.forEach((c) => needNet.push(c));
+      }
+    }
+
+    if (needNet.length) {
+      await Promise.all(needNet.map(async (c) => {
+        const ref = c.avatar;
+        const uri = await resolveAvatar(ref, c.homeNode);
+        if (!uri) return;
+        rememberEntityAvatar(c.id, ref, uri);
+        c.avatar = uri;
+        applied = true;
+      }));
+    }
+
     if (onDone) onDone();
+  }
+
+  /** 头像引用变更时调用：清掉该实体旧缓存记忆，下次 resolve 会按新 ref 拉（磁盘按 hash 命中则仍不联网）。 */
+  function invalidateEntityAvatar(id) {
+    if (id) entityAv.delete(id);
   }
 
   // 本人头像（用于 chip/下拉，免拉取）：优先本地 data 缓存，其次 P0 遗留内联。
@@ -308,7 +399,7 @@
     m.classList.add("on");
   }
 
-  window.Profile = { load, get, save, publish, open, statusLabel, avatarHtml, faceHtml, displayAvatar, isImg, isRef, resolveAvatar, resolveList, ownAvatar, presenceColor, presenceLabel, presenceDot, applyPresence, metaEditor };
+  window.Profile = { load, get, save, publish, open, statusLabel, avatarHtml, faceHtml, displayAvatar, isImg, isRef, resolveAvatar, resolveList, rememberEntityAvatar, invalidateEntityAvatar, ownAvatar, presenceColor, presenceLabel, presenceDot, applyPresence, metaEditor };
   window.openProfileModal = open;
 
   // ── P2 在线状态 ──

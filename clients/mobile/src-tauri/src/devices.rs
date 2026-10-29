@@ -308,7 +308,9 @@ pub async fn device_freeze(
         Some(parse_id(&device)?)
     };
     let node = resolve_home_node(&registry, &domain).await?;
-    let (_client, session) = dial(new_seed(), "nat", &node, Vec::new(), None, None, None).await?;
+    // 家节点只发布到自建 pkarr（不在 N0），设备管理同样按 selfhost 基础设施拨号。
+    let (m, relays, pkarr, dns) = crate::registry::selfhost_infra(&[], &None, &None);
+    let (_client, session) = dial(new_seed(), m, &node, relays, pkarr, dns, None).await?;
     let n = session
         .device_freeze(&local, &domain, &password, device)
         .await

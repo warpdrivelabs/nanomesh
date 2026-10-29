@@ -132,12 +132,30 @@ function attach(next) {
   input.focus();
 }
 
+function clickPathHas(e, test) {
+  const path = typeof e.composedPath === "function" ? e.composedPath() : [];
+  for (const n of path) {
+    if (!n || !n.nodeType) continue;
+    if (test(n)) return true;
+  }
+  // 回退：目标仍挂在树上时用 closest
+  const t = e.target;
+  if (t && t.closest) {
+    if (t.closest("#conv-pop") || t.closest(".im-tool") || t.closest(".im-caret")) return true;
+  }
+  return false;
+}
+
 function install() {
   if (installed) return;
   installed = true;
+  // 用 composedPath：点表情分类时 paintEmoji 会重绘 tabs，点击目标已脱离 DOM，
+  // 此时 closest("#conv-pop") 会失败并误关面板。
   document.addEventListener("click", (e) => {
-    const t = e.target;
-    if (t.closest && (t.closest("#conv-pop") || t.closest(".im-tool") || t.closest(".im-caret"))) return;
+    if (clickPathHas(e, (n) =>
+      n.id === "conv-pop" ||
+      (n.classList && (n.classList.contains("im-tool") || n.classList.contains("im-caret") || n.classList.contains("im-pop")))
+    )) return;
     closePop();
   });
   document.addEventListener("keydown", (e) => {
@@ -153,7 +171,7 @@ function fit(input) {
 function closePop() {
   popKind = "";
   const pop = document.getElementById("conv-pop");
-  if (pop) { pop.hidden = true; pop.innerHTML = ""; pop.classList.remove("im-pop--wide"); }
+  if (pop) { pop.hidden = true; pop.innerHTML = ""; pop.classList.remove("im-pop--wide", "im-pop--emoji"); }
 }
 
 function openPop(html, anchor) {
@@ -186,9 +204,21 @@ function onComposerClick(e) {
     paintPending();
     return;
   }
-  if (act === "emoji") { toggleEmoji(btn); return; }
-  if (act === "emoji-tab") { emojiTab = btn.getAttribute("data-tab") || "表情"; paintEmoji(btn); return; }
-  if (act === "emoji-pick") { insertAt(btn.getAttribute("data-emoji") || ""); rememberEmoji(btn.getAttribute("data-emoji") || ""); closePop(); return; }
+  if (act === "emoji") { e.stopImmediatePropagation(); toggleEmoji(btn); return; }
+  if (act === "emoji-tab") {
+    e.stopImmediatePropagation();
+    e.preventDefault();
+    emojiTab = btn.getAttribute("data-tab") || "表情";
+    paintEmoji();
+    return;
+  }
+  if (act === "emoji-pick") {
+    e.stopImmediatePropagation();
+    insertAt(btn.getAttribute("data-emoji") || "");
+    rememberEmoji(btn.getAttribute("data-emoji") || "");
+    closePop();
+    return;
+  }
   if (act === "shot") { closePop(); capture(false); return; }
   if (act === "shot-hide") { closePop(); capture(true); return; }
   if (act === "win-pick") { closePop(); captureWindow(Number(btn.getAttribute("data-wid"))); return; }
@@ -214,7 +244,7 @@ function toggleEmoji(anchor) {
   popKind = "emoji";
   openPop(`<div class="im-emoji-tabs" id="conv-emoji-tabs"></div><div class="im-emoji-grid" id="conv-emoji-grid"></div>`, anchor);
   const pop = document.getElementById("conv-pop");
-  if (pop) pop.classList.add("im-pop--wide");
+  if (pop) pop.classList.add("im-pop--wide", "im-pop--emoji");
   paintEmoji(anchor);
 }
 

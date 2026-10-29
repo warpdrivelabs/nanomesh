@@ -76,6 +76,7 @@ function slimMsg(m) {
     id: m.id, from: m.from, to: m.to, body: m.body || "", ts: m.ts || 0,
     group: !!m.group, channel: !!m.channel, typeUrl: m.typeUrl || "",
     kind: m.kind || "text", text: m.text || "",
+    status: m.status || 0, gramId: m.gramId || 0,
   };
   const media = m.media;
   if (media && typeof media === "object") {
@@ -114,6 +115,9 @@ async function imStart(myId) {
   if (window.Groups && Groups.hydrate) Groups.hydrate(snap.groups || []);
   if (window.Channels && Channels.hydrate) Channels.hydrate(snap.channels || []);
   renderPanels();
+  // 启动先用本机头像缓存铺开（磁盘命中不联网），有变更再由 imRefresh 补拉。
+  // 解析整张合并表（含好友/群/频道的 b3: 头像），把 data:URI 填进 entityAv/avCache 供展示。
+  if (window.Profile) Profile.resolveList(mergedEntities(), () => { renderPanels(); paintVirtual(false); });
   if (window.Tabs) Tabs.closeAll(); // 每次连接（含切换身份）重置多 tab 工作区
   if (typeof updateUserChip === "function") updateUserChip();
   if (typeof window.renderNodeSvcList === "function") window.renderNodeSvcList(); // 连接后刷新节点服务面板（hydrate 后数据已就绪）
@@ -130,7 +134,8 @@ async function imStart(myId) {
 }
 
 function dirSig(list) {
-  return (list || []).map((c) => [c.id, c.name, c.presence, c.statusText, c.handle, c.kind].join("\u0001")).join("\n");
+  // 含 avatar：他人改头像时能触发重绘；resolveList 仅对变更的 b3: 联网。
+  return (list || []).map((c) => [c.id, c.name, c.presence, c.statusText, c.handle, c.kind, c.avatar || ""].join("\u0001")).join("\n");
 }
 let lastDirSig = "";
 async function imRefresh() {
@@ -138,6 +143,19 @@ async function imRefresh() {
     const next = await NM.inv("directory_query", { kindPrefix: "" });
     const sig = dirSig(next);
     if (sig === lastDirSig) return;
+    // 头像 ref 变更的实体：清掉旧记忆，迫使按新 hash 解析（同 hash 磁盘命中则不联网）。
+    if (window.Profile && Profile.invalidateEntityAvatar && Array.isArray(next)) {
+      const prevById = {};
+      (CONTACTS || []).forEach((c) => { if (c && c.id) prevById[c.id] = c.avatar || ""; });
+      next.forEach((c) => {
+        if (!c || !c.id) return;
+        const oldRef = prevById[c.id];
+        const newRef = c.avatar || "";
+        if (oldRef && newRef && oldRef !== newRef && Profile.isRef(newRef)) {
+          Profile.invalidateEntityAvatar(c.id);
+        }
+      });
+    }
     lastDirSig = sig;
     CONTACTS = next || [];
     if (window.ListCache) ListCache.put({ directory: CONTACTS });
@@ -145,7 +163,7 @@ async function imRefresh() {
     if (!CONTACTS.length && window.toast) toast("目录刷新失败：" + (e && e.message ? e.message : e));
   }
   renderPanels();
-  if (window.Profile) Profile.resolveList(CONTACTS, () => renderPanels());
+  if (window.Profile) Profile.resolveList(mergedEntities(), () => { renderPanels(); paintVirtual(false); });
 }
 
 function renderPanels() { renderConversations(); renderEntities(); if (window.Tray) Tray.sync(); }
@@ -509,6 +527,13 @@ function renderLog(msgs, showSender) {
   }
   return html;
 }
+function renderTicks(s) {
+  if (s === -1) return `<span class="im-tick im-tick--fail" title="发送失败">\u2717</span>`;        // ✗ 差号
+  if (s >= 2)   return `<span class="im-tick im-tick--read" title="对方已收到">\u2713\u2713</span>`; // ✓✓
+  if (s === 1)  return `<span class="im-tick im-tick--sent" title="已送达服务器">\u2713</span>`;       // ✓
+  if (s === 0)  return `<span class="im-tick im-tick--pend" title="发送中"><span class="im-spin"></span></span>`; // 转圈
+  return ""; // status 未定义(历史消息无送达跟踪) → 不显示
+}
 function msgHtml(m, showSender, cont) {
   const mine = m.from === MY_ID;
   const named = mine
@@ -516,10 +541,15 @@ function msgHtml(m, showSender, cont) {
     : (window.entityName ? entityName(m.from) : (m.from || "").slice(0, 6) + "…");
   const who = mine ? (window.t ? t("conv.me") : "我") : named;
   const time = msgClock(m.ts);
-  const sender = (showSender && !cont)
-    ? `<span class="im-sender">${escapeHtml(who)}${time ? `<span class="im-time">${time}</span>` : ""}</span>`
+  // 私聊：完整对号(转圈→单勾→双勾)；群聊：仅单勾(到达 home node，无逐成员已读聚合，status>1 钳回单勾)；频道：不显示。
+  const ticks = (mine && !m.channel)
+    ? renderTicks((m.group && m.status > 1) ? 1 : m.status)
     : "";
-  const stamp = (!sender && time) ? `<span class="im-time">${time}</span>` : "";
+  // 对号跟在时间后面：有 sender 行则放 sender 的时间后；否则放 stamp(气泡下方时间)后。
+  const sender = (showSender && !cont)
+    ? `<span class="im-sender">${escapeHtml(who)}${time ? `<span class="im-time">${time}</span>` : ""}${ticks}</span>`
+    : "";
+  const stamp = (!sender && (time || ticks)) ? `<span class="im-time">${time}${ticks}</span>` : "";
   const face = window.Profile ? Profile.faceHtml(m.from, named, 32) : "";
   const rich = window.Composer ? Composer.bubble(m) : { cls: "", html: escapeHtml(m.body || "") };
   return `<div class="im-msg ${mine ? "me" : ""} with-av${cont ? " cont" : ""}" data-mid="${escapeHtml(m.id || "")}">
@@ -621,19 +651,48 @@ function paintVirtual(stick) {
   if (keepBottom) log.scrollTop = log.scrollHeight;
   viewPainting = painting;
 }
+// 发送失败：把乐观插入的那条消息标记为差号✗(status=-1)并持久化，不再一直转圈。
+function failOptimistic(localId) {
+  if (!localId) return;
+  const row = (VIEW.id === ACTIVE) && VIEW.rows.find((r) => r.id === localId);
+  if (row) { row.status = -1; paintVirtual(false); }
+  if (window.ChatLog && ChatLog.mark) ChatLog.mark(ACTIVE, { id: localId }, -1);
+}
+
 async function sendMsg(text) {
   text = (text || "").trim();
   if (!text || !ACTIVE) return;
   const isGroup = !!(window.Groups && Groups.byId(ACTIVE));
   const isChannel = !isGroup && !!(window.Channels && Channels.byId(ACTIVE));
-  if (isChannel) {
-    await NM.inv("channel_publish", { channelId: ACTIVE, body: text }); // 节点会回投给本地订阅者(含自己)，不做乐观插入以免重复
-  } else if (isGroup) {
-    await NM.inv("send_group", { groupId: ACTIVE, text });
-    pushMsg(ACTIVE, { id: "l" + Date.now(), from: MY_ID, body: text, ts: Date.now(), group: true, to: ACTIVE });
-  } else {
-    await NM.inv("send_to", { target: ACTIVE, text });
-    pushMsg(ACTIVE, { id: "l" + Date.now(), from: MY_ID, body: text, ts: Date.now(), to: ACTIVE });
+  let localId = null;
+  try {
+    if (isChannel) {
+      await NM.inv("channel_publish", { channelId: ACTIVE, body: text }); // 节点会回投给本地订阅者(含自己)，不做乐观插入以免重复
+    } else if (isGroup) {
+      // 乐观插入(status=0 发送中)；send_group 返回原 gram_id → 升单勾✓(消息已达 home node)。
+      // 群聊只到单勾(无逐成员已读聚合)；接收方不对群消息回 client-receipt，故不会升双勾。
+      localId = "l" + Date.now();
+      await pushMsg(ACTIVE, { id: localId, from: MY_ID, body: text, ts: Date.now(), group: true, to: ACTIVE, status: 0 });
+      const g = await NM.inv("send_group", { groupId: ACTIVE, text });
+      if (g) {
+        const row = (VIEW.id === ACTIVE) && VIEW.rows.find((r) => r.id === localId);
+        if (row) { row.gramId = g; row.status = 1; paintVirtual(false); }
+        if (window.ChatLog && ChatLog.mark) ChatLog.mark(ACTIVE, { id: localId, gramId: g }, 1);
+      }
+    } else {
+      // 乐观插入(status=0 发送中)；send_to 返回原 gram_id → 升单勾✓并写 gramId(后续双勾按它匹配)。
+      localId = "l" + Date.now();
+      await pushMsg(ACTIVE, { id: localId, from: MY_ID, body: text, ts: Date.now(), to: ACTIVE, status: 0 });
+      const g = await NM.inv("send_to", { target: ACTIVE, text });
+      if (g) {
+        const row = (VIEW.id === ACTIVE) && VIEW.rows.find((r) => r.id === localId);
+        if (row) { row.gramId = g; row.status = 1; paintVirtual(false); }
+        if (window.ChatLog && ChatLog.mark) ChatLog.mark(ACTIVE, { id: localId, gramId: g }, 1);
+      }
+    }
+  } catch (e) {
+    failOptimistic(localId); // 出错 → 差号✗(私聊/群聊同处理)
+    if (window.toast) toast("发送失败：" + (e && e.message ? e.message : e));
   }
 }
 
@@ -641,14 +700,28 @@ async function sendRich(media) {
   if (!ACTIVE || !window.Composer) return;
   const isGroup = !!(window.Groups && Groups.byId(ACTIVE));
   const isChannel = !isGroup && !!(window.Channels && Channels.byId(ACTIVE));
-  if (isChannel) {
-    await NM.inv("channel_publish", { channelId: ACTIVE, body: Composer.channelBody(media) });
-  } else {
-    await NM.inv("send_rich", { target: ACTIVE, body: Composer.encode(media), group: isGroup });
-    pushMsg(ACTIVE, {
-      id: "l" + Date.now(), from: MY_ID, to: ACTIVE, ts: Date.now(), group: isGroup,
-      typeUrl: "nmspace.v1/chat", body: Composer.encode(media),
-    });
+  let localId = null;
+  try {
+    if (isChannel) {
+      await NM.inv("channel_publish", { channelId: ACTIVE, body: Composer.channelBody(media) });
+    } else {
+      // 与文本一致：乐观插入(status=0 发送中)；send_rich 返回原 gram_id → 升单勾✓(私聊/群聊同处理)。
+      localId = "l" + Date.now();
+      const encoded = Composer.encode(media);
+      await pushMsg(ACTIVE, {
+        id: localId, from: MY_ID, to: ACTIVE, ts: Date.now(), group: isGroup,
+        typeUrl: "nmspace.v1/chat", body: encoded, status: 0,
+      });
+      const g = await NM.inv("send_rich", { target: ACTIVE, body: encoded, group: isGroup });
+      if (g) {
+        const row = (VIEW.id === ACTIVE) && VIEW.rows.find((r) => r.id === localId);
+        if (row) { row.gramId = g; row.status = 1; paintVirtual(false); }
+        if (window.ChatLog && ChatLog.mark) ChatLog.mark(ACTIVE, { id: localId, gramId: g }, 1);
+      }
+    }
+  } catch (e) {
+    failOptimistic(localId); // 出错 → 差号✗
+    if (window.toast) toast("发送失败：" + (e && e.message ? e.message : e));
   }
 }
 
@@ -678,7 +751,21 @@ window.imMarkAllRead = function () {
 };
 window.imFlush = () => { if (window.ChatLog) ChatLog.setUnread(UNREAD); };
 
+// 送达回执：对方已收到本人消息 → 把对应本人气泡升为双勾✓✓(status=2)。
+// ev: {ref:原gram_id, from:对方账号}。即使会话未打开也落库，重开时显示双勾。
+function handleReceipt(ev) {
+  const conv = ev.from, g = ev.ref;
+  if (!conv || !g) return;
+  if (typeof VIEW !== "undefined" && VIEW.id === conv) {
+    const row = VIEW.rows.find((r) => r.from === MY_ID && r.gramId === g);
+    if (row && (row.status || 0) < 2) { row.status = 2; paintVirtual(false); }
+  }
+  if (window.ChatLog && ChatLog.mark) ChatLog.mark(conv, { gramId: g }, 2);
+}
+
 function onCoreEvent(ev) {
+  if (ev && ev.type === "receipt") { handleReceipt(ev); return; }
+  if (ev && ev.type === "read") return; // P1-6 多设备已读：移动端暂不跟踪 READ_UPTO，忽略
   if (ev && ev.type === "group_updated") {
     Promise.resolve(window.renderGroupsList && renderGroupsList()).then(() => {
       if (typeof renderPanels === "function") renderPanels();

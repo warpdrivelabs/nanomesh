@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use nm_client::{Client, Session};
+use prost::Message as _;
 use serde_json::json;
 use tauri::{AppHandle, Emitter, State, async_runtime};
 
@@ -76,6 +77,32 @@ pub(crate) async fn finish_session(
                     let _ = apph.emit("core://event", json!({
                         "type": "receipt", "ref": refid, "from": hex(&gram.sender), "ts": gram.timestamp_ms
                     }));
+                }
+                continue;
+            }
+            // RPC 协议帧绝不渲染为聊天消息：跨节点流式推理的 chunk 帧(CommandResult/openai.chat.chunk.v1)
+            // 在流已关闭后迟到/重复投递时会落到 inbox——设计即「投不到则丢弃，可靠性=客户端 pending+超时」。
+            // 此前缺这层过滤，被当普通消息显示成乱码气泡。
+            if matches!(
+                gram.kind(),
+                nm_proto::GramKind::Command | nm_proto::GramKind::CommandResult
+            ) {
+                continue;
+            }
+            // P1-6 多设备已读：StateSync 的"已读标记"gram（payload 是 protobuf，非 UTF-8）。须在通用消息分支前拦截，
+            // 否则会被当普通消息乱显示。解出会话+已读位，发独立 read 事件给前端推进未读。
+            if let Some(p) = gram
+                .payload
+                .as_ref()
+                .filter(|p| p.type_url == "nmspace.v1/read.marker")
+            {
+                if let Ok(m) = nm_proto::ReadMarker::decode(p.value.as_slice()) {
+                    let _ = apph.emit(
+                        "core://event",
+                        json!({
+                            "type": "read", "conversation": hex(&m.conversation), "readUpToMs": m.read_up_to_ms
+                        }),
+                    );
                 }
                 continue;
             }

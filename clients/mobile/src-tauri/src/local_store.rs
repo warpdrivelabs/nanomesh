@@ -555,6 +555,35 @@ pub(crate) fn chat_append_many(
 }
 
 #[tauri::command]
+pub(crate) fn chat_mark(
+    app: AppHandle,
+    user: String,
+    conv: String,
+    id: String,
+    gram_id: i64,
+    status: i64,
+    me: String,
+) -> Result<bool, String> {
+    let conn = open_chat_db(&app, &user)?;
+    let conv = conv_key(&conv)?;
+    let n = if !id.is_empty() {
+        conn.execute(
+            "UPDATE msg SET body=json_set(body,'$.status',?1,'$.gramId',?2) WHERE conv=?3 AND id=?4",
+            rusqlite::params![status, gram_id, conv, id],
+        )
+    } else {
+        conn.execute(
+            "UPDATE msg SET body=json_set(body,'$.status',?1) \
+             WHERE conv=?2 AND json_extract(body,'$.gramId')=?3 AND json_extract(body,'$.from')=?4 \
+               AND COALESCE(json_extract(body,'$.status'),0)<?1",
+            rusqlite::params![status, conv, gram_id, me],
+        )
+    }
+    .map_err(|e| e.to_string())?;
+    Ok(n > 0)
+}
+
+#[tauri::command]
 pub(crate) fn chat_unread_save(app: AppHandle, user: String, data: String) -> Result<(), String> {
     let conn = open_chat_db(&app, &user)?;
     let unread: Value = serde_json::from_str(&data).map_err(|_| "bad_json".to_string())?;

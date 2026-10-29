@@ -11,7 +11,7 @@ use zeroize::Zeroize;
 
 use super::*;
 use crate::pair;
-use crate::registry::{norm_account, open_device_vault, registry_phrase, resolve_home_node};
+use crate::registry::{norm_account, open_device_vault, registry_phrase, resolve_home_node, selfhost_infra};
 
 const EVENT: &str = "pair://event";
 const MAX_PENDING: usize = 4;
@@ -100,7 +100,9 @@ async fn start_new(
     let (local, domain) = norm_account(&local, &domain)?;
     let node = resolve_home_node(&registry, &domain).await?;
     let eph_seed = nm_transport::SecretKey::generate().to_bytes();
-    let (client, mut session) = dial(eph_seed, "nat", &node, Vec::new(), None, None, None).await?;
+    // 家节点只发布到自建 pkarr（不在 N0），迁移流程同样按 selfhost 基础设施拨号。
+    let (m, relays, pkarr, dns) = selfhost_infra(&[], &None, &None);
+    let (client, mut session) = dial(eph_seed, m, &node, relays, pkarr, dns, None).await?;
     let name = format!("{local}@{domain}");
     let owner = match password {
         Some(pw) => {

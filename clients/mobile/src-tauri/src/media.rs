@@ -337,12 +337,13 @@ pub(crate) async fn send_rich(
     target: String,
     body: String,
     group: bool,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let session = session_of(&state).await?;
     session
         .send_rich(parse_id(&target)?, &body, group)
         .await
-        .map(|_| ())
+        // 返回 node ack 的 ref_gram_id，供富媒体气泡标记单勾✓（与文本 send_to 一致）。
+        .map(|ack| ack.ref_gram_id.unwrap_or(0))
         .map_err(|e| e.to_string())
 }
 
