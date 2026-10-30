@@ -33,8 +33,9 @@ APP_NAME="nmspace"
 ARCH="aarch64"
 LLM_BINS=(nm-llm-gatewayd nm-llm-proxy)
 # 自动更新签名（minisign）：私钥放仓库外 ~/.tauri/，密码存登录钥匙串，绝不进 git。
-MINISIGN_KEY="${MINISIGN_KEY:-$HOME/.tauri/nmspace.key}"
-KEYCHAIN_SERVICE="${KEYCHAIN_SERVICE:-nmspace-updater-key}"
+# 这对钥与 tauri.conf.json 烧录公钥（keyid E0BF7148449E4FE4）配对（20261030 验签确认）。
+MINISIGN_KEY="${MINISIGN_KEY:-$HOME/.tauri/nmspace-release.key}"
+KEYCHAIN_SERVICE="${KEYCHAIN_SERVICE:-nmspace-release-key}"
 # 更新源基址（latest.json 里产物 url 的前缀；服务端就绪后传入，如 https://updates.x.com/files）
 FEED_FILES_URL="${FEED_FILES_URL:-}"
 
@@ -77,7 +78,7 @@ fi
 # 注意：`tauri build` 打 updater 产物只认 TAURI_SIGNING_PRIVATE_KEY（密钥**内容**），
 # 不认 _PATH 变体（signer sign 子命令才认 -f/env _PATH），两个都导出兼容。
 log "导出 updater 签名密钥（minisign）"
-[ -f "$MINISIGN_KEY" ] || die "minisign 私钥不存在：${MINISIGN_KEY}（npx tauri signer generate -w ~/.tauri/nmspace.key 生成，放仓库外）"
+[ -f "$MINISIGN_KEY" ] || die "minisign 私钥不存在：${MINISIGN_KEY}"
 export TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PATH TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 TAURI_SIGNING_PRIVATE_KEY="$(cat "$MINISIGN_KEY")"
 TAURI_SIGNING_PRIVATE_KEY_PATH="$MINISIGN_KEY"
