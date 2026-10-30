@@ -116,6 +116,13 @@ impl Client {
         self.ep.notify_network_change().await;
     }
 
+    /// 优雅关闭本端点（关中继连接、停后台任务）。**丢弃临时/探测端点前**调用，免 iroh 在 Drop 时报
+    /// `Endpoint dropped without calling Endpoint::close. Aborting ungracefully`（如 dial 的同网直连探测
+    /// 端点连不上被丢弃时）。注意：主会话端点一旦关闭，该 Client（及其克隆）即不可再用。
+    pub async fn close(&self) {
+        self.ep.close().await;
+    }
+
     /// 监听本端点地址（IP/relay）变化，每次变化调用 `on_change`。换网后地址一变即触发——
     /// 客户端据此**主动重连**，恢复入站推送通道（不必等用户下一次发送）。
     /// 见 `docs/NETWORK_ROAMING_RECOVERY_DESIGN.md` §5.5。端点关闭即任务结束。

@@ -905,6 +905,7 @@ pub(crate) async fn llm_model_issue_grant(
         .await
         .map_err(|e| e.to_string())?;
     let grant = client.issue_grant(aud, METHOD_INFER, "model.llm", expires);
+    client.close().await; // 仅为签发 grant 临建的端点，用完即关，免 `Endpoint dropped without close`。
     use base64::Engine;
     use prost::Message;
     let b64 = base64::engine::general_purpose::STANDARD.encode(grant.encode_to_vec());

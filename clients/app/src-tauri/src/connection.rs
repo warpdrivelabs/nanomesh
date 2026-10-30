@@ -540,8 +540,14 @@ pub(crate) async fn dial(
     if matches!(m.as_str(), "lan" | "local") {
         let addr = nm_transport::addr_from_string(node).map_err(|e| e.to_string())?;
         let client = Client::bind_local(seed).await.map_err(|e| e.to_string())?;
-        let session = go_online(&client, addr, cert).await?;
-        return Ok((client, session));
+        match go_online(&client, addr, cert).await {
+            Ok(session) => return Ok((client, session)),
+            Err(e) => {
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_secs(1), client.close()).await;
+                return Err(e);
+            }
+        }
     }
 
     // nat/selfhost：输入可为公钥(hex) 或完整地址(JSON)。地址先试同网直连，失败转穿透。
@@ -564,9 +570,16 @@ pub(crate) async fn dial(
                         || e.contains("unknown method")
                         || e.contains("cert") =>
                 {
+                    // 关掉探测端点再返回，免 iroh `Endpoint dropped without close` ERROR。
+                    let _ =
+                        tokio::time::timeout(std::time::Duration::from_secs(1), c1.close()).await;
                     return Err(e);
                 }
-                _ => {}
+                // 同网连不上（超时/其它错误）：关掉探测端点，转穿透兜底。
+                _ => {
+                    let _ =
+                        tokio::time::timeout(std::time::Duration::from_secs(1), c1.close()).await;
+                }
             }
         }
     }
@@ -592,8 +605,14 @@ pub(crate) async fn dial(
         _ => Client::bind(seed).await.map_err(|e| e.to_string())?, // nat(N0) 默认
     };
     let addr = nm_transport::addr_from_id(id).map_err(|e| e.to_string())?;
-    let session = go_online(&client, addr, cert).await?;
-    Ok((client, session))
+    match go_online(&client, addr, cert).await {
+        Ok(session) => Ok((client, session)),
+        // 穿透连接失败：关掉刚建的端点，免 `Endpoint dropped without close`。
+        Err(e) => {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), client.close()).await;
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
