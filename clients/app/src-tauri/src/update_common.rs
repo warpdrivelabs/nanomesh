@@ -337,44 +337,25 @@ fn cleanup_updates_cache(app: &AppHandle) {
     }
 }
 
-// ── check（①）：自家 reqwest 拉取 + 回环喂插件，两命令共用 ──
+// ── check（①）：回环代理——插件替换模板，自家 reqwest 转发上游，两命令共用 ──
 
-/// 跑一次更新检查（拉取 10s 超时）。`Ok(None)` = 无更新（204 / 未配置更新源）；
+/// 跑一次更新检查。`Ok(None)` = 无更新（204 / 未配置更新源）；
 /// `Err` = 网络/服务不可达（**≠ 撤回**，R2：外环对 Err 退避重试，只有 Ok(None) 才是撤回即停）。
 /// 返回的 Update 携带 raw_json（完整响应体）与解析好的 url/version。
 ///
 /// **为何 check 也走回环**：插件的 HTTP 栈在本依赖图里被 feature 统一成 native-tls
 /// （SecureTransport），对门户 TLS 握手即败（errSSLBadProtocolVersion -9836；服务端
-/// 1.2/1.3 均支持，curl 与自家 reqwest(rustls) 均通）。与安装同策略：latest.json 由
-/// 自家 reqwest(rustls) 拉取，起 127.0.0.1 纯 HTTP 迷你服务喂插件解析——插件全程只碰
-/// 本机明文 HTTP，版本比较/minisign 验签/安装逻辑零改动。`{{target}}`/`{{current_version}}`
-/// 的替换语义（2.14.1：os 名 + 当前版本，E2E 日志佐证 target=darwin）在此手动复刻。
+/// 1.2/1.3 均支持，curl 与自家 reqwest(rustls) 均通）。与安装同策略隔离：插件端点
+/// 指向 127.0.0.1 明文 HTTP；**插件自己替换好 `{{target}}`/`{{current_version}}`**，
+/// 回环代理把替换后的 query 原样转发到上游（自家 reqwest rustls）。替换语义永远
+/// 以插件为准——勿在客户端手动复刻（macOS 上插件 target=darwin 而
+/// std::env::consts::OS=macos，手动替换已实测翻车，E2E 抓到）。
 async fn check_once(app: &AppHandle) -> Result<Option<Update>, String> {
     ensure_rustls_provider();
     // 更新源未配置（env 未注入且配置无端点）= 功能静默：直接无更新（无网络请求与噪音日志）。
     let Some(base) = feed_base(app) else { return Ok(None) };
-    let cur = app.package_info().version.to_string();
-    let feed_url = format!(
-        "{base}/nanomesh-updates/latest.json?target={}&current_version={cur}",
-        std::env::consts::OS
-    );
-    let resp = reqwest::Client::new()
-        .get(&feed_url)
-        .timeout(CHECK_TIMEOUT)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if resp.status() == reqwest::StatusCode::NO_CONTENT {
-        return Ok(None); // 无更新/已撤回/该平台无产物
-    }
-    if !resp.status().is_success() {
-        return Err(format!("latest.json HTTP {}", resp.status()));
-    }
-    let latest: Value = serde_json::from_slice(&resp.bytes().await.map_err(|e| e.to_string())?)
-        .map_err(|e| format!("latest.json 解析失败：{e}"))?;
-    let latest_body = latest.to_string().into_bytes();
 
-    // 回环迷你服务（bind 重试 3 次）：插件 check 只 GET /latest.json，不碰 /artifact。
+    // 回环代理（bind 重试 3 次）。
     let mut listener = None;
     for _ in 0..3 {
         if let Ok(l) = tokio::net::TcpListener::bind("127.0.0.1:0").await {
@@ -387,11 +368,14 @@ async fn check_once(app: &AppHandle) -> Result<Option<Update>, String> {
     };
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    tauri::async_runtime::spawn(serve_loopback(listener, None, latest_body, shutdown_rx));
+    tauri::async_runtime::spawn(serve_check_proxy(listener, base, shutdown_rx));
 
     let result = async {
-        let endpoint =
-            url::Url::parse(&format!("http://127.0.0.1:{port}/latest.json")).map_err(|e| e.to_string())?;
+        // 模板原样交给插件替换（{{target}}/{{current_version}}），代理只认替换结果。
+        let endpoint = url::Url::parse(&format!(
+            "http://127.0.0.1:{port}/latest.json?target={{{{target}}}}&current_version={{{{current_version}}}}"
+        ))
+        .map_err(|e| e.to_string())?;
         let mut update = app
             .updater_builder()
             .endpoints(vec![endpoint])
@@ -411,6 +395,88 @@ async fn check_once(app: &AppHandle) -> Result<Option<Update>, String> {
     .await;
     let _ = shutdown_tx.send(true); // 显式停服，防 fd 泄漏
     result
+}
+
+/// check 专用回环代理：插件对模板替换后 GET /latest.json?target=&current_version=，
+/// 这里把 query 原样转发到 `{base}/nanomesh-updates/...`（自家 reqwest rustls），
+/// 透传状态码与响应体（204 不带体；上游故障回 502 让插件按失败处理，外环退避重试）。
+async fn serve_check_proxy(
+    listener: tokio::net::TcpListener,
+    base: String,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    loop {
+        let stream = tokio::select! {
+            _ = shutdown_rx.changed() => return,
+            r = listener.accept() => match r {
+                Ok((s, _)) => s,
+                Err(_) => return,
+            },
+        };
+        if let Err(e) = handle_check_conn(stream, &base).await {
+            tracing::warn!("check 回环代理请求失败：{e}");
+        }
+    }
+}
+
+async fn handle_check_conn(
+    mut stream: tokio::net::TcpStream,
+    base: &str,
+) -> Result<(), String> {
+    // 读请求头（最多 8KB，遇 \r\n\r\n 即止）。
+    let mut buf = vec![0u8; 8192];
+    let mut filled = 0usize;
+    loop {
+        let n = stream.read(&mut buf[filled..]).await.map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+        if filled == buf.len() || buf[..filled].windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+    }
+    let req = String::from_utf8_lossy(&buf[..filled]);
+    let path = req.split_whitespace().nth(1).unwrap_or("");
+    if !path.starts_with("/latest.json") {
+        let body = b"not found";
+        let head = format!(
+            "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).await.map_err(|e| e.to_string())?;
+        return stream.shutdown().await.map_err(|e| e.to_string());
+    }
+
+    // 原样转发（query 里已是插件替换好的具体值）。
+    let upstream = format!("{base}/nanomesh-updates{path}");
+    let (status, body) = match reqwest::Client::new()
+        .get(&upstream)
+        .timeout(CHECK_TIMEOUT)
+        .send()
+        .await
+    {
+        Ok(r) => {
+            let code = r.status();
+            let b = r.bytes().await.map_err(|e| e.to_string())?;
+            (code, b)
+        }
+        Err(e) => (
+            reqwest::StatusCode::BAD_GATEWAY,
+            format!("upstream error: {e}").into_bytes().into(),
+        ),
+    };
+    let head = format!(
+        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        status,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await.map_err(|e| e.to_string())?;
+    if status != reqwest::StatusCode::NO_CONTENT && !body.is_empty() {
+        stream.write_all(&body).await.map_err(|e| e.to_string())?;
+    }
+    stream.shutdown().await.map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// 从 raw_json 的 platforms 里找 url 与插件选中项相同的平台项，取其 `size`
@@ -605,12 +671,11 @@ fn disk_free_bytes(_dir: &Path) -> Option<u64> {
 
 // ── P2 回环流安装（④）：本地文件喂插件验签 + 安装 ──
 
-/// 回环流迷你 HTTP 服务：accept 循环处理 GET（`/latest.json` + `/artifact`），
+/// 回环流迷你 HTTP 服务（安装专用）：accept 循环处理 GET（`/latest.json` + `/artifact`），
 /// shutdown 信号随时退出。单连接串行处理（插件请求天然串行）；Connection: close 禁复用。
-/// `bin` = 安装场景的本地产物（check-only 场景传 None，/artifact 回 404）。
 async fn serve_loopback(
     listener: tokio::net::TcpListener,
-    bin: Option<PathBuf>,
+    bin: PathBuf,
     latest_body: Vec<u8>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) {
@@ -622,7 +687,7 @@ async fn serve_loopback(
                 Err(_) => return,
             },
         };
-        if let Err(e) = handle_loopback_conn(stream, bin.as_deref(), &latest_body).await {
+        if let Err(e) = handle_loopback_conn(stream, &bin, &latest_body).await {
             tracing::warn!("回环流请求处理失败：{e}");
         }
     }
@@ -630,7 +695,7 @@ async fn serve_loopback(
 
 async fn handle_loopback_conn(
     mut stream: tokio::net::TcpStream,
-    bin: Option<&Path>,
+    bin: &Path,
     latest_body: &[u8],
 ) -> Result<(), String> {
     // 读请求头（最多 8KB，遇 \r\n\r\n 即止）。
@@ -654,7 +719,7 @@ async fn handle_loopback_conn(
 
     let (status, ctype, body): (&str, &str, Vec<u8>) = if path.starts_with("/latest.json") {
         ("200 OK", "application/json", latest_body.to_vec())
-    } else if let (Some(bin), true) = (bin, path.starts_with("/artifact")) {
+    } else if path.starts_with("/artifact") {
         match tokio::fs::read(bin).await {
             Ok(data) => ("200 OK", "application/octet-stream", data),
             Err(e) => ("500 Internal Server Error", "text/plain", e.to_string().into_bytes()),
@@ -713,7 +778,7 @@ async fn install_via_loopback(
 
     // ④b 服务 task：bind 已完成（内核 backlog 已收连接），spawn 只是 accept 循环，无就绪竞态。
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    tauri::async_runtime::spawn(serve_loopback(listener, Some(bin), latest_body, shutdown_rx));
+    tauri::async_runtime::spawn(serve_loopback(listener, bin, latest_body, shutdown_rx));
 
     // ④e install 前落 pending 上报标记（R15：install 可能中断进程，标记先于风险动作落盘；
     // 下载失败不写 pending——failed_download 即时报无需补报）。
