@@ -38,9 +38,10 @@ mod registry;
 mod runtime;
 mod social;
 mod state;
-mod update;
 #[cfg(desktop)]
 mod tray;
+#[cfg(desktop)]
+mod update_common;
 
 pub(crate) use connection::{connect, dial, send_with_retry};
 pub(crate) use identity::{create_identity, list_identities, load_identity_seed};

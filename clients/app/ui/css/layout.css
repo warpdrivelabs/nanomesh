@@ -172,3 +172,8 @@
   .task .tm{font-size:11px;color:var(--muted);flex:0 0 auto}
   .task .del{opacity:0;color:var(--muted);font-size:14px;padding:0 2px} .task:hover .del{opacity:.7} .task .del:hover{color:var(--red);opacity:1}
   .empty-tasks{color:var(--muted);font-size:12px;padding:10px 12px;line-height:1.7}
+
+  /* ── 自动更新：标题栏「更新」按钮 + 弹窗说明区 ── */
+  #tb-update-btn{width:auto;padding:0 10px;font-size:12px;font-weight:600;color:var(--green);border:1px solid var(--border);white-space:nowrap}
+  #tb-update-btn:hover{background:var(--hover);color:var(--green2)}
+  .upd-notes{white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.65;max-height:40vh;overflow:auto}

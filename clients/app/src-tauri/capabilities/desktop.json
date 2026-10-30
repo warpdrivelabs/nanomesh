@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop-updater",
+  "description": "自动更新（桌面端专属）：updater 插件权限。mobile 构建无此插件，独立文件 + platforms 门控，避免 mobile 解析 updater:default 失败。",
+  "windows": ["main"],
+  "platforms": ["macOS", "windows", "linux"],
+  "permissions": ["updater:default"]
+}

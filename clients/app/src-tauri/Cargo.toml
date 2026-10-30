@@ -54,18 +54,24 @@ zeroize = "1"
 base64 = "0.22"
 bip39 = "2"
 # macOS 系统 TLS / rustls 访问 robot.link 会在握手时被重置，改用 OpenSSL。
-openssl = "0.10"
+# vendored：静态链接进二进制。系统 Homebrew 的 libssl 绝对路径分发即挂
+# （无此路径 Library not loaded；hardened runtime 下 Homebrew 签名与本 app Team ID 不同被 dyld 拒载）。
+openssl = { version = "0.10", features = ["vendored"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 hkdf = "0.12"
 sha2 = "0.10"
 tauri-plugin-notification = "2.5.1"
-tauri-plugin-updater = "2"
 
 # 托盘配套：单实例唤起、开机自启、全局快捷键（仅桌面端）。
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2.5.2"
 tauri-plugin-autostart = "2.7.0"
 tauri-plugin-global-shortcut = "2.4.0"
+# 自动更新（与 cmx-agent 同款）：updater 插件（check/minisign 验签/三平台安装）
+# + url/reqwest（update_common.rs 的断点下载器自用，rustls 不牵连本 app 的 OpenSSL 选型）。
+tauri-plugin-updater = "2"
+url = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # 设备口令存系统钥匙串（Android 无对应后端，退回 0600 文件）。
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]

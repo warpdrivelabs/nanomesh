@@ -26,6 +26,9 @@ nmspace 目前只能手动下载安装包覆盖安装。目标：
 - 现有发布：Gitee Release 附件（见 `RELEASE_PLAN.md`）；尚无 `latest.json`。
 - 本期范围：**只先打通 Windows 本地构建和验证**；macOS/Linux 等 Windows 验证通过后再做。
 - 当前实现进度（2026-10-29）：已接入 `tauri-plugin-updater`、Rust 命令 `app_check_update` / `app_download_install`、设置 → 关于的“应用更新”入口；`cargo check` 通过，dev app 可启动。上游 +3 提交后已按 `installMode=perMachine` 重建：0.1.0 测试基线 `61c8c814…`、0.1.1 最终包 `0405ac35…`（`bundle/nsis` + `.sig`）；干净重建未再出现 `__TAURI_BUNDLE_TYPE` 警告。`updates/latest.json` 尚未发布，当前检查更新会因 404 失败。
+- 2026-10-30 合并注记：与并行实现合流，命令面收敛为 `update_common.rs` 的
+  `check_update` / `download_and_install` / `get_app_version`（上节），初版 `update.rs`
+  及其命令已删除；端点/验签公钥以 tauri.conf.json 为准，并增加下载重试/断点续传/结果上报。
 - 运行环境：Windows 需要 FireDaemon OpenSSL `bin` 在 PATH；HTTPS 需要 `SSL_CERT_FILE`（Git CA bundle）。更新器自身的 HTTPS 依赖也受同类环境约束，需在打包/文档中覆盖。
 
 > 安全事件：此前生成的一对 Tauri minisign 密钥，私钥与密码已在对话中出现。按用户 2026-10-29 的决定，**内部测试阶段先与 TrueMate 共用同一 keypair**；仅限内部/测试，不进入公开 stable。公开版前必须轮换并拆成 nanomesh 独立密钥。仓库、本文档、CI 日志均不得出现私钥或密码。
@@ -90,10 +93,17 @@ https://gitee.com/warpdrivelabs/nanomesh/releases/download/<tag>/<file>
 当前 UI 无打包器，直接引入 `@tauri-apps/plugin-updater` 会引入前端构建链。为保持现有静态 UI：
 
 - Rust 侧引入 `tauri-plugin-updater`；重启使用 Tauri 内置 `AppHandle::restart()`，不需要额外 process 插件。
-- 在 `src-tauri` 暴露两个命令：
-  - `app_check_update`：返回 `{ available, version, notes }`
-  - `app_download_install`：下载并安装，向前端发 `update-progress` 事件，完成后重启
-- 前端仍用 `window.__TAURI__.core.invoke(...)` 调用，不新增 npm 包、不改 UI 构建方式。命令在 Rust 侧调用插件 API，不依赖前端 updater 权限。
+- 在 `src-tauri` 暴露命令（`src/update_common.rs`，cmx-agent 同款移植；合并取代了初版
+  `update.rs` 的 `app_check_update` / `app_download_install`）：
+  - `check_update`：检查可用更新，返回 `{ ok, data: { update_available, version, notes, force } }`
+  - `download_and_install`：自持化下载安装——壳内 4 轮退避重试 + `.part` 断点续传 +
+    回环流安装（minisign 验签零改动），进度经 `update_progress` 事件 `{received, total, attempt}`，
+    撤回经 `update_withdrawn` 事件；最终成功自动重启
+  - `get_app_version`：前端 `APP_VERSION` 注入源
+- 前端 `ui/js/update.js` 用 `window.__TAURI__.core.invoke(...)` 调用，不新增 npm 包、不改 UI 构建方式。命令在 Rust 侧调用插件 API，不依赖前端 updater 权限。
+- 更新源基址：`feed_base()` 优先构建期 `NMSPACE_UPDATE_FEED`（测试/私有渠道），否则回退
+  tauri.conf.json `plugins.updater.endpoints[0]` 推导 `scheme://host[:port]`；上报走
+  `POST {base}/nanomesh-updates/report`（pending 标记 + 版本记档 + machine_id）。
 
 ### 3.5 平台行为
 
@@ -202,7 +212,7 @@ https://gitee.com/warpdrivelabs/nanomesh/releases/download/<tag>/<file>
 
 ### 阶段 B：Rust 命令与 UI
 - [ ] 接入 `tauri-plugin-updater`、`tauri-plugin-process`
-- [ ] 实现 `app_check_update` / `app_download_install`
+- [ ] 实现 `check_update` / `download_and_install`（update_common.rs，已完成）
 - [ ] 进度事件、错误映射、重启
 - [ ] 设置页“检查更新”、启动静默检查、跳过版本
 - [ ] Linux deb/rpm 安装路径的 pkexec/polkit 错误映射；AppImage 无 root 路径

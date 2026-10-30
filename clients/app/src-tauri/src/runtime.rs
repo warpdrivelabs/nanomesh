@@ -2,15 +2,18 @@ use tauri::Manager;
 
 use crate::{
     AppState, auth_commands, cmx_host, connection, devices, directory, identity, llm_chat,
-    llm_proxy, llm_share, local_store, media, pairing, registry, social, update,
+    llm_proxy, llm_share, local_store, media, pairing, registry, social,
 };
 
 #[cfg(desktop)]
 use crate::tray;
+#[cfg(desktop)]
+use crate::update_common;
 
 /// 供前端 `platform.js` 探测系统。窗口按钮由标题栏自绘。
 #[tauri::command]
 fn platform() -> &'static str {
+    tracing::debug!("frontend probe: platform");
     std::env::consts::OS // "macos" | "windows" | "linux"
 }
 
@@ -56,10 +59,12 @@ pub(crate) fn run() {
             Some(vec![tray::HIDDEN_ARG]),
         ))
         .plugin(tray::shortcut_plugin())
-        .on_window_event(tray::on_window_event);
+        .on_window_event(tray::on_window_event)
+        // 自动更新（与 cmx-agent 同款）：updater 插件（check/minisign 验签/安装）。
+        // 前端统一走 update_common.rs 的命令入口，不直接调插件 JS API。
+        .plugin(tauri_plugin_updater::Builder::new().build());
     builder
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::default())
         .setup(|_app| {
             init_tracing(_app.handle());
@@ -70,6 +75,13 @@ pub(crate) fn run() {
             }
             #[cfg(desktop)]
             tray::setup(_app.handle())?;
+            // 自动更新：启动版本上报（pending 标记消费 + 记档补报）+ 更新缓存治理。
+            // 更新源未注入（NMSPACE_UPDATE_FEED）时上报自动空转，无网络副作用。
+            #[cfg(desktop)]
+            {
+                let apph = _app.handle().clone();
+                tauri::async_runtime::spawn(update_common::report_startup_version(apph));
+            }
             // 云模型纳管:app 启动即收养上个生命周期遗留的 gatewayd 孤儿(pidfile+命令行指纹),
             // UI 第一屏即见真实在线态;不需 VK。见 llm_share::adopt_on_boot。
             {
@@ -238,8 +250,6 @@ pub(crate) fn run() {
             local_store::actbar_load,
             local_store::actbar_register,
             local_store::actbar_remove,
-            update::app_check_update,
-            update::app_download_install,
             #[cfg(desktop)]
             tray::commands::tray_sync,
             #[cfg(desktop)]
@@ -251,7 +261,13 @@ pub(crate) fn run() {
             #[cfg(desktop)]
             tray::commands::tray_test_notify,
             #[cfg(desktop)]
-            tray::commands::app_quit
+            tray::commands::app_quit,
+            #[cfg(desktop)]
+            update_common::get_app_version,
+            #[cfg(desktop)]
+            update_common::check_update,
+            #[cfg(desktop)]
+            update_common::download_and_install
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

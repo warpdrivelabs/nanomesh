@@ -91,6 +91,7 @@ async function toggleUserMenu() {
       window.Tray && Tray.available() ? `<div class="um-item" id="um-notify"><span class="um-av um-plus">${nmIcon("bell")}</span><span class="um-meta"><b>通知与托盘</b><small>通知、免打扰、快捷键</small></span></div>` : "",
       `<div class="um-item" id="um-sec"><span class="um-av um-plus">${nmIcon("shield")}</span><span class="um-meta"><b>安全设置</b><small>自动锁定、口令、备份</small></span></div>`,
       `<div class="um-item" id="um-cmx"><span class="um-av um-plus">${nmIcon("robot")}</span><span class="um-meta"><b>智能体设置</b><small>工作台、登录模式、模型来源</small></span></div>`,
+      `<div class="um-item" id="um-update"><span class="um-av um-plus">${nmIcon("refresh")}</span><span class="um-meta"><b>检查更新</b><small>自动更新到最新版本</small></span></div>`,
     ].join(""),
   };
   const fly = document.getElementById("um-fly");
@@ -149,7 +150,7 @@ async function toggleUserMenu() {
     if (e.target.closest("#um-others")) return;
     const stBtn = e.target.closest(".um-st");
     const pkEl = e.target.closest(".um-item[data-pk]");
-    const act = e.target.closest("#um-copy, #um-profile, #um-passwd, #um-devices, #um-notify, #um-sec, #um-cmx, #um-new, #um-theme, #um-lang");
+    const act = e.target.closest("#um-copy, #um-profile, #um-passwd, #um-devices, #um-notify, #um-sec, #um-cmx, #um-update, #um-new, #um-theme, #um-lang");
     if (!stBtn && !pkEl && !act) return;
     const id = act ? act.id : "";
     closeAll();
@@ -164,6 +165,7 @@ async function toggleUserMenu() {
     else if (id === "um-notify" && window.Tray) Tray.openSettings();
     else if (id === "um-sec" && typeof openSecModal === "function") openSecModal();
     else if (id === "um-cmx" && typeof openCmxSettings === "function") openCmxSettings();
+    else if (id === "um-update" && typeof checkUpdate === "function") checkUpdate(false);
     else if (id === "um-new" && typeof imDisconnect === "function") imDisconnect();
     else if (id === "um-theme" && typeof toggleTheme === "function") toggleTheme();
     else if (id === "um-lang" && window.nmSetLocale) nmSetLocale(window.nmLocale && nmLocale() === "en" ? "zh-CN" : "en");

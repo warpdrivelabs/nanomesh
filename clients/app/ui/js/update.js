@@ -1,267 +1,238 @@
-// ── 应用内更新：启动静默检查 + 发现更新弹窗 + 设置 → 关于手动检查 ──
-// 行为对齐 TrueMate：启动 5 秒后静默检查；有更新直接弹确认框；
-// 同一版本 30 分钟内静默检查不重复弹（手动检查不受限）；force 更新无「稍后」且不可关闭。
-(function () {
-  const btn = document.getElementById("tp-update-btn");
-  const status = document.getElementById("tp-update-status");
-  if (!btn || !status) return;
+// ── 自动更新（与 cmx-agent 同款方案的前端闭环）──
+// 壳命令 download_and_install 已自持：外环 4 轮退避重试 + 断点续传（.part）+ 回环流安装
+// 全在壳内（update_common.rs）。本层只负责：确认窗 / 重试窗 / agreed 标记 / 30 分钟自动
+// 再试的闭环；入口 = 标题栏「更新」按钮 + 用户菜单「检查更新」+ 启动静默检查。
+// 服务端契约同 cmx-agent 门户（/agent-updates/latest.json + /report），更新源未部署时
+// 壳 check 恒回无更新，本层零打扰。
+let UPDATE_INFO = null;   // {version, notes, force} 或 null（无可用更新）
+let APP_VERSION = "";     // 懒取自壳 get_app_version（tauri.conf.json version 真源）
+let _updating = false;    // 防重入：下载安装进行中不再触发（壳内 INSTALLING 双保险）
+let _lastAutoTry = 0;     // 上次自动再试时刻（回前台再试的 5 分钟门槛）
+let _autoTimer = null;    // 30 分钟自动再试 interval 句柄（只挂一次）
+let _desktop = null;      // null=未知；mobile 端 get_app_version 未注册 → false，功能整体关闭
 
-  const SNOOZE_KEY = "nmspace-update-snooze";
-  const SNOOZE_MS = 30 * 60 * 1000;
+// 桌面判定：探测一次即缓存（mobile 上命令不存在 → 永久 false，不再产生无效 IPC）。
+async function updIsDesktop() {
+  if (_desktop !== null) return _desktop;
+  if (!(window.__TAURI__ && window.__TAURI__.core)) { _desktop = false; return false; }
+  try { await window.__TAURI__.core.invoke("get_app_version"); _desktop = true; }
+  catch (e) { _desktop = false; }
+  return _desktop;
+}
 
-  let info = null;          // {version, notes, force}
-  let busy = false;         // 下载安装进行中
-  let listening = false;    // update-progress 只挂一次
-  let modal = null;         // {root, notes, msg, installBtn, laterBtn, force, esc}
-  let autoChecked = false;  // 启动自动检查只跑一次
+// ── 「已同意」标记（R14）：点「立即更新」即写入；成功/撤回清除、失败保留（自动再试依据）。
+// 存 localStorage：SPA 刷新 / 视图切换不丢；壳命令自持化，仅凭标记即可恢复重试。
+function setUpdateAgreed(v) {
+  try { v ? localStorage.setItem("nmspace-update-agreed", JSON.stringify({ version: v, ts: Date.now() }))
+          : localStorage.removeItem("nmspace-update-agreed"); } catch (e) {}
+}
+function getUpdateAgreed() {
+  try { return JSON.parse(localStorage.getItem("nmspace-update-agreed") || "null"); } catch (e) { return null; }
+}
 
-  const hasTauri = () => !!(window.NM && window.NM.hasTauri && window.NM.hasTauri());
-  const setStatus = (text) => { status.textContent = text; };
-  const versionText = (v) => (v ? " " + v : "");
+function renderUpdateBtn() {
+  const btn = document.getElementById("tb-update-btn");
+  if (btn) {
+    if (UPDATE_INFO) { btn.hidden = false; document.getElementById("tb-update-label").textContent = "更新 " + UPDATE_INFO.version; }
+    else { btn.hidden = true; }
+  }
+  // 设置面板「应用更新」状态行（#tp-update-btn 所在 pane）：随检查结果刷新
+  const st = document.getElementById("tp-update-status");
+  if (st) {
+    if (UPDATE_INFO) st.textContent = "新版本 " + UPDATE_INFO.version + " 可用，可立即安装。";
+    else if (APP_VERSION) st.textContent = "当前已是最新版本 v" + APP_VERSION + "。";
+  }
+}
 
-  function snoozed(version) {
+// 标题栏「更新」按钮：不直接下载，先弹更新确认窗，用户点「立即更新」才装。
+function updateBtnClick() {
+  if (!UPDATE_INFO) return;
+  showUpdateDialog(UPDATE_INFO);
+}
+
+// 下载 + 安装（壳内 4 轮重试 + 断点续传 + 回环安装，这里只等结果）。
+// 进度：壳 emit 的 update_progress {received, total, attempt}（received 已含续传偏移）→ 按钮内联百分比；
+// attempt>1 时文案标「重试N」（新一轮断点续传，百分比从上次断点起跳）。
+// auto=true（自动再试）：失败只 toast 不弹窗（防打扰循环）；手动路径失败弹重试窗。
+// 结果闭环（R14）：invoke Ok = 撤回（安装成功壳直接 restart，前端收不到返回）→ 清标记+按钮；
+// Err = 4 轮全败 → 标记保留（自动再试兜底）。
+async function applyUpdate(auto) {
+  if (_updating) return;
+  if (!auto && !UPDATE_INFO) return;
+  _updating = true;
+  const label = document.getElementById("tb-update-label");
+  if (label) label.textContent = auto ? "自动重试中…" : "下载中…";
+  (async () => {
+    let unlisten = null;
+    if (window.__TAURI__ && window.__TAURI__.event) {
+      try { unlisten = await window.__TAURI__.event.listen("update_progress", (e) => {
+        const p = e.payload || {};
+        const att = p.attempt || 1;
+        const n = p.total ? Math.round(p.received / p.total * 100) + "%"
+                          : Math.round(p.received / 1024) + "KB";
+        if (label) label.textContent = att > 1 ? "重试" + att + " " + n : "下载 " + n;
+      }); } catch (err) {}
+    }
     try {
-      const s = JSON.parse(localStorage.getItem(SNOOZE_KEY) || "null");
-      return !!(s && s.version === version && Date.now() - s.ts < SNOOZE_MS);
-    } catch (_) {
-      return false;
+      await window.__TAURI__.core.invoke("download_and_install");
+      // Ok = 版本撤回（204）：清 agreed + 按钮（update_withdrawn 事件监听会 toast，这里静默）。
+      setUpdateAgreed(null); UPDATE_INFO = null; _updating = false; if (unlisten) unlisten(); renderUpdateBtn();
+    } catch (err) {
+      // 4 轮重试全败：agreed 保留（30 分钟自动再试兜底）；手动弹重试窗，自动只 toast。
+      _updating = false; if (unlisten) unlisten(); renderUpdateBtn();
+      if (auto) { if (window.toast) toast("自动更新重试失败：" + err); }
+      else { showRetryDialog(String(err)); }
+    }
+  })();
+}
+
+// 轻量弹窗（复用 sec-overlay 样式，自包含；浏览器原生 confirm/alert 在 WebView 里带
+// 「网页说」前缀且样式出戏，禁用）。lock=true（强制更新）：无「稍后」、点遮罩/Esc 均不可关。
+function updModal(opts) {
+  const m = document.createElement("div"); m.className = "sec-overlay on";
+  const x = opts.lock ? "" : `<button class="sec-x upd-x">${nmIcon("close")}</button>`;
+  const actions = (opts.actions || []).map((a, i) =>
+    `<button class="ns-btn${a.kind === "primary" ? " ns-primary" : ""}" data-i="${i}">${escapeHtml(a.text)}</button>`).join("");
+  m.innerHTML = `<div class="sec-box"><div class="sec-head">${escapeHtml(opts.title)}${x}</div>
+    <div class="sec-body"><div class="sec-sec"><div class="upd-notes">${opts.body || ""}</div>
+    <div class="sec-actions">${actions}</div></div></div></div>`;
+  document.body.appendChild(m);
+  const done = (fn) => { m.remove(); document.removeEventListener("keydown", onKey); if (fn) fn(); };
+  const onKey = (e) => { if (e.key === "Escape" && !opts.lock) done(null); };
+  if (!opts.lock) {
+    document.addEventListener("keydown", onKey);
+    m.querySelector(".upd-x").onclick = () => done(null);
+    m.addEventListener("click", (e) => { if (e.target === m) done(null); });
+  }
+  m.querySelectorAll(".sec-actions .ns-btn").forEach((b) => {
+    b.onclick = () => done(opts.actions[+b.dataset.i].onClick);
+  });
+  return m;
+}
+
+// 更新提示弹窗：force 无「稍后」且不可关（数据通路已通，服务端 force 随版本走）。
+function showUpdateDialog(info) {
+  // 弹出即记「已提示」：30 分钟内静默检查不重复弹同一版本（不依赖用户点「稍后」；
+  // 手动菜单检查不受限；force 不受限）
+  try { localStorage.setItem("nmspace-update-snooze", JSON.stringify({ version: info.version, ts: Date.now() })); } catch (e) {}
+  updModal({
+    title: "发现新版本 " + (info.version || ""),
+    body: escapeHtml(info.notes || "暂无更新说明"),
+    lock: !!info.force,
+    actions: (info.force ? [] : [{ text: "稍后" }]).concat([
+      { text: "立即更新", kind: "primary", onClick: () => {
+        setUpdateAgreed(info.version);   // R14：用户已同意安装——之后失败由 30 分钟自动再试兜底
+        applyUpdate(false);
+      } },
+    ]),
+  });
+}
+
+// 更新失败重试窗：重试=再调壳命令（外环重新走）；稍后=关窗（agreed 已保留，
+// 30 分钟自动再试兜底；标题栏按钮常驻可手动重试）。
+function showRetryDialog(reason) {
+  updModal({
+    title: "更新下载失败",
+    body: escapeHtml("已自动重试 4 次仍未成功：\n" + reason),
+    actions: [
+      { text: "稍后" },
+      { text: "重试", kind: "primary", onClick: () => applyUpdate(false) },
+    ],
+  });
+}
+
+// 「已提示」标记查询（写入口：showUpdateDialog，弹出即写）
+function updateSnoozed(v) {
+  try {
+    const s = JSON.parse(localStorage.getItem("nmspace-update-snooze") || "null");
+    return !!(s && s.version === v && Date.now() - s.ts < 30 * 60 * 1000);
+  } catch (e) { return false; }
+}
+
+// 检查更新（用户菜单项 / 启动自动检查）：有新版 → 确认弹窗（用户确认才装）+ 标题栏按钮。
+// silent=true：启动自动检查——失败无感（fail-closed），有新版同样弹窗；无新版零打扰。
+// 30 分钟内已提示过的同版本，静默检查只出标题栏按钮不再弹（手动检查 = 用户点名，照弹）。
+async function checkUpdate(silent) {
+  if (!(await updIsDesktop())) { if (!silent && window.toast) toast("当前环境不支持应用内更新"); return; }
+  if (!silent) document.getElementById("user-menu")?.classList.remove("on");
+  try {
+    const r = JSON.parse(await window.__TAURI__.core.invoke("check_update"));
+    if (r && r.ok && r.data && r.data.update_available) {
+      UPDATE_INFO = { version: r.data.version, notes: r.data.notes, force: r.data.force };
+      renderUpdateBtn();
+      if (UPDATE_INFO.force || !silent || !updateSnoozed(UPDATE_INFO.version)) showUpdateDialog(UPDATE_INFO);
+    } else {
+      UPDATE_INFO = null; renderUpdateBtn();
+      if (!silent) {
+        if (!APP_VERSION) { try { APP_VERSION = await window.__TAURI__.core.invoke("get_app_version"); } catch (e) {} }
+        if (window.toast) toast("当前已是最新版本" + (APP_VERSION ? " v" + APP_VERSION : ""));
+      }
+    }
+  } catch (err) {
+    UPDATE_INFO = null; renderUpdateBtn();
+    if (!silent && window.toast) {
+      const msg = String(err);
+      if (msg.includes("fallback platforms")) toast("更新服务暂未配置当前平台的安装包");
+      else toast("检查更新失败：" + msg);
     }
   }
+}
+window.checkUpdate = checkUpdate;
 
-  function snooze(version) {
+// 启动自动检查（5s 后例行一次；登录/首屏完成后可见时兜底再查）。
+// 窗口不可见时不查不弹——弹窗挂在不可见界面里会被错过。
+let _updChecked = false;
+function autoUpdateCheck() {
+  if (_updChecked) return;
+  if (document.visibilityState === "hidden") return;
+  _updChecked = true;
+  checkUpdate(true);
+}
+setTimeout(() => { updIsDesktop().then((d) => { if (d) autoUpdateCheck(); }); }, 5000);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") return;
+  updIsDesktop().then((d) => { if (d) autoUpdateCheck(); });
+});
+
+// 版本撤回事件（壳外环 check 拿 204 时 emit）：清 agreed + 按钮 + toast（R13/R14 闭环）。
+(async () => {
+  if (window.__TAURI__ && window.__TAURI__.event) {
     try {
-      localStorage.setItem(SNOOZE_KEY, JSON.stringify({ version: version, ts: Date.now() }));
-    } catch (_) {}
-  }
-
-  function renderAvailable(update) {
-    info = update;
-    const ver = versionText(update.version);
-    setStatus(`发现新版本${ver}${update.notes ? `：${update.notes}` : ""}`);
-    btn.textContent = `下载并安装${ver}`;
-  }
-
-  function renderCurrent() {
-    info = null;
-    setStatus("当前已是最新版本");
-    btn.textContent = "检查更新";
-  }
-
-  async function ensureProgressListener() {
-    if (listening || !window.NM || !window.NM.onEvent) return;
-    listening = true;
-    try {
-      await window.NM.onEvent("update-progress", (p) => {
-        if (!p) return;
-        const received = Number(p.received) || 0;
-        const total = Number(p.total) || 0;
-        let text;
-        if (total > 0) {
-          const pct = Math.min(100, Math.round((received / total) * 100));
-          text = `下载中 ${pct}%（${Math.round(received / 1048576)} / ${Math.round(total / 1048576)} MB）`;
-        } else {
-          text = `下载中 ${Math.round(received / 1024)} KB`;
-        }
-        setStatus(text);
-        if (modal && modal.msg) modal.msg.textContent = text;
+      await window.__TAURI__.event.listen("update_withdrawn", () => {
+        setUpdateAgreed(null); UPDATE_INFO = null; renderUpdateBtn();
+        if (window.toast) toast("更新已撤回");
       });
-    } catch (_) {
-      listening = false;
-    }
+    } catch (e) {}
   }
+})();
 
-  function closeModal() {
-    if (!modal) return;
-    if (modal.force) return;
-    if (modal.esc) document.removeEventListener("keydown", modal.esc);
-    modal.root.remove();
-    modal = null;
-  }
+// 已同意版本的自动再试（P1）：30 分钟 interval + 回前台（距上次尝试 >5 分钟）。
+// 只认 agreed 标记——壳命令自持化（自己 check），无需 UPDATE_INFO；刷新后标记仍在即恢复重试。
+// 再次最终失败只 toast（applyUpdate(auto=true)），标题栏按钮常驻可手动重试。
+function tryAutoRetry() {
+  const a = getUpdateAgreed();
+  if (!a || _updating) return;
+  _lastAutoTry = Date.now();
+  applyUpdate(true);
+}
+function ensureAutoRetryLoop() {
+  if (_autoTimer) return;
+  _autoTimer = setInterval(() => { if (getUpdateAgreed() && !_updating) tryAutoRetry(); }, 30 * 60 * 1000);
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") return;
+  if (getUpdateAgreed() && !_updating && Date.now() - _lastAutoTry > 5 * 60 * 1000) tryAutoRetry();
+});
+ensureAutoRetryLoop();
 
-  function showUpdateDialog(update) {
-    if (modal) return;
-    // 弹出即记已提示：30 分钟内静默检查不重复弹同版本；手动检查不受此限制。
-    snooze(update.version);
-
-    const force = !!update.force;
-    const root = document.createElement("div");
-    root.className = "sec-overlay on";
-    root.setAttribute("role", "dialog");
-    root.setAttribute("aria-modal", "true");
-
-    const dlg = document.createElement("div");
-    dlg.className = "dlg";
-    dlg.style.cssText = "width:min(440px,92vw);aspect-ratio:auto;max-height:none";
-
-    const head = document.createElement("div");
-    head.className = "dlg-head";
-    const title = document.createElement("span");
-    title.className = "dlg-title";
-    title.textContent = `发现新版本${versionText(update.version)}`;
-    const sub = document.createElement("span");
-    sub.className = "dlg-sub";
-    sub.textContent = "NANO MESH 更新";
-    head.appendChild(title);
-    head.appendChild(sub);
-
-    let closeBtn = null;
-    if (!force) {
-      closeBtn = document.createElement("button");
-      closeBtn.type = "button";
-      closeBtn.className = "sec-x";
-      closeBtn.textContent = "×";
-      closeBtn.title = "稍后";
-      closeBtn.addEventListener("click", closeModal);
-      head.appendChild(closeBtn);
-    }
-
-    const main = document.createElement("div");
-    main.className = "dlg-main";
-    main.style.cssText = "display:block;padding:18px 20px 8px";
-    const notes = document.createElement("div");
-    notes.className = "pane-d";
-    notes.style.cssText = "white-space:pre-wrap;line-height:1.75";
-    notes.textContent = update.notes ? update.notes : "暂无更新说明";
-    const msg = document.createElement("div");
-    msg.className = "sec-msg";
-    msg.style.paddingTop = "10px";
-    main.appendChild(notes);
-    main.appendChild(msg);
-
-    const foot = document.createElement("div");
-    foot.className = "dlg-foot";
-    const spacer = document.createElement("div");
-    spacer.className = "sec-msg";
-    foot.appendChild(spacer);
-
-    let laterBtn = null;
-    if (!force) {
-      laterBtn = document.createElement("button");
-      laterBtn.type = "button";
-      laterBtn.className = "ns-btn";
-      laterBtn.textContent = "稍后";
-      laterBtn.addEventListener("click", closeModal);
-      foot.appendChild(laterBtn);
-    }
-
-    const installBtn = document.createElement("button");
-    installBtn.type = "button";
-    installBtn.className = "ns-btn ns-primary";
-    installBtn.textContent = "立即更新";
-    installBtn.addEventListener("click", () => install(false));
-    foot.appendChild(installBtn);
-
-    dlg.appendChild(head);
-    dlg.appendChild(main);
-    dlg.appendChild(foot);
-    root.appendChild(dlg);
-    document.body.appendChild(root);
-
-    const esc = (e) => {
-      if (e.key === "Escape" && !force) closeModal();
-    };
-    document.addEventListener("keydown", esc);
-    root.addEventListener("click", (e) => {
-      if (!force && e.target === root) closeModal();
-    });
-
-    modal = { root, notes, msg, installBtn, laterBtn, force, esc };
-  }
-
-  async function check(silent) {
-    if (!hasTauri()) {
-      if (!silent) setStatus("仅桌面版支持检查更新");
-      return;
-    }
-    if (busy) return;
-    btn.disabled = true;
-    if (!silent) setStatus("检查中…");
-    try {
-      const r = await window.NM.inv("app_check_update");
-      const available = !!(r && (r.available || r.update_available));
-      if (available) {
-        const update = {
-          version: r.version,
-          notes: r.notes || "",
-          force: !!r.force,
-        };
-        renderAvailable(update);
-        if (!silent || update.force || !snoozed(update.version)) {
-          showUpdateDialog(update);
-        }
-      } else {
-        renderCurrent();
-      }
-    } catch (e) {
-      info = null;
-      btn.textContent = "检查更新";
-      if (!silent) setStatus(`检查更新失败：${(e && e.message) || e}`);
-    } finally {
-      btn.disabled = false;
-    }
-  }
-
-  async function install(auto) {
-    if (!hasTauri() || busy || !info) return;
-    busy = true;
-    btn.disabled = true;
-    if (modal) {
-      modal.installBtn.disabled = true;
-      if (modal.laterBtn) modal.laterBtn.disabled = true;
-      modal.msg.textContent = "准备下载…";
-    }
-    setStatus("准备下载…");
-    await ensureProgressListener();
-    try {
-      await window.NM.inv("app_download_install");
-      // 安装成功后应用会重启，正常不会返回。
-      busy = false;
-      btn.disabled = false;
-      renderCurrent();
-      closeModal();
-    } catch (e) {
-      busy = false;
-      btn.disabled = false;
-      const text = `更新失败：${(e && e.message) || e}`;
-      setStatus(text);
-      if (modal) {
-        modal.msg.textContent = text;
-        modal.installBtn.disabled = false;
-        modal.installBtn.textContent = "重试更新";
-        if (modal.laterBtn) modal.laterBtn.disabled = false;
-      }
-      if (auto && window.toast) window.toast(text);
-    }
-  }
-
-  btn.addEventListener("click", () => {
-    if (info) install(false);
-    else check(false);
+(function initUpdateUi() {
+  const btn = document.getElementById("tb-update-btn");
+  if (btn) btn.addEventListener("click", (e) => { e.stopPropagation(); updateBtnClick(); });
+  // 设置面板「检查更新」按钮（他版 UI 面板，接同一手动检查入口）
+  const tpBtn = document.getElementById("tp-update-btn");
+  if (tpBtn) tpBtn.addEventListener("click", () => {
+    if (_updating) return;
+    tpBtn.disabled = true;
+    Promise.resolve(checkUpdate(false)).finally(() => { tpBtn.disabled = false; });
   });
-
-  function mainViewVisible() {
-    const view = document.getElementById("main-view");
-    if (!view) return true;
-    return getComputedStyle(view).display !== "none";
-  }
-
-  function autoCheck() {
-    if (autoChecked) return;
-    if (!hasTauri()) return;
-    if (document.visibilityState === "hidden") return;
-    if (!mainViewVisible()) return;
-    autoChecked = true;
-    check(true);
-  }
-  setTimeout(autoCheck, 5000);
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") autoCheck();
-  });
-  const mainView = document.getElementById("main-view");
-  if (mainView && window.MutationObserver) {
-    new MutationObserver(autoCheck).observe(mainView, {
-      attributes: true,
-      attributeFilter: ["style", "class"],
-    });
-  }
 })();
