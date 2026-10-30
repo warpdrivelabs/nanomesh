@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="no-js">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#050b16" />
+  <meta name="description" content="NANO MESH 是一个基于 iroh 的去中心化网格通信客户端。公钥就是身份，消息点对点直达，数据留在你自己的设备里。支持 Windows / macOS / Linux。" />
+  <title>NANO MESH · nmspace — 去中心化网格通信</title>
+  <link rel="icon" type="image/png" href="assets/app-icon.png" />
+  <script>document.documentElement.classList.remove('no-js');document.documentElement.classList.add('js');</script>
+  <style>
+    :root{
+      --bg:#050b16;
+      --bg-2:#081426;
+      --panel:rgba(12,26,48,.62);
+      --panel-strong:rgba(14,30,55,.9);
+      --line:rgba(132,176,255,.16);
+      --line-strong:rgba(132,176,255,.3);
+      --text:#edf4ff;
+      --muted:#96a9c8;
+      --faint:#6f86a8;
+      --blue:#4f8cff;
+      --cyan:#22d3ee;
+      --green:#34d399;
+      --grad:linear-gradient(115deg,#4f8cff 0%,#22d3ee 55%,#34d399 100%);
+      --radius:20px;
+      --container:1180px;
+      --header:72px;
+      --shadow:0 30px 80px rgba(0,0,0,.45);
+    }
+    *{box-sizing:border-box}
+    html{scroll-behavior:smooth;scroll-padding-top:calc(var(--header) + 24px)}
+    body{
+      margin:0;
+      font-family:"PingFang SC","Microsoft YaHei",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      color:var(--text);
+      background:var(--bg);
+      -webkit-font-smoothing:antialiased;
+      overflow-x:hidden;
+    }
+    body::before{
+      content:"";
+      position:fixed;
+      inset:0;
+      z-index:0;
+      pointer-events:none;
+      background-image:
+        linear-gradient(rgba(120,170,255,.055) 1px,transparent 1px),
+        linear-gradient(90deg,rgba(120,170,255,.055) 1px,transparent 1px);
+      background-size:64px 64px;
+      -webkit-mask-image:radial-gradient(circle at 50% 15%,#000 0%,transparent 72%);
+      mask-image:radial-gradient(circle at 50% 15%,#000 0%,transparent 72%);
+    }
+    ::selection{background:rgba(34,211,238,.25)}
+    a{color:inherit;text-decoration:none}
+    img{display:block;max-width:100%}
+    button{font:inherit}
+    :focus-visible{outline:2px solid var(--cyan);outline-offset:3px;border-radius:6px}
+    .skip-link{position:absolute;left:16px;top:-60px;z-index:100;padding:10px 14px;border-radius:10px;background:var(--text);color:var(--bg);font-weight:600;transition:top .2s}
+    .skip-link:focus{top:12px}
+    .container{width:min(calc(100% - 40px),var(--container));margin:0 auto;position:relative;z-index:1}
+    .eyebrow{display:flex;align-items:center;gap:10px;margin:0 0 18px;font-size:.7rem;font-weight:700;letter-spacing:.22em;text-transform:uppercase;color:var(--cyan)}
+    .eyebrow .dot{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 12px var(--green)}
+
+    .site-header{position:sticky;top:0;z-index:50;background:rgba(5,11,22,.72);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border-bottom:1px solid transparent;transition:background .25s,border-color .25s}
+    .site-header.scrolled{background:rgba(5,11,22,.9);border-color:var(--line)}
+    .header-inner{height:var(--header);display:flex;align-items:center;justify-content:space-between;gap:24px}
+    .brand{display:flex;align-items:center;gap:12px;flex-shrink:0}
+    .brand img{width:38px;height:38px;border-radius:11px;box-shadow:0 0 0 1px rgba(255,255,255,.08),0 10px 24px rgba(34,211,238,.14)}
+    .brand-text{display:flex;flex-direction:column;line-height:1}
+    .brand-text strong{font-size:.9rem;font-weight:700;letter-spacing:.16em}
+    .mesh-word{color:var(--green);text-shadow:0 0 16px rgba(52,211,153,.28)}
+    .brand-text small{margin-top:5px;font-size:.62rem;letter-spacing:.3em;color:var(--muted)}
+    .nav{display:flex;align-items:center;gap:30px;font-size:.9rem;color:var(--muted)}
+    .nav a{position:relative;padding:6px 0;transition:color .2s}
+    .nav a::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1px;background:var(--grad);transform:scaleX(0);transform-origin:left;transition:transform .25s}
+    .nav a:hover,.nav a.active{color:var(--text)}
+    .nav a.active::after{transform:scaleX(1)}
+    .header-actions{display:flex;align-items:center;gap:10px}
+    .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 16px;border-radius:12px;border:1px solid transparent;font-size:.86rem;font-weight:600;white-space:nowrap;transition:transform .2s,background .2s,border-color .2s,box-shadow .2s}
+    .btn svg{width:16px;height:16px}
+    .btn-primary{background:var(--grad);color:#04101e;box-shadow:0 10px 30px rgba(34,211,238,.18)}
+    .btn-primary:hover{transform:translateY(-1px);box-shadow:0 16px 38px rgba(34,211,238,.26)}
+    .btn-ghost{border-color:var(--line);background:rgba(255,255,255,.02);color:var(--text)}
+    .btn-ghost:hover{border-color:var(--line-strong);background:rgba(255,255,255,.06)}
+    .btn-lg{padding:14px 24px;font-size:.96rem;border-radius:14px}
+    .menu-toggle{display:none;width:42px;height:42px;border-radius:12px;border:1px solid var(--line);background:rgba(255,255,255,.02);color:var(--text);align-items:center;justify-content:center;cursor:pointer}
+    .menu-toggle .bars{position:relative;width:18px;height:12px}
+    .menu-toggle .bars span{position:absolute;left:0;width:18px;height:1.5px;background:currentColor;border-radius:2px;transition:transform .25s,opacity .2s}
+    .menu-toggle .bars span:nth-child(1){top:0}
+    .menu-toggle .bars span:nth-child(2){top:5px}
+    .menu-toggle .bars span:nth-child(3){top:10px}
+    .menu-toggle[aria-expanded="true"] .bars span:nth-child(1){transform:translateY(5px) rotate(45deg)}
+    .menu-toggle[aria-expanded="true"] .bars span:nth-child(2){opacity:0}
+    .menu-toggle[aria-expanded="true"] .bars span:nth-child(3){transform:translateY(-5px) rotate(-45deg)}
+
+    .hero{position:relative;padding:88px 0 140px;overflow:hidden}
+    .hero::after{content:"";position:absolute;inset:auto -10% -40% -10%;height:70%;background:radial-gradient(ellipse at 50% 0,rgba(34,211,238,.12),transparent 62%);pointer-events:none}
+    .hero-grid{display:grid;grid-template-columns:1.05fr .95fr;gap:56px;align-items:center}
+    .hero h1{margin:0 0 24px;font-size:clamp(2.8rem,6vw,4.9rem);font-weight:800;line-height:1.04;letter-spacing:-.045em}
+    .hero h1 span{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+    .lead{max-width:570px;margin:0 0 32px;font-size:clamp(1rem,1.4vw,1.12rem);line-height:1.85;color:var(--muted)}
+    .hero-cta{display:flex;flex-wrap:wrap;gap:12px}
+    .hero-points{display:flex;flex-wrap:wrap;gap:18px;margin:30px 0 0;padding:0;list-style:none;font-size:.82rem;color:var(--faint)}
+    .hero-points li{display:flex;align-items:center;gap:7px}
+    .hero-points li::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--green);box-shadow:0 0 10px var(--green)}
+    .fade-up{opacity:0;transform:translateY(16px);animation:rise .8s cubic-bezier(.2,.7,.2,1) forwards}
+    .d1{animation-delay:.05s}.d2{animation-delay:.15s}.d3{animation-delay:.25s}.d4{animation-delay:.35s}
+
+    .hero-visual{position:relative;min-height:460px;display:grid;place-items:center}
+    .mesh-glow{position:absolute;width:430px;height:430px;border-radius:50%;background:radial-gradient(circle,rgba(34,211,238,.2),transparent 64%);filter:blur(18px)}
+    .mesh-svg{position:absolute;inset:0;width:100%;height:100%;opacity:.95}
+    .orbit{position:absolute;border:1px dashed rgba(120,180,255,.18);border-radius:50%;animation:spin 38s linear infinite;pointer-events:none}
+    .orbit.one{width:360px;height:360px}
+    .orbit.two{width:480px;height:480px;border-color:rgba(52,211,153,.13);animation-direction:reverse;animation-duration:56s}
+    .app-card{position:relative;z-index:2;display:flex;align-items:center;gap:16px;padding:18px 22px;border-radius:22px;border:1px solid var(--line-strong);background:linear-gradient(180deg,rgba(16,34,62,.94),rgba(8,18,34,.94));box-shadow:var(--shadow);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);animation:float 7s ease-in-out infinite}
+    .app-card img{width:58px;height:58px;border-radius:16px;box-shadow:0 0 0 1px rgba(255,255,255,.08)}
+    .app-card-meta{display:flex;flex-direction:column;gap:5px;min-width:0}
+    .app-card-meta strong{font-size:.9rem;letter-spacing:.12em}
+    .app-card-meta span{font-size:.72rem;color:var(--muted);letter-spacing:.06em}
+    .status{display:inline-flex;align-items:center;gap:6px;margin-left:8px;padding:5px 9px;border-radius:999px;border:1px solid rgba(52,211,153,.3);background:rgba(52,211,153,.08);font-size:.64rem;color:#8ff0c8;white-space:nowrap}
+    .pulse{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 0 0 rgba(52,211,153,.45);animation:pulse 2.2s infinite}
+    .chip{position:absolute;z-index:3;display:inline-flex;align-items:center;gap:7px;padding:8px 12px;border-radius:999px;border:1px solid var(--line);background:rgba(7,16,30,.82);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);font-size:.7rem;color:var(--muted);animation:float 9s ease-in-out infinite}
+    .chip::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--cyan);box-shadow:0 0 8px var(--cyan)}
+    .chip-1{top:8%;left:2%}
+    .chip-2{top:15%;right:0;animation-delay:-2s}
+    .chip-3{bottom:17%;left:0;animation-delay:-4s}
+    .chip-4{bottom:7%;right:4%;animation-delay:-6s}
+
+    .download-section{position:relative;z-index:3;margin-top:-72px;padding-bottom:36px}
+    .download-card{position:relative;padding:40px;border:1px solid transparent;border-radius:28px;background:linear-gradient(180deg,rgba(13,29,54,.94),rgba(7,16,30,.97));box-shadow:var(--shadow)}
+    .download-card::before{content:"";position:absolute;inset:-1px;padding:1px;border-radius:29px;background:linear-gradient(120deg,rgba(79,140,255,.55),rgba(34,211,238,.16),rgba(52,211,153,.4));-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;pointer-events:none}
+    .download-head{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;margin-bottom:30px}
+    .download-head h2{margin:0 0 8px;font-size:clamp(1.8rem,3.2vw,2.5rem);letter-spacing:-.035em}
+    .download-head p{margin:0;color:var(--muted);font-size:.92rem;line-height:1.7}
+    .version-pill{flex-shrink:0;padding:9px 13px;border-radius:999px;border:1px solid var(--line);background:rgba(255,255,255,.03);font-size:.76rem;color:var(--muted)}
+    .version-pill strong{color:var(--text);font-weight:600;margin-left:4px}
+    .os-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+    .os-tile{position:relative;display:flex;align-items:center;gap:14px;padding:18px;border:1px solid var(--line);border-radius:18px;background:rgba(255,255,255,.025);transition:transform .22s,border-color .22s,background .22s,box-shadow .22s}
+    .os-tile:hover{transform:translateY(-3px);border-color:var(--line-strong);background:rgba(255,255,255,.05);box-shadow:0 18px 40px rgba(0,0,0,.25)}
+    .os-tile.is-current{border-color:rgba(34,211,238,.55);background:linear-gradient(180deg,rgba(34,211,238,.1),rgba(79,140,255,.04));box-shadow:inset 0 0 0 1px rgba(34,211,238,.12)}
+    .os-tile.is-unavailable{opacity:.55;cursor:not-allowed;filter:saturate(.35)}
+    .os-tile.is-unavailable:hover{transform:none;border-color:var(--line);background:rgba(255,255,255,.025);box-shadow:none}
+    .os-tile.is-unavailable .os-arrow{display:none}
+    .os-icon{display:grid;place-items:center;width:54px;height:54px;flex:0 0 auto;border-radius:14px;background:#eef5ff}
+    .os-icon img,.os-icon svg{width:32px;height:32px;display:block}
+    .os-info{display:flex;flex-direction:column;gap:5px;min-width:0}
+    .os-info strong{font-size:1rem;font-weight:600}
+    .os-info span{font-size:.74rem;line-height:1.5;color:var(--muted)}
+    .os-arrow{margin-left:auto;color:var(--faint);transition:transform .2s,color .2s}
+    .os-tile:hover .os-arrow{transform:translateX(2px);color:var(--cyan)}
+    .os-badge{position:absolute;top:-8px;right:12px;padding:4px 8px;border-radius:999px;background:var(--grad);color:#04101e;font-size:.62rem;font-weight:700;letter-spacing:.02em}
+    .download-foot{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-top:22px;font-size:.76rem;color:var(--faint)}
+    .download-foot .hint{display:flex;align-items:center;gap:7px}
+    .download-foot .hint::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--green)}
+    .meta-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:26px;padding-top:24px;border-top:1px solid var(--line)}
+    .meta-item{padding:2px 0}
+    .meta-k{display:block;margin-bottom:6px;font-size:.64rem;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--faint)}
+    .meta-v{font-size:.8rem;line-height:1.6;color:var(--text)}
+
+    .section{position:relative;padding:96px 0}
+    .section-head{max-width:690px;margin-bottom:44px}
+    .section-head.wide{max-width:760px}
+    .section-head.center{margin-left:auto;margin-right:auto;text-align:center}
+    .section-head h2{margin:0 0 14px;font-size:clamp(2rem,3.6vw,3rem);font-weight:750;line-height:1.15;letter-spacing:-.035em}
+    .section-head p{margin:0;color:var(--muted);font-size:.96rem;line-height:1.85}
+    .feature-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+    .feature-card{padding:26px;border:1px solid var(--line);border-radius:var(--radius);background:linear-gradient(180deg,rgba(13,27,50,.62),rgba(8,17,32,.5));transition:transform .22s,border-color .22s,background .22s}
+    .feature-card:hover{transform:translateY(-3px);border-color:var(--line-strong);background:linear-gradient(180deg,rgba(15,32,58,.76),rgba(8,17,32,.58))}
+    .feature-icon{display:grid;place-items:center;width:44px;height:44px;margin-bottom:18px;border:1px solid rgba(79,140,255,.22);border-radius:12px;background:linear-gradient(135deg,rgba(79,140,255,.18),rgba(34,211,238,.1));color:var(--cyan)}
+    .feature-icon svg{width:22px;height:22px}
+    .feature-card h3{margin:0 0 10px;font-size:1.03rem;font-weight:650;letter-spacing:-.01em}
+    .feature-card p{margin:0;color:var(--muted);font-size:.9rem;line-height:1.75}
+
+    .how-section{background:radial-gradient(ellipse at 50% 0,rgba(79,140,255,.08),transparent 60%)}
+    .steps{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+    .step{position:relative;padding:26px;border:1px solid var(--line);border-radius:var(--radius);background:linear-gradient(180deg,rgba(12,26,48,.7),rgba(7,16,30,.55))}
+    .step-num{display:block;margin-bottom:18px;font-size:2.5rem;font-weight:800;line-height:1;letter-spacing:-.04em;background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+    .step h3{margin:0 0 10px;font-size:1.02rem}
+    .step p{margin:0;color:var(--muted);font-size:.9rem;line-height:1.75}
+    .arch-row{display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap;margin-top:34px;padding:18px;border:1px dashed var(--line);border-radius:16px;background:rgba(255,255,255,.015)}
+    .arch-chip{padding:8px 14px;border:1px solid var(--line);border-radius:999px;background:rgba(255,255,255,.035);font-size:.78rem;color:var(--muted);white-space:nowrap}
+    .arch-arrow{color:var(--faint);font-size:.9rem}
+
+    .faq-list{display:grid;gap:10px}
+    .faq-item{border:1px solid var(--line);border-radius:16px;background:rgba(12,24,44,.55);overflow:hidden;transition:border-color .2s,background .2s}
+    .faq-item[open]{border-color:var(--line-strong);background:rgba(13,28,52,.82)}
+    .faq-item summary{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:20px 24px;cursor:pointer;list-style:none;font-size:.95rem;font-weight:600}
+    .faq-item summary::-webkit-details-marker{display:none}
+    .faq-item summary::after{content:"+";flex:0 0 auto;font-size:1.25rem;font-weight:400;line-height:1;color:var(--faint);transition:transform .22s,color .22s}
+    .faq-item[open] summary::after{transform:rotate(45deg);color:var(--cyan)}
+    .faq-answer{padding:0 24px 22px;color:var(--muted);font-size:.9rem;line-height:1.85}
+    .faq-answer a{color:var(--cyan);text-decoration:underline;text-underline-offset:3px}
+
+    .cta-section{padding:30px 0 96px}
+    .cta-box{position:relative;padding:64px 32px;text-align:center;overflow:hidden;border:1px solid var(--line-strong);border-radius:28px;background:radial-gradient(circle at 50% 0,rgba(34,211,238,.14),transparent 58%),linear-gradient(180deg,rgba(13,29,54,.86),rgba(7,16,30,.96))}
+    .cta-box h2{margin:0 0 12px;font-size:clamp(1.9rem,3.4vw,2.8rem);letter-spacing:-.035em}
+    .cta-box p{margin:0 0 26px;color:var(--muted)}
+    .cta-actions{display:flex;justify-content:center;flex-wrap:wrap;gap:12px}
+
+    .site-footer{position:relative;z-index:1;margin-top:20px;border-top:1px solid var(--line);padding:38px 0}
+    .footer-inner{display:flex;align-items:flex-start;justify-content:space-between;gap:28px;flex-wrap:wrap}
+    .footer-brand{display:flex;align-items:center;gap:12px}
+    .footer-brand img{width:34px;height:34px;border-radius:10px}
+    .footer-brand strong{display:block;font-size:.82rem;letter-spacing:.16em}
+    .footer-brand span{display:block;margin-top:4px;font-size:.68rem;letter-spacing:.16em;color:var(--faint)}
+    .footer-links{display:flex;flex-wrap:wrap;gap:22px;font-size:.8rem;color:var(--muted)}
+    .footer-links a:hover{color:var(--text)}
+    .footer-note{width:100%;margin:26px 0 0;padding-top:18px;border-top:1px solid var(--line);font-size:.72rem;color:var(--faint);display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+
+    .reveal{opacity:0;transform:translateY(18px);transition:opacity .7s cubic-bezier(.2,.7,.2,1),transform .7s cubic-bezier(.2,.7,.2,1);transition-delay:var(--d,0s)}
+    .reveal.in{opacity:1;transform:none}
+    html.no-js .reveal{opacity:1;transform:none}
+    @keyframes rise{to{opacity:1;transform:none}}
+    @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(52,211,153,.42)}70%{box-shadow:0 0 0 7px rgba(52,211,153,0)}100%{box-shadow:0 0 0 0 rgba(52,211,153,0)}}
+
+    @media (max-width:1000px){
+      .hero-grid{grid-template-columns:1fr;gap:44px}
+      .hero{padding-top:64px}
+      .hero-visual{min-height:400px}
+      .feature-grid{grid-template-columns:repeat(2,1fr)}
+      .meta-grid{grid-template-columns:repeat(2,1fr)}
+    }
+    @media (max-width:860px){
+      .nav{position:absolute;top:var(--header);left:16px;right:16px;flex-direction:column;align-items:stretch;gap:0;padding:10px;border:1px solid var(--line);border-radius:16px;background:rgba(6,14,27,.98);box-shadow:var(--shadow);opacity:0;visibility:hidden;transform:translateY(-8px);transition:opacity .2s,transform .2s,visibility .2s}
+      .nav.open{opacity:1;visibility:visible;transform:none}
+      .nav a{padding:12px 14px;border-radius:10px}
+      .nav a:hover,.nav a.active{background:rgba(255,255,255,.05)}
+      .nav a::after{display:none}
+      .menu-toggle{display:inline-flex}
+      .header-actions .btn-ghost{display:none}
+    }
+    @media (max-width:760px){
+      .container{width:min(calc(100% - 32px),var(--container))}
+      .download-card{padding:26px}
+      .download-head{flex-direction:column;gap:14px}
+      .os-grid{grid-template-columns:1fr}
+      .steps{grid-template-columns:1fr}
+      .feature-grid{grid-template-columns:1fr}
+      .section{padding:72px 0}
+      .chip-3,.chip-4{display:none}
+      .hero-visual{min-height:340px}
+      .orbit.two{display:none}
+      .app-card{padding:14px 18px}
+      .app-card img{width:48px;height:48px}
+      .cta-box{padding:48px 22px}
+      .footer-note{flex-direction:column}
+    }
+    @media (max-width:600px){
+      .hero-cta .btn{width:100%}
+    }
+    @media (max-width:480px){
+      .hero h1{font-size:2.65rem}
+      .meta-grid{grid-template-columns:1fr}
+      .chip-1,.chip-2{font-size:.64rem}
+      .version-pill{align-self:flex-start}
+      .status{display:none}
+    }
+    @media (prefers-reduced-motion:reduce){
+      html{scroll-behavior:auto}
+      *,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}
+      .reveal{opacity:1;transform:none}
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+
+  <header class="site-header" id="top">
+    <div class="container header-inner">
+      <a class="brand" href="#hero" aria-label="NANO MESH 首页">
+        <img src="assets/app-icon.png" alt="" width="38" height="38" />
+        <span class="brand-text"><strong>NANO <span class="mesh-word">MESH</span></strong><small>nmspace</small></span>
+      </a>
+      <nav class="nav" id="nav" aria-label="主导航">
+        <a href="#features">特性</a>
+        <a href="#how">工作方式</a>
+        <a href="#download">下载</a>
+        <a href="#faq">FAQ</a>
+      </nav>
+      <div class="header-actions">
+        <a class="btn btn-ghost" href="https://gitee.com/warpdrivelabs/nanomesh" target="_blank" rel="noopener">
+          Gitee
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7"/><path d="M8 7h9v9"/></svg>
+        </a>
+        <a class="btn btn-primary" href="#download">下载</a>
+        <button class="menu-toggle" type="button" aria-label="打开菜单" aria-expanded="false" aria-controls="nav">
+          <span class="bars" aria-hidden="true"><span></span><span></span><span></span></span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero" id="hero">
+      <div class="container hero-grid">
+        <div class="hero-copy">
+          <p class="eyebrow fade-up d1"><span class="dot"></span> Decentralized mesh · Open source</p>
+          <h1 class="fade-up d1">让连接，<br /><span>回归彼此。</span></h1>
+          <p class="lead fade-up d2">NANO MESH 是一个基于 iroh 的去中心化网格通信客户端。公钥就是身份，消息点对点直达，数据留在你自己的设备里。</p>
+          <div class="hero-cta fade-up d3">
+            <a class="btn btn-primary btn-lg" href="#download">下载桌面端
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+            </a>
+            <a class="btn btn-ghost btn-lg" href="#how">它是怎么工作的
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg>
+            </a>
+          </div>
+          <ul class="hero-points fade-up d4">
+            <li>无中心服务器</li>
+            <li>离线信箱</li>
+            <li>多端同步</li>
+            <li>本地优先</li>
+          </ul>
+        </div>
+
+        <div class="hero-visual fade-up d2" aria-hidden="true">
+          <div class="mesh-glow"></div>
+          <svg class="mesh-svg" viewBox="0 0 560 560" fill="none">
+            <defs>
+              <linearGradient id="meshStroke" x1="80" y1="60" x2="480" y2="500" gradientUnits="userSpaceOnUse">
+                <stop stop-color="#4f8cff" stop-opacity=".6"/>
+                <stop offset=".55" stop-color="#22d3ee" stop-opacity=".34"/>
+                <stop offset="1" stop-color="#34d399" stop-opacity=".14"/>
+              </linearGradient>
+            </defs>
+            <g stroke="url(#meshStroke)" stroke-width="1.2">
+              <path d="M280 60 430 145v170L280 400 130 315V145Z"/>
+              <path d="M280 160 370 212v96L280 360 190 308v-96Z"/>
+              <path d="M280 60v100M430 145l-60 67M430 315l-60-67M280 400v-40M130 315l60-67M130 145l60 67"/>
+              <path d="M190 212 130 145M370 212l60-67M190 308l-60 67M370 308l60 67"/>
+            </g>
+            <g fill="#7dd3fc">
+              <circle cx="280" cy="60" r="3.6"/><circle cx="430" cy="145" r="3.2"/><circle cx="430" cy="315" r="3.2"/><circle cx="280" cy="400" r="3.6"/><circle cx="130" cy="315" r="3.2"/><circle cx="130" cy="145" r="3.2"/>
+              <circle cx="280" cy="160" r="2.6" fill="#34d399"/><circle cx="370" cy="212" r="2.4"/><circle cx="370" cy="308" r="2.4"/><circle cx="280" cy="360" r="2.6" fill="#34d399"/><circle cx="190" cy="308" r="2.4"/><circle cx="190" cy="212" r="2.4"/>
+            </g>
+          </svg>
+          <div class="orbit one"></div>
+          <div class="orbit two"></div>
+          <div class="app-card">
+            <img src="assets/app-icon.png" alt="" width="58" height="58" />
+            <div class="app-card-meta">
+              <strong>NANO <span class="mesh-word">MESH</span></strong>
+              <span>nmspace · <span data-version>v0.1.0</span></span>
+            </div>
+            <span class="status"><span class="pulse"></span>node online</span>
+          </div>
+          <span class="chip chip-1">iroh / QUIC</span>
+          <span class="chip chip-2">公钥身份</span>
+          <span class="chip chip-3">redb 本地存储</span>
+          <span class="chip chip-4">离线信箱</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="download-section" id="download">
+      <div class="container">
+        <div class="download-card reveal">
+          <div class="download-head">
+            <div>
+              <p class="eyebrow" style="margin-bottom:12px">Get nano mesh</p>
+              <h2>下载 NANO MESH</h2>
+            </div>
+            <div class="version-pill">当前版本<strong data-version>v0.1.0</strong></div>
+          </div>
+
+          <div class="os-grid">
+            <a class="os-tile" data-os="windows" data-platforms="windows-x86_64-nsis" href="https://cmx.pansoft.com/nanomesh-updates/download?version=0.1.0&amp;platform=windows-x86_64-nsis" aria-label="下载 Windows 版">
+              <span class="os-icon"><svg viewBox="0 0 48 48" width="32" height="32" aria-hidden="true" focusable="false"><defs><linearGradient id="win-blue" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#3b82f6"/><stop offset="100%" stop-color="#2563eb"/></linearGradient></defs><rect x="4" y="4" width="18" height="18" rx="2" fill="url(#win-blue)"/><rect x="26" y="4" width="18" height="18" rx="2" fill="url(#win-blue)" opacity=".85"/><rect x="4" y="26" width="18" height="18" rx="2" fill="url(#win-blue)" opacity=".85"/><rect x="26" y="26" width="18" height="18" rx="2" fill="url(#win-blue)" opacity=".7"/></svg></span>
+              <span class="os-info"><strong>Windows</strong><span>Windows 10 / 11 · x64<br />.msi · .exe 安装包</span></span>
+              <span class="os-badge" hidden>当前系统</span>
+              <svg class="os-arrow" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg>
+            </a>
+            <a class="os-tile is-unavailable" data-os="macos" data-platforms="darwin-x86_64-dmg,darwin-aarch64-dmg,darwin-x86_64-app,darwin-aarch64-app" href="#download" aria-disabled="true" title="该平台安装包尚未发布" aria-label="macOS 版暂未发布">
+              <span class="os-icon"><svg viewBox="0 0 48 48" width="32" height="32" aria-hidden="true" focusable="false"><g fill="#1f2937"><path d="M32.6 25.4c0-4.4 3.6-6.5 3.8-6.6-2.1-3-5.3-3.4-6.4-3.5-2.7-.3-5.3 1.6-6.7 1.6-1.4 0-3.5-1.6-5.8-1.5-3 0-5.7 1.7-7.3 4.4-3.1 5.4-.8 13.4 2.2 17.8 1.5 2.2 3.3 4.6 5.6 4.5 2.2-.1 3.1-1.4 5.8-1.4 2.7 0 3.5 1.4 5.8 1.4 2.4 0 3.9-2.2 5.4-4.4 1.7-2.5 2.4-4.9 2.4-5 0 0-4.6-1.8-4.6-7.2z"/><path d="M28.5 12.7c1.2-1.5 2-3.5 1.8-5.6-1.7.1-3.9 1.1-5.2 2.6-1.1 1.3-2.1 3.4-1.8 5.4 1.9.2 3.9-.9 5.2-2.4z"/></g></svg></span>
+              <span class="os-info"><strong>macOS</strong><span>macOS 12+ · Apple 芯片 / Intel<br />.dmg 安装包</span></span>
+              <span class="os-badge" hidden>当前系统</span>
+              <svg class="os-arrow" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg>
+            </a>
+            <a class="os-tile is-unavailable" data-os="linux" data-platforms="linux-x86_64-deb,linux-x86_64-rpm" href="#download" aria-disabled="true" title="该平台安装包尚未发布" aria-label="Linux 版暂未发布">
+              <span class="os-icon"><svg viewBox="0 0 48 48" width="32" height="32" aria-hidden="true" focusable="false"><defs><linearGradient id="tux-body" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#1f2937"/><stop offset="100%" stop-color="#0b1220"/></linearGradient></defs><ellipse cx="24" cy="44" rx="11" ry="2" fill="#000" opacity=".12"/><path d="M24 6c-3.6 0-6 3-6 7 0 3 1 5 1 7 0 3-2 4-3 8-1 4-3 6-3 10 0 2 1 4 4 4h14c3 0 4-2 4-4 0-4-2-6-3-10-1-4-3-5-3-8 0-2 1-4 1-7 0-4-2.4-7-6-7z" fill="url(#tux-body)"/><ellipse cx="20" cy="14" rx="2.2" ry="2.8" fill="#fff"/><ellipse cx="28" cy="14" rx="2.2" ry="2.8" fill="#fff"/><circle cx="20.5" cy="14.5" r="1.1" fill="#0b1220"/><circle cx="27.5" cy="14.5" r="1.1" fill="#0b1220"/><path d="M22 18q2 2.4 4 0" stroke="#fbbf24" stroke-width="1.4" fill="none" stroke-linecap="round"/><path d="M17 41q3-2 7-2 4 0 7 2" stroke="#f59e0b" stroke-width="1.4" fill="none" stroke-linecap="round"/></svg></span>
+              <span class="os-info"><strong>Linux</strong><span>Linux x64 · AppImage / deb<br />桌面安装包</span></span>
+              <span class="os-badge" hidden>当前系统</span>
+              <svg class="os-arrow" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg>
+            </a>
+          </div>
+
+          <div class="download-foot">
+            <span>源码采用 MIT / Apache-2.0 双许可</span>
+          </div>
+
+          <div class="meta-grid">
+            <div class="meta-item"><span class="meta-k">系统要求</span><span class="meta-v">Windows 10+<br />macOS 12+<br />Linux x64</span></div>
+            <div class="meta-item"><span class="meta-k">磁盘空间</span><span class="meta-v">约 200 MB<br />不含消息与缓存</span></div>
+            <div class="meta-item"><span class="meta-k">网络</span><span class="meta-v">默认接入公共网络<br />可自建 relay / DNS</span></div>
+            <div class="meta-item"><span class="meta-k">账号</span><span class="meta-v">无需注册<br />本地生成节点身份</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="features">
+      <div class="container">
+        <div class="section-head wide reveal">
+          <p class="eyebrow">Why nano mesh</p>
+          <h2>消息属于你，而不是平台。</h2>
+          <p>从身份、传输到存储，整条链路都留在你自己的设备与节点上。没有中心消息服务器，也没有账号体系。</p>
+        </div>
+        <div class="feature-grid">
+          <article class="feature-card reveal" style="--d:.03s">
+            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="5" r="2.2"/><circle cx="5" cy="18" r="2.2"/><circle cx="19" cy="18" r="2.2"/><path d="M12 7.2v3.6M10.2 12.2 6.6 16M13.8 12.2l3.6 3.8"/></svg></div>
+            <h3>点对点直连</h3>
+            <p>基于 iroh QUIC，节点之间直接传输。中心服务器不参与消息路由。</p>
+          </article>
+          <article class="feature-card reveal" style="--d:.08s">
+            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="12" r="4"/><path d="M12 12h9M17 12v4M20 12v3"/></svg></div>
+            <h3>公钥即身份</h3>
+            <p>节点 ID 由本地密钥生成；多设备证书、Grant 与吊销由签名链管理。</p>
+          </article>
+          <article class="feature-card reveal" style="--d:.13s">
+            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v11H4z"/><path d="M4 9h16M8 16v3M16 16v3"/><path d="m9 12 2 2 4-4"/></svg></div>
+            <h3>离线信箱</h3>
+            <p>对端不在线时消息进入信箱，重新上线后自动同步，不丢消息。</p>
+          </article>
+          <article class="feature-card reveal" style="--d:.03s">
+            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="4" width="12" height="9" rx="1.5"/><rect x="16" y="7" width="5.5" height="13" rx="1.5"/><path d="M5 16h7"/></svg></div>
+            <h3>多端同步</h3>
+            <p>同一身份登录多台设备，联系人、群组、频道与消息保持一致。</p>
+          </article>
+          <article class="feature-card reveal" style="--d:.08s">
+            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3.5 19c.6-3 2.7-5 5.5-5s4.9 2 5.5 5"/><circle cx="17.5" cy="9" r="2.2"/><path d="M16 14.2c2.3.2 3.8 1.9 4.3 4.3"/></svg></div>
+            <h3>群组与频道</h3>
+            <p>私聊、群组、频道、presence、联系人册与内容寻址 blob 全部内置。</p>
+          </article>
+          <article class="feature-card reveal" style="--d:.13s">
+            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01M12 7h5M12 17h5"/></svg></div>
+            <h3>自建基础设施</h3>
+            <p>可自建 relay 与 DNS（pkarr），也支持公共网络或纯局域网直连。</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section how-section" id="how">
+      <div class="container">
+        <div class="section-head center reveal">
+          <p class="eyebrow" style="justify-content:center">How it works</p>
+          <h2>三步接入网格</h2>
+          <p>身份、连接、存储三段都可自托管。你只需要一台设备，剩下的交给节点。</p>
+        </div>
+        <div class="steps">
+          <article class="step reveal" style="--d:.03s">
+            <span class="step-num">01</span>
+            <h3>创建身份</h3>
+            <p>首次启动在本地生成密钥，节点 ID 即公钥。不上传、不注册。</p>
+          </article>
+          <article class="step reveal" style="--d:.08s">
+            <span class="step-num">02</span>
+            <h3>接入网格</h3>
+            <p>通过 relay 打洞或中继，按公钥发现并连接对端。</p>
+          </article>
+          <article class="step reveal" style="--d:.13s">
+            <span class="step-num">03</span>
+            <h3>收发与同步</h3>
+            <p>在线直达；离线进信箱；多设备与联邦节点按主题同步。</p>
+          </article>
+        </div>
+        <div class="arch-row reveal" style="--d:.18s" aria-label="通信链路">
+          <span class="arch-chip">nmspace 客户端</span><span class="arch-arrow">→</span>
+          <span class="arch-chip">iroh / QUIC</span><span class="arch-arrow">→</span>
+          <span class="arch-chip">nmd 节点</span><span class="arch-arrow">→</span>
+          <span class="arch-chip">redb 本地存储</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="faq">
+      <div class="container">
+        <div class="section-head reveal">
+          <p class="eyebrow">FAQ</p>
+          <h2>常见问题</h2>
+          <p>关于身份、存储、平台与当前安全边界。</p>
+        </div>
+        <div class="faq-list reveal">
+          <details class="faq-item" open>
+            <summary>NANO MESH 是什么？</summary>
+            <div class="faq-answer">NANO MESH 是一套基于 iroh 的去中心化网格通信系统与桌面客户端，包含 P2P 私聊、群组、频道、离线信箱、多设备、去中心命名与联邦同步。</div>
+          </details>
+          <details class="faq-item">
+            <summary>需要注册账号或中心服务器吗？</summary>
+            <div class="faq-answer">不需要注册。身份由本地密钥生成，节点 ID 就是公钥。默认接入公共网络；也可以自建 relay 与 DNS，完全脱离公共设施运行。</div>
+          </details>
+          <details class="faq-item">
+            <summary>消息存在哪里？</summary>
+            <div class="faq-answer">客户端与节点使用本地 redb 持久化；离线消息暂存在节点信箱。消息不会上传到云端，也不需要中心数据库。</div>
+          </details>
+          <details class="faq-item">
+            <summary>支持哪些平台？</summary>
+            <div class="faq-answer">当前发布 Windows 10+、macOS 12+ 与 Linux x64 桌面端。移动端 Tauri 客户端在仓库中持续开发，具体发布以 Gitee Releases 为准。</div>
+          </details>
+          <details class="faq-item">
+            <summary>当前版本加密到什么程度？</summary>
+            <div class="faq-answer">连接身份基于公钥认证，多设备证书、Grant 与吊销已具备签名能力；消息内容的端到端加密尚未接入。当前版本请勿传输高敏感信息，安全设计见 <a href="https://gitee.com/warpdrivelabs/nanomesh/blob/main/docs/CLIENT_AUTH_SECURITY.md" target="_blank" rel="noopener">安全说明</a>。</div>
+          </details>
+          <details class="faq-item">
+            <summary>可以自建节点吗？</summary>
+            <div class="faq-answer">可以。nmd 支持 selfhost / nat / lan 三种模式；自建 iroh-relay 与 iroh-dns-server 即可脱离公共网络。部署方式见仓库 <a href="https://gitee.com/warpdrivelabs/nanomesh/tree/main/docs" target="_blank" rel="noopener">docs</a>。</div>
+          </details>
+          <details class="faq-item">
+            <summary>从哪里获取最新版本？</summary>
+            <div class="faq-answer">Windows 安装包由门户直接下载；源码、设计文档与安全说明都在 Gitee 仓库中。</div>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <section class="cta-section">
+      <div class="container">
+        <div class="cta-box reveal">
+          <h2>把连接握在自己手里。</h2>
+          <p>下载 NANO MESH，创建你的节点身份。没有账号，也没有中心服务器。</p>
+          <div class="cta-actions">
+            <a class="btn btn-primary btn-lg" href="#download">下载桌面端</a>
+            <a class="btn btn-ghost btn-lg" href="https://gitee.com/warpdrivelabs/nanomesh" target="_blank" rel="noopener">查看源码</a>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div class="footer-brand">
+        <img src="assets/app-icon.png" alt="" width="34" height="34" />
+        <div><strong>NANO <span class="mesh-word">MESH</span></strong><span>nmspace</span></div>
+      </div>
+      <nav class="footer-links" aria-label="页脚导航">
+        <a href="https://gitee.com/warpdrivelabs/nanomesh" target="_blank" rel="noopener">源码</a>
+        <a href="https://gitee.com/warpdrivelabs/nanomesh/tree/main/docs" target="_blank" rel="noopener">文档</a>
+        <a href="https://gitee.com/warpdrivelabs/nanomesh/blob/main/LICENSE" target="_blank" rel="noopener">许可证</a>
+        <a href="https://gitee.com/warpdrivelabs/nanomesh/blob/main/docs/CLIENT_AUTH_SECURITY.md" target="_blank" rel="noopener">安全说明</a>
+      </nav>
+      <p class="footer-note"><span>© <span id="year">2026</span> NANO MESH · nmspace</span><span>Built with iroh &amp; Tauri</span></p>
+    </div>
+  </footer>
+
+  <script>
+    (function () {
+      var header = document.querySelector('.site-header');
+      var nav = document.getElementById('nav');
+      var toggle = document.querySelector('.menu-toggle');
+      var navLinks = Array.prototype.slice.call(document.querySelectorAll('.nav a[href^="#"]'));
+
+      function onScroll() {
+        if (header) header.classList.toggle('scrolled', window.scrollY > 8);
+      }
+      onScroll();
+      window.addEventListener('scroll', onScroll, { passive: true });
+
+      if (toggle && nav) {
+        toggle.addEventListener('click', function () {
+          var open = nav.classList.toggle('open');
+          toggle.setAttribute('aria-expanded', String(open));
+          toggle.setAttribute('aria-label', open ? '关闭菜单' : '打开菜单');
+        });
+        navLinks.forEach(function (link) {
+          link.addEventListener('click', function () {
+            nav.classList.remove('open');
+            toggle.setAttribute('aria-expanded', 'false');
+            toggle.setAttribute('aria-label', '打开菜单');
+          });
+        });
+      }
+
+      var sections = Array.prototype.slice.call(document.querySelectorAll('main section[id]'));
+      if ('IntersectionObserver' in window && sections.length) {
+        var spy = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            var id = '#' + entry.target.id;
+            navLinks.forEach(function (link) {
+              link.classList.toggle('active', link.getAttribute('href') === id);
+            });
+          });
+        }, { rootMargin: '-42% 0px -52% 0px', threshold: 0 });
+        sections.forEach(function (section) { spy.observe(section); });
+      }
+
+      var reveals = Array.prototype.slice.call(document.querySelectorAll('.reveal'));
+      if ('IntersectionObserver' in window) {
+        var revealer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (entry.isIntersecting) {
+              entry.target.classList.add('in');
+              revealer.unobserve(entry.target);
+            }
+          });
+        }, { threshold: 0.12 });
+        reveals.forEach(function (el) { revealer.observe(el); });
+      } else {
+        reveals.forEach(function (el) { el.classList.add('in'); });
+      }
+
+      var platform = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent || '';
+      platform = platform.toLowerCase();
+      var os = platform.indexOf('mac') !== -1 ? 'macos' : platform.indexOf('win') !== -1 ? 'windows' : platform.indexOf('linux') !== -1 ? 'linux' : '';
+      if (os) {
+        var tile = document.querySelector('.os-tile[data-os="' + os + '"]');
+        if (tile) {
+          tile.classList.add('is-current');
+          var badge = tile.querySelector('.os-badge');
+          if (badge) badge.hidden = false;
+        }
+      }
+
+      var faqItems = Array.prototype.slice.call(document.querySelectorAll('.faq-item'));
+      faqItems.forEach(function (item) {
+        item.addEventListener('toggle', function () {
+          if (!item.open) return;
+          faqItems.forEach(function (other) {
+            if (other !== item) other.open = false;
+          });
+        });
+      });
+
+      var year = document.getElementById('year');
+      if (year) year.textContent = String(new Date().getFullYear());
+    })();
+
+    (function () {
+      var tiles = Array.prototype.slice.call(document.querySelectorAll('.os-tile[data-platforms]'));
+      var versions = Array.prototype.slice.call(document.querySelectorAll('[data-version]'));
+      var names = { windows: 'Windows', macos: 'macOS', linux: 'Linux' };
+      if (!tiles.length) return;
+
+      document.addEventListener('click', function (e) {
+        var tile = e.target.closest ? e.target.closest('.os-tile.is-unavailable') : null;
+        if (tile) e.preventDefault();
+      });
+
+      fetch('/nanomesh-updates/latest.json', { cache: 'no-store' })
+        .then(function (res) { return res.ok ? res.json() : null; })
+        .then(function (data) {
+          if (!data) return;
+          if (data.version) {
+            versions.forEach(function (el) { el.textContent = 'v' + data.version; });
+          }
+          tiles.forEach(function (tile) {
+            var os = tile.getAttribute('data-os') || '';
+            var label = names[os] || os;
+            var badge = tile.querySelector('.os-badge');
+            var keys = (tile.getAttribute('data-platforms') || '').split(',');
+            var url = '';
+            for (var i = 0; i < keys.length; i++) {
+              var p = data.platforms && data.platforms[keys[i].trim()];
+              if (p && p.url) { url = p.url; break; }
+            }
+            if (url) {
+              tile.setAttribute('href', url);
+              tile.removeAttribute('target');
+              tile.removeAttribute('rel');
+              tile.classList.remove('is-unavailable');
+              tile.removeAttribute('aria-disabled');
+              tile.removeAttribute('title');
+              tile.setAttribute('aria-label', '下载 ' + label + ' 版');
+              if (badge) {
+                if (tile.classList.contains('is-current')) {
+                  badge.hidden = false;
+                  badge.textContent = '当前系统';
+                } else {
+                  badge.hidden = true;
+                }
+              }
+            } else {
+              tile.setAttribute('href', '#download');
+              tile.removeAttribute('target');
+              tile.removeAttribute('rel');
+              tile.classList.add('is-unavailable');
+              tile.setAttribute('aria-disabled', 'true');
+              tile.setAttribute('title', '该平台安装包尚未发布');
+              tile.setAttribute('aria-label', label + ' 版暂未发布');
+              if (badge) {
+                badge.hidden = false;
+                badge.textContent = '暂未发布';
+              }
+            }
+          });
+        })
+        .catch(function () {});
+    })();
+  </script>
+</body>
+</html>
