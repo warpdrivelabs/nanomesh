@@ -199,6 +199,19 @@ fn resolve_ui_dir(cfg: &CmxCfg) -> Option<PathBuf> {
             tracing::warn!(ui = %p.display(), "build.rs 定位的 ui 缺 embed/,跳过并继续找(本地 checkout 过旧?)");
         }
     }
+    // 打包 resources 版：发布脚本把选中的 checkout 同步到 src-tauri/cmx-agent-ui，
+    // tauri bundle.resources 带到 <bundle>/Contents/Resources/cmx-agent-ui（macOS）/
+    // exe 同级 cmx-agent-ui（linux/无 bundle 运行）。分发机上没有 cargo checkout，
+    // 必须先于各开发机路径命中，否则报「找不到 cmx-agent UI 资产」。
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for p in [dir.join("cmx-agent-ui"), dir.join("../Resources/cmx-agent-ui")] {
+                if ok(&p) {
+                    return Some(p);
+                }
+            }
+        }
+    }
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     for rel in [
         "../../../cmx-agent/crates/cmx-agent-web/ui",

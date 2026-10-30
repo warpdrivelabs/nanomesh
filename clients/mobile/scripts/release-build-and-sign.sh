@@ -111,7 +111,7 @@ log "打分发 zip + dmg（含 Applications 软链接）"
 rm -f "$ZIP"
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
 STAGING="$(mktemp -d)"
-trap 'rm -rf "$WORK" "$STAGING"' EXIT
+trap 'rm -rf "${WORK:-}" "$STAGING"' EXIT
 cp -Rp "$APP" "$STAGING/"
 ln -s /Applications "$STAGING/Applications"
 mkdir -p "$DMG_DIR"
@@ -120,7 +120,11 @@ hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING" -fs HFS+ -format UDBZ 
 
 # ── 6. 完成 ──────────────────────────────────────────────────────
 log "完成 ✅"
-echo "  app: $APP（$(du -sh "$APP" | awk '{print $1}')）"
-echo "  zip: $ZIP（$(du -sh "$ZIP" | awk '{print $1}')）"
-echo "  dmg: $DMG（$(du -sh "$DMG" | awk '{print $1}')）"
-[ "$DO_NOTARIZE" -eq 0 ] && echo "  ⚠ 未公证：仅本机自用，别的机器会被 Gatekeeper 拦"
+# 注意：macOS 自带 bash 3.2 会把全角括号(（）)吞进 $VAR 的变量名里报 unbound，
+# 变量后必须用 ASCII 括号/空格隔开（20261029 踩坑）。
+echo "  app: $APP ($(du -sh "$APP" | awk '{print $1}'))"
+echo "  zip: $ZIP ($(du -sh "$ZIP" | awk '{print $1}'))"
+echo "  dmg: $DMG ($(du -sh "$DMG" | awk '{print $1}'))"
+if [ "$DO_NOTARIZE" -eq 0 ]; then
+  echo "  ⚠ 未公证：仅本机自用，别的机器会被 Gatekeeper 拦"
+fi

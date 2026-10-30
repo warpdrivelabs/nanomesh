@@ -1,2 +1,4 @@
 /target
 /gen
+cmx-agent-ui/*
+!cmx-agent-ui/README.md
