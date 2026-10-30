@@ -12,6 +12,8 @@ fn main() {
 }
 
 /// 定位 `cmx-agent-web/ui`：本地 checkout → Cargo git checkouts（gitee 依赖）。
+/// 合格目录须含 `index.html` + `embed/truemate-app.js`（与 cmx_host.rs 运行期校验一致；
+/// 旧本地 checkout 缺 embed 会致组件化嵌入 404，fa17704 只修了运行期，此处补齐编译期）。
 /// 注意：build.rs 内禁止再调 `cargo`（会与当前构建抢锁）。
 fn discover_cmx_ui_dir() -> Option<PathBuf> {
     let manifest_dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR")?);
@@ -19,6 +21,11 @@ fn discover_cmx_ui_dir() -> Option<PathBuf> {
         return Some(ui);
     }
     find_in_cargo_git_checkouts()
+}
+
+/// 与 cmx_host.rs resolve_ui_dir 的 `ok` 谓词保持同款语义。
+fn ui_qualified(p: &Path) -> bool {
+    p.join("index.html").is_file() && p.join("embed/truemate-app.js").is_file()
 }
 
 fn fallback_local(manifest_dir: &Path) -> Option<PathBuf> {
@@ -32,7 +39,7 @@ fn fallback_local(manifest_dir: &Path) -> Option<PathBuf> {
         candidates.push(h.join("cmx-workspace/backend/cmx-agent/crates/cmx-agent-web/ui"));
     }
     for c in candidates {
-        if c.join("index.html").is_file() {
+        if ui_qualified(&c) {
             return Some(c);
         }
     }
@@ -58,7 +65,7 @@ fn find_in_cargo_git_checkouts() -> Option<PathBuf> {
         };
         for rev in revs.flatten() {
             let ui = rev.path().join("crates/cmx-agent-web/ui");
-            if !ui.join("index.html").is_file() {
+            if !ui_qualified(&ui) {
                 continue;
             }
             let mtime = rev
