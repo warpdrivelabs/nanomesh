@@ -69,9 +69,12 @@ tauri-plugin-autostart = "2.7.0"
 tauri-plugin-global-shortcut = "2.4.0"
 # 自动更新（与 cmx-agent 同款）：updater 插件（check/minisign 验签/三平台安装）
 # + url/reqwest（update_common.rs 的断点下载器自用，rustls 不牵连本 app 的 OpenSSL 选型）。
+# rustls：插件默认 reqwest 0.13 + rustls-no-provider，须进程级装 CryptoProvider 才能走
+# HTTPS（本机 iroh 自管配置不会装 default）；给 ring，避免默认 features 拖进 aws-lc-rs。
 tauri-plugin-updater = "2"
 url = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 # 设备口令存系统钥匙串（Android 无对应后端，退回 0600 文件）。
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]

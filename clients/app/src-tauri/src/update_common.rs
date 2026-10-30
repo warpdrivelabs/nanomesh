@@ -56,6 +56,14 @@ const BACKOFF_MS: [u64; 3] = [2_000, 5_000, 15_000];
 /// 进度推送粒度：每累计 256KB emit 一帧（避免高频事件打满 IPC）。
 const PROGRESS_STEP: u64 = 256 * 1024;
 
+/// 进程级 rustls CryptoProvider 兜底：本依赖图里 reqwest 0.13 被统一成
+/// rustls-no-provider + native-tls 混合面，插件 HTTP 已全走回环明文不碰 TLS，
+/// 此处幂等安装 ring provider 仅作防御——未来依赖回摆（插件直连 HTTPS）时不至于
+/// 再因「无默认 provider」在建连后即败。iroh 同款栈，不引新依赖面。
+fn ensure_rustls_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// 更新源基址：构建期 `NMSPACE_UPDATE_FEED` 注入优先（测试 / 私有渠道覆盖）；
 /// 未注入则回退 tauri.conf.json `plugins.updater.endpoints[0]` 的 `scheme://host[:port]`
 /// （正式渠道端点已烧进配置，updater 插件 check 用全 URL，这里取基址拼检查/上报路径）。
@@ -329,37 +337,80 @@ fn cleanup_updates_cache(app: &AppHandle) {
     }
 }
 
-// ── check（①）：插件薄封装，两命令共用 ──
+// ── check（①）：自家 reqwest 拉取 + 回环喂插件，两命令共用 ──
 
-/// 跑一次更新检查（10s 超时）。`Ok(None)` = 无更新（204 / 未配置更新源）；
+/// 跑一次更新检查（拉取 10s 超时）。`Ok(None)` = 无更新（204 / 未配置更新源）；
 /// `Err` = 网络/服务不可达（**≠ 撤回**，R2：外环对 Err 退避重试，只有 Ok(None) 才是撤回即停）。
-/// 返回的 Update 携带 raw_json（完整响应体）与解析好的 url/version；timeout 已放宽为下载裕量。
+/// 返回的 Update 携带 raw_json（完整响应体）与解析好的 url/version。
+///
+/// **为何 check 也走回环**：插件的 HTTP 栈在本依赖图里被 feature 统一成 native-tls
+/// （SecureTransport），对门户 TLS 握手即败（errSSLBadProtocolVersion -9836；服务端
+/// 1.2/1.3 均支持，curl 与自家 reqwest(rustls) 均通）。与安装同策略：latest.json 由
+/// 自家 reqwest(rustls) 拉取，起 127.0.0.1 纯 HTTP 迷你服务喂插件解析——插件全程只碰
+/// 本机明文 HTTP，版本比较/minisign 验签/安装逻辑零改动。`{{target}}`/`{{current_version}}`
+/// 的替换语义（2.14.1：os 名 + 当前版本，E2E 日志佐证 target=darwin）在此手动复刻。
 async fn check_once(app: &AppHandle) -> Result<Option<Update>, String> {
+    ensure_rustls_provider();
     // 更新源未配置（env 未注入且配置无端点）= 功能静默：直接无更新（无网络请求与噪音日志）。
     let Some(base) = feed_base(app) else { return Ok(None) };
-    // endpoint = feed 基址（env 覆盖或烧录配置推导）+ 固定路径。
-    // {{target}}/{{current_version}} 由插件请求前替换（2.11.0 updater.rs :459-489）：
-    // 服务端据此对「该平台无产物/无更新」回 204，避免 platforms 缺键被插件判 TargetsNotFound。
-    let endpoint = url::Url::parse(&format!(
-        "{base}/nanomesh-updates/latest.json?target={{{{target}}}}&current_version={{{{current_version}}}}"
-    ))
-    .map_err(|e| e.to_string())?;
-    let mut update = app
-        .updater_builder()
-        .endpoints(vec![endpoint])
-        .map_err(|e| e.to_string())?
-        // 10s 只对检查请求安全：builder 的 timeout 会流入 Update 并同样作用于下载请求
-        // （updater 2.11.0 updater.rs :388/:698），见下方放宽。
+    let cur = app.package_info().version.to_string();
+    let feed_url = format!(
+        "{base}/nanomesh-updates/latest.json?target={}&current_version={cur}",
+        std::env::consts::OS
+    );
+    let resp = reqwest::Client::new()
+        .get(&feed_url)
         .timeout(CHECK_TIMEOUT)
-        .build()
-        .map_err(|e| e.to_string())?
-        .check()
+        .send()
         .await
         .map_err(|e| e.to_string())?;
-    if let Some(u) = update.as_mut() {
-        u.timeout = Some(DOWNLOAD_TIMEOUT);
+    if resp.status() == reqwest::StatusCode::NO_CONTENT {
+        return Ok(None); // 无更新/已撤回/该平台无产物
     }
-    Ok(update)
+    if !resp.status().is_success() {
+        return Err(format!("latest.json HTTP {}", resp.status()));
+    }
+    let latest: Value = serde_json::from_slice(&resp.bytes().await.map_err(|e| e.to_string())?)
+        .map_err(|e| format!("latest.json 解析失败：{e}"))?;
+    let latest_body = latest.to_string().into_bytes();
+
+    // 回环迷你服务（bind 重试 3 次）：插件 check 只 GET /latest.json，不碰 /artifact。
+    let mut listener = None;
+    for _ in 0..3 {
+        if let Ok(l) = tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            listener = Some(l);
+            break;
+        }
+    }
+    let Some(listener) = listener else {
+        return Err("本机回环端口绑定失败（已重试 3 次）".into());
+    };
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    tauri::async_runtime::spawn(serve_loopback(listener, None, latest_body, shutdown_rx));
+
+    let result = async {
+        let endpoint =
+            url::Url::parse(&format!("http://127.0.0.1:{port}/latest.json")).map_err(|e| e.to_string())?;
+        let mut update = app
+            .updater_builder()
+            .endpoints(vec![endpoint])
+            .map_err(|e| e.to_string())?
+            .timeout(CHECK_TIMEOUT)
+            .build()
+            .map_err(|e| e.to_string())?
+            .check()
+            .await
+            .map_err(|e| format!("回环 check 失败：{e}"))?;
+        // 下载由自家断点下载器做，这里放宽只为保 Update.timeout 原语义。
+        if let Some(u) = update.as_mut() {
+            u.timeout = Some(DOWNLOAD_TIMEOUT);
+        }
+        Ok(update)
+    }
+    .await;
+    let _ = shutdown_tx.send(true); // 显式停服，防 fd 泄漏
+    result
 }
 
 /// 从 raw_json 的 platforms 里找 url 与插件选中项相同的平台项，取其 `size`
@@ -556,9 +607,10 @@ fn disk_free_bytes(_dir: &Path) -> Option<u64> {
 
 /// 回环流迷你 HTTP 服务：accept 循环处理 GET（`/latest.json` + `/artifact`），
 /// shutdown 信号随时退出。单连接串行处理（插件请求天然串行）；Connection: close 禁复用。
+/// `bin` = 安装场景的本地产物（check-only 场景传 None，/artifact 回 404）。
 async fn serve_loopback(
     listener: tokio::net::TcpListener,
-    bin: PathBuf,
+    bin: Option<PathBuf>,
     latest_body: Vec<u8>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) {
@@ -570,7 +622,7 @@ async fn serve_loopback(
                 Err(_) => return,
             },
         };
-        if let Err(e) = handle_loopback_conn(stream, &bin, &latest_body).await {
+        if let Err(e) = handle_loopback_conn(stream, bin.as_deref(), &latest_body).await {
             tracing::warn!("回环流请求处理失败：{e}");
         }
     }
@@ -578,7 +630,7 @@ async fn serve_loopback(
 
 async fn handle_loopback_conn(
     mut stream: tokio::net::TcpStream,
-    bin: &Path,
+    bin: Option<&Path>,
     latest_body: &[u8],
 ) -> Result<(), String> {
     // 读请求头（最多 8KB，遇 \r\n\r\n 即止）。
@@ -602,7 +654,7 @@ async fn handle_loopback_conn(
 
     let (status, ctype, body): (&str, &str, Vec<u8>) = if path.starts_with("/latest.json") {
         ("200 OK", "application/json", latest_body.to_vec())
-    } else if path.starts_with("/artifact") {
+    } else if let (Some(bin), true) = (bin, path.starts_with("/artifact")) {
         match tokio::fs::read(bin).await {
             Ok(data) => ("200 OK", "application/octet-stream", data),
             Err(e) => ("500 Internal Server Error", "text/plain", e.to_string().into_bytes()),
@@ -661,7 +713,7 @@ async fn install_via_loopback(
 
     // ④b 服务 task：bind 已完成（内核 backlog 已收连接），spawn 只是 accept 循环，无就绪竞态。
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    tauri::async_runtime::spawn(serve_loopback(listener, bin, latest_body, shutdown_rx));
+    tauri::async_runtime::spawn(serve_loopback(listener, Some(bin), latest_body, shutdown_rx));
 
     // ④e install 前落 pending 上报标记（R15：install 可能中断进程，标记先于风险动作落盘；
     // 下载失败不写 pending——failed_download 即时报无需补报）。
