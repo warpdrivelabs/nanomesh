@@ -211,6 +211,43 @@ pub async fn dial_account(
     out
 }
 
+/// 换网/假死自愈**复用既有端点**重做 online 握手，拿一条到 home node 的新 session——
+/// 不像 [`dial_account`] 那样按同一身份新建 iroh 端点（新端点与旧端点同 NodeId，会在 relay 上
+/// 互踢：`Another endpoint connected with the same endpoint id`，并每次刷 `Endpoint dropped…` 噪声）。
+/// 对齐服务端 `serve_with_reconnect` 的端点复用范式。证书 / 版本回退语义与 [`dial_account`] 一致；
+/// 端点已绑好 relay/发现、身份密钥也随端点不变，故只按 **node id**（`home_id`，调用方已收敛为公钥）
+/// 重新握手即可，无需再传 infra 配置。
+pub async fn reonline_account(
+    app: &AppHandle,
+    client: &Client,
+    vk: &[u8; 32],
+    account: &str,
+    home_id: [u8; 32],
+) -> Result<Session, String> {
+    let mut ak = load_identity_seed(app, vk, account).ok();
+    let dev = ensure(app, vk, account, ak.as_ref());
+    let out = match dev {
+        Ok(Some(dev)) => match client.online_as_by_id(home_id, &dev.cert).await {
+            // 老 home node 不支持多设备(device.hello)：既有端点本就是账号裸密钥端点，按账号 id 直连（无证书）。
+            Err(e) if e.to_string().contains("unknown method") => {
+                client.online_by_id(home_id).await.map_err(|e| e.to_string())
+            }
+            Err(e) if e.to_string().contains("device_revoked") => {
+                remove(app, account);
+                auth::audit(&data_dir(app)?, "device:revoked");
+                Err("device_revoked".into())
+            }
+            other => other.map_err(|e| e.to_string()),
+        },
+        Ok(None) => Err("用户身份不存在（可能已删除）".into()),
+        Err(e) => Err(e),
+    };
+    if let Some(s) = ak.as_mut() {
+        s.zeroize();
+    }
+    out
+}
+
 fn device_json(d: &nm_proto::DeviceInfo, current: &[u8]) -> Value {
     let cert = d.cert.clone().unwrap_or_default();
     json!({

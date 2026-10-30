@@ -16,11 +16,11 @@ pub(crate) struct Conn {
 }
 
 /// connect 的入参快照，供待机唤醒后"发送失败→自动重连"复用（不缓存 seed/cert：
-/// 重连经 devices::dial_account 从 vault 现解 seed + 现取 device cert，尊重锁库安全模型）。
+/// 重连经 devices::reonline_account 从 vault 现解 seed + 现取 device cert，尊重锁库安全模型）。
+/// 不存 `mode`：重连**复用既有端点**（已绑好 relay/发现），无需再按 lan/nat/selfhost 重绑。
 #[derive(Clone, Default)]
 pub(crate) struct ConnectArgs {
     pub(crate) user: String,
-    pub(crate) mode: String,
     pub(crate) node: String,
     pub(crate) display_name: String,
     pub(crate) relay_urls: Vec<String>,

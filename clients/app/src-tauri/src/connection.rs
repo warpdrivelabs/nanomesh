@@ -12,6 +12,8 @@ use crate::{
 /// 完成会话建立：注册为 person、起消息推送循环、存入状态，返回自己的 id(hex)。
 /// `wait_ready`：首连 true（保留 im_ready 8s 门控，防登录瞬间补投的离线消息早于前端监听器丢失）；
 /// 重连 false（前端监听器早已在，立即放水，不白等 8s）。`gen`：写入 Conn 的连接世代，供单飞重连判重。
+/// `arm_roam_sentinel`：是否挂换网哨兵——仅**新建端点**时 true（首连）；复用端点重连传 false，
+/// 否则每次重连都在同一端点上多挂一个 addr-watch 任务（任务泄漏 + 重复换网信号）。
 pub(crate) async fn finish_session(
     app: &AppHandle,
     state: &State<'_, AppState>,
@@ -19,6 +21,7 @@ pub(crate) async fn finish_session(
     mut session: Session,
     display_name: &str,
     wait_ready: bool,
+    arm_roam_sentinel: bool,
     conn_gen: u64,
 ) -> Result<String, String> {
     session
@@ -182,11 +185,13 @@ pub(crate) async fn finish_session(
     // 恢复入站推送通道——不必等用户下一次发送才发现连接已死。重连走单飞锁 + gen 判重（见 reconnect），
     // 天然防与发送重连打架。哨兵只发信号（Send 安全）：重连 future 含 tauri State，不能进裸 spawn。
     // 见 docs/NETWORK_ROAMING_RECOVERY_DESIGN.md §5.5。
-    if let Some(conn) = state.conn.lock().await.as_ref() {
-        if let Some(tx) = state.roam_tx.get().cloned() {
-            conn._client.spawn_addr_change_task(move || {
-                let _ = tx.send(());
-            });
+    if arm_roam_sentinel {
+        if let Some(conn) = state.conn.lock().await.as_ref() {
+            if let Some(tx) = state.roam_tx.get().cloned() {
+                conn._client.spawn_addr_change_task(move || {
+                    let _ = tx.send(());
+                });
+            }
         }
     }
 
@@ -328,7 +333,6 @@ pub(crate) async fn connect(
     let _ = state.app_handle.set(app.clone());
     let args = ConnectArgs {
         user: user.to_string(),
-        mode: mode.clone(),
         node: node.clone(),
         display_name: display_name.clone(),
         relay_urls: relay_urls.clone(),
@@ -339,7 +343,7 @@ pub(crate) async fn connect(
         &app, &vk, user, &mode, &node, relay_urls, pkarr_url, dns_origin,
     )
     .await?;
-    let out = finish_session(&app, &state, client, session, &display_name, true, 0).await?;
+    let out = finish_session(&app, &state, client, session, &display_name, true, true, 0).await?;
     *state.last_connect.lock().await = Some(args);
     Ok(out)
 }
@@ -399,9 +403,11 @@ where
     }
 }
 
-/// 自动重连：用缓存的 connect 入参 + vault 身份重新拨号，替换当前死连接。
-/// 单飞——并发发送同时触发时只有一个真正拨号，其余发现 gen 已前进即复用。
-/// 先拨号成功再换手：拨号失败时旧（死）Conn 原样保留，不清成 None。
+/// 自动重连：**复用既有 iroh 端点**，用缓存的 connect 入参 + vault 身份在其上重做 online 握手，
+/// 替换当前死 session（不重绑端点——避免同一身份新端点在 relay 上与旧端点同 id 互踢、刷
+/// `Another endpoint connected with the same endpoint id`）。
+/// 单飞——并发发送同时触发时只有一个真正重连，其余发现 gen 已前进即复用。
+/// 先握手成功再换手：失败时旧（死）Conn 原样保留，不清成 None（防自愈循环误判用户已断开）。
 pub(crate) async fn reconnect(
     app: &AppHandle,
     state: &State<'_, AppState>,
@@ -429,31 +435,36 @@ pub(crate) async fn reconnect(
 
     let _ = app.emit("core://event", json!({ "type": "reconnecting" }));
 
-    // 换网重连：home node 一律**按公钥 id** 拨号（经发现服务 pkarr/DNS 重解析当前地址）。
-    // 缓存的完整地址换网后必失效，直接用它会把连接导向死地址；dial 还会先浪费数秒试「同网直连旧地址」。
-    // 故把 node 收敛成纯公钥 hex，让 dial 跳过同网直连、直奔发现重解析（对齐节点侧 online_by_id）。
-    let redial_node = match nm_transport::addr_from_string(args.node.trim()) {
-        Ok(a) => hex(a.id.as_bytes()),
-        Err(_) => args.node.clone(),
+    // 换网重连：home node 一律**按公钥 id** 重新握手（经发现服务 pkarr/DNS 重解析当前地址）。
+    // 缓存的完整地址换网后必失效，直接用它会把连接导向死地址；故收敛成纯公钥 id。
+    let home_id = match nm_transport::addr_from_string(args.node.trim()) {
+        Ok(a) => *a.id.as_bytes(),
+        Err(_) => parse_id(args.node.trim())?,
     };
 
-    // 先拨号（12s 兜底）成功，再换手。
+    // 端点复用（而非重绑）：取现有连接的 client——克隆=共享同一 iroh 端点（同 NodeId / 同中继连接），
+    // 在其上重做 online 换 session。为何不 `dial_account` 新建端点：同一身份新建端点会与旧端点在
+    // relay 上同 id 互踢（`Another endpoint connected with the same endpoint id` + 每次刷
+    // `Endpoint dropped without close` 噪声），且更重。对齐服务端 serve_with_reconnect 的端点复用范式。
+    // 既有连接必存在（自愈循环上游已判 conn 非空，且本函数持单飞锁）；锁只在取 client 时短持、立即释放
+    // （不可跨 reonline 的 await 持 conn 锁——finish_session/take 也要锁）。
+    let client = {
+        let g = state.conn.lock().await;
+        g.as_ref().map(|c| c._client.clone())
+    }
+    .ok_or("无既有连接可复用（已断开）")?;
+    // 先通知底层「网络可能已变」→ 重 STUN + 重发布地址（桌面 iroh 多能自检，调用无害；移动端必需）。
+    client.notify_network_change().await;
+
+    // 先在既有端点上拨通新 session（12s 兜底）再换手；期间**不清空** state.conn
+    // （否则自愈循环会把 conn=None 误判为「用户已断开」而停止自愈）。
     let dialed = tokio::time::timeout(
         std::time::Duration::from_secs(12),
-        devices::dial_account(
-            app,
-            &vk,
-            &args.user,
-            &args.mode,
-            &redial_node,
-            args.relay_urls.clone(),
-            args.pkarr_url.clone(),
-            args.dns_origin.clone(),
-        ),
+        devices::reonline_account(app, &client, &vk, &args.user, home_id),
     )
     .await;
-    let (client, session) = match dialed {
-        Ok(Ok(cs)) => cs,
+    let session = match dialed {
+        Ok(Ok(s)) => s,
         // 失败不发终态 reconnect_failed：自愈驱动会继续退避重试，发送路径会返回错误给用户。
         Ok(Err(e)) => return Err(e),
         Err(_) => return Err("重连超时（12s）".into()),
@@ -473,6 +484,7 @@ pub(crate) async fn reconnect(
         client,
         session,
         &args.display_name,
+        false,
         false,
         new_gen,
     )

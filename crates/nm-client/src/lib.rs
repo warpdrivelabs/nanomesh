@@ -49,6 +49,11 @@ use rpc::{query_over, register_over, route_send, rpc_over};
 use tokio::sync::{mpsc, oneshot};
 
 /// 客户端句柄（持有本地 iroh 端点身份）。
+///
+/// 可 `Clone`：克隆**共享同一 iroh 端点**（同 NodeId、同中继连接、同套接字），不新建端点。
+/// 换网/假死自愈靠此**复用端点重连**（见 app `reconnect`）——避免同一身份新建端点在 relay 上
+/// 与旧端点同 id 互踢（`Another endpoint connected with the same endpoint id`）。
+#[derive(Clone)]
 pub struct Client {
     ep: NodeEndpoint,
 }
