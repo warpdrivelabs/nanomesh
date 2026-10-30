@@ -38,6 +38,7 @@ mod registry;
 mod runtime;
 mod social;
 mod state;
+mod update;
 #[cfg(desktop)]
 mod tray;
 

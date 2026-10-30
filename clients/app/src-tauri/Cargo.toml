@@ -1,6 +1,6 @@
 [package]
 name = "nmspace-app"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "nmspace desktop/mobile app"
 license = "MIT OR Apache-2.0"
@@ -59,6 +59,7 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 hkdf = "0.12"
 sha2 = "0.10"
 tauri-plugin-notification = "2.5.1"
+tauri-plugin-updater = "2"
 
 # 托盘配套：单实例唤起、开机自启、全局快捷键（仅桌面端）。
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

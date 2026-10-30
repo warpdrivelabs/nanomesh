@@ -2,7 +2,7 @@ use tauri::Manager;
 
 use crate::{
     AppState, auth_commands, cmx_host, connection, devices, directory, identity, llm_chat,
-    llm_proxy, llm_share, local_store, media, pairing, registry, social,
+    llm_proxy, llm_share, local_store, media, pairing, registry, social, update,
 };
 
 #[cfg(desktop)]
@@ -59,6 +59,7 @@ pub(crate) fn run() {
         .on_window_event(tray::on_window_event);
     builder
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::default())
         .setup(|_app| {
             init_tracing(_app.handle());
@@ -237,6 +238,8 @@ pub(crate) fn run() {
             local_store::actbar_load,
             local_store::actbar_register,
             local_store::actbar_remove,
+            update::app_check_update,
+            update::app_download_install,
             #[cfg(desktop)]
             tray::commands::tray_sync,
             #[cfg(desktop)]
