@@ -46,6 +46,7 @@ function renderConversation() {
       <button class="conv-gear" id="conv-search" title="${window.t ? t("conv.search") : "搜索此会话"}">${nmIcon("search")}</button>
       ${grp ? `<button class="conv-gear${SHOW_MEMBERS ? " is-on" : ""}" id="conv-members" title="${window.t ? t("conv.members") : "成员"}">${nmIcon("groups")}</button>` : ""}
       ${!grp && !chn ? `<button class="conv-gear" id="conv-profile" title="${window.t ? t("conv.profile") : "查看资料"}">${nmIcon("contacts")}</button>` : ""}
+      ${(!chn && !(typeof modelTarget === "function" && modelTarget(ACTIVE))) ? `<button class="conv-gear${(window.Delegate && Delegate.isOn(ACTIVE)) ? " is-on" : ""}" id="conv-delegate" title="${grp ? (window.t ? t("conv.delegateGroup") : "群助手（仅答 @我）") : (window.t ? t("conv.delegateChat") : "会话助手")}">${nmIcon("robot")}</button>` : ""}
       ${chnOwner ? `<button class="conv-gear" id="conv-chn-edit" title="${window.t ? t("conv.editChannel") : "编辑频道信息"}">${nmIcon("settings")}</button>` : ""}
       <button class="conv-gear" id="conv-copy" title="${window.t ? t("conv.copyId") : "复制 id"}">${nmIcon("copy")}</button>
     </div>
@@ -61,6 +62,8 @@ function renderConversation() {
   if (searchEl) searchEl.addEventListener("click", () => { if (window.Composer && Composer.toggleHistory) Composer.toggleHistory(); });
   const profileEl = document.getElementById("conv-profile");
   if (profileEl) profileEl.addEventListener("click", () => showEntityDetail(ACTIVE));
+  const delegateEl = document.getElementById("conv-delegate");
+  if (delegateEl) delegateEl.addEventListener("click", (e) => { e.stopPropagation(); openDelegatePicker(ACTIVE, delegateEl); });
   const memEl = document.getElementById("conv-members");
   if (memEl) memEl.addEventListener("click", () => {
     SHOW_MEMBERS = !SHOW_MEMBERS;
@@ -105,6 +108,75 @@ function cardTargets() {
   return [{ id: MY_ID, name: meName }, ...rest];
 }
 
+// ── 会话助手 picker（标题栏机器人按钮）：每会话独立选代答模型（本地/在线远端可选、离线置灰）。 ──
+function closeDelegatePicker() {
+  const m = document.getElementById("conv-delegate-pop");
+  if (m) m.remove();
+  document.removeEventListener("click", delegatePickerAway, true);
+}
+function delegatePickerAway(e) {
+  if (e.target.closest && (e.target.closest("#conv-delegate-pop") || e.target.closest("#conv-delegate"))) return;
+  closeDelegatePicker();
+}
+async function openDelegatePicker(convId, anchor) {
+  closeDelegatePicker();
+  if (!window.Delegate) return;
+  const isGroup = !!(window.Groups && Groups.byId && Groups.byId(convId));
+  const pop = document.createElement("div");
+  pop.id = "conv-delegate-pop";
+  pop.className = "conv-dg-pop";
+  pop.innerHTML = `<div class="conv-dg-load">加载模型…</div>`;
+  document.body.appendChild(pop);
+  const place = () => {
+    const r = anchor.getBoundingClientRect();
+    pop.style.top = (r.bottom + 6) + "px";
+    pop.style.left = Math.max(8, Math.min(r.right - pop.offsetWidth, window.innerWidth - pop.offsetWidth - 8)) + "px";
+  };
+  place();
+  setTimeout(() => document.addEventListener("click", delegatePickerAway, true), 0);
+
+  const sel = Delegate.chatModel(convId);
+  const selId = sel ? sel.entityId : "";
+  const { local, remote } = await Delegate.listModels();
+  if (!document.getElementById("conv-delegate-pop")) return; // 期间已关
+  const check = nmIcon ? nmIcon("check") : "✓";
+  const hint = isGroup
+    ? `<div class="conv-dg-hint">${window.t ? t("conv.delegateGroupHint") : "群助手仅回复 @ 你的消息"}</div>`
+    : "";
+  const offRow = `<div class="um-item conv-dg-row${selId ? "" : " on"}" data-dg-off="1"><span class="um-av um-plus">${nmIcon("close")}</span><span class="um-meta"><b>${window.t ? t("conv.delegateOff") : "关闭代答"}</b></span>${selId ? "" : `<span class="conv-dg-ck">${check}</span>`}</div>`;
+  const rowOf = (mo, kind) => {
+    const on = mo.entityId === selId;
+    const dis = !mo.usable && !on;
+    const stLabel = kind === "local" ? (mo.usable ? "可用" : "缺密钥") : (mo.usable ? "在线" : "离线");
+    const sub = stLabel + (mo.model ? " · " + escapeHtml(mo.model) : "");
+    return `<div class="um-item conv-dg-row${on ? " on" : ""}${dis ? " conv-dg-off" : ""}" ${dis ? "" : `data-dg-pick="${escapeHtml(mo.entityId)}" data-dg-kind="${kind}" data-dg-name="${escapeHtml(mo.name)}"`}>
+      <span class="um-av um-plus">${nmIcon(kind === "local" ? "llm" : "proxy")}</span>
+      <span class="um-meta"><b>${escapeHtml(mo.name)}</b><small>${sub}</small></span>${on ? `<span class="conv-dg-ck">${check}</span>` : ""}</div>`;
+  };
+  const sec = (title) => `<div class="conv-dg-sec">${title}</div>`;
+  let html = hint + offRow;
+  if (local.length) html += sec("本地模型") + local.map((mo) => rowOf(mo, "local")).join("");
+  if (remote.length) html += sec("远端模型") + remote.map((mo) => rowOf(mo, "remote")).join("");
+  if (!local.length && !remote.length) html += `<div class="conv-dg-load">暂无可用模型。请先在「大模型」里添加。</div>`;
+  pop.innerHTML = html;
+  place();
+  pop.addEventListener("click", (e) => {
+    const off = e.target.closest("[data-dg-off]");
+    const pick = e.target.closest("[data-dg-pick]");
+    if (off) {
+      Delegate.clearChat(convId);
+      if (window.toast) toast("已关闭本会话代答");
+    } else if (pick) {
+      Delegate.setChatModel(convId, { entityId: pick.dataset.dgPick, kind: pick.dataset.dgKind, name: pick.dataset.dgName });
+      if (window.toast) toast("本会话代答模型：" + pick.dataset.dgName);
+    } else return;
+    closeDelegatePicker();
+    const btn = document.getElementById("conv-delegate");
+    if (btn) btn.classList.toggle("is-on", Delegate.isOn(convId));
+  });
+}
+
+
 function renderLog(msgs, showSender) {
   let html = "", prev = null;
   for (const m of msgs) {
@@ -127,6 +199,8 @@ function msgHtml(m, showSender, cont) {
     ? ((window.Identity && Identity.label && Identity.label(MY_ID)) || "我")
     : (window.entityName ? entityName(m.from) : (m.from || "").slice(0, 6) + "…");
   const who = mine ? (window.t ? t("conv.me") : "我") : named;
+  // 委托助手代答：仅本侧可见的小徽标（好友收到的是干净文本，无标记）。
+  const agentTag = (mine && m.byAgent) ? `<span class="im-agent-tag" title="模型代答">${nmIcon ? nmIcon("robot") : ""}${window.t ? t("conv.byAgent") : "助手代答"}</span>` : "";
   const time = msgClock(m.ts);
   // 私聊：完整对号(转圈→单勾→双勾)；群聊：仅单勾(到达 home node，无逐成员已读聚合，status>1 钳回单勾)；频道：不显示。
   const ticks = (mine && !m.channel)
@@ -134,9 +208,9 @@ function msgHtml(m, showSender, cont) {
     : "";
   // 对号跟在时间后面：有 sender 行则放 sender 的时间后；否则放 stamp(气泡下方时间)后。
   const sender = (showSender && !cont)
-    ? `<span class="im-sender">${escapeHtml(who)}${time ? `<span class="im-time">${time}</span>` : ""}${ticks}</span>`
+    ? `<span class="im-sender">${escapeHtml(who)}${time ? `<span class="im-time">${time}</span>` : ""}${ticks}${agentTag}</span>`
     : "";
-  const stamp = (!sender && (time || ticks)) ? `<span class="im-time">${time}${ticks}</span>` : "";
+  const stamp = (!sender && (time || ticks || agentTag)) ? `<span class="im-time">${time}${ticks}${agentTag}</span>` : "";
   const face = window.Profile ? Profile.faceHtml(m.from, named, 32) : "";
   // 模型会话的对端消息(模型回复):完整 Markdown 渲染(复用频道 marked+消毒管线);
   // 流式中也按 md 画(增量重渲,代码块/表格随 delta 长出)。用户自己的消息仍按普通文本/媒体。
@@ -316,6 +390,8 @@ async function sendMsg(text) {
       // 必须 await pushMsg：否则 agent 首包 delta 会同步抢先插入 VIEW/SQLite，气泡跑到用户消息上方。
       localId = "l" + Date.now();
       await pushMsg(ACTIVE, { id: localId, from: MY_ID, body: text, ts: Date.now(), group: true, to: ACTIVE, status: 0 });
+      // 我手动在群里发言 → 重置该群代答连续计数/冷却（人工介入打断疑似循环）。
+      if (window.Delegate && Delegate.noteHumanSend) Delegate.noteHumanSend(ACTIVE);
       const g = await NM.inv("send_group", { groupId: ACTIVE, text });
       if (g) {
         const row = (VIEW.id === ACTIVE) && VIEW.rows.find((r) => r.id === localId);
@@ -342,6 +418,8 @@ async function sendMsg(text) {
       // 必须 await pushMsg：agent 流式首包很快时，未入库的用户气泡会被回复抢跑到前面。
       localId = "l" + Date.now();
       await pushMsg(ACTIVE, { id: localId, from: MY_ID, body: text, ts: Date.now(), to: ACTIVE, status: 0 });
+      // 我手动回复 → 重置该好友的代答连续计数/冷却（人工介入打断疑似循环）。
+      if (window.Delegate && Delegate.noteHumanSend) Delegate.noteHumanSend(ACTIVE);
       const g = await NM.inv("send_to", { target: ACTIVE, text });
       if (g) {
         const row = (VIEW.id === ACTIVE) && VIEW.rows.find((r) => r.id === localId);

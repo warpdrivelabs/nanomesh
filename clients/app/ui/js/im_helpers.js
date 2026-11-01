@@ -42,6 +42,7 @@ function slimMsg(m) {
     }
   }
     if (m.seq) o.seq = m.seq;
+    if (m.byAgent) o.byAgent = true;   // 委托助手代答：本侧徽标，落库后重开仍显
     return o;
 }
 window.slimMsg = slimMsg;

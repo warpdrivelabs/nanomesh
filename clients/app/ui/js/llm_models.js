@@ -243,10 +243,12 @@
             ? itemHtml(c, sub, 0, SEL === "r:" + c.id ? c.id : DETAIL_ID, { inlineHandle: false })
             : `<div class="im-item" data-id="${esc(c.id)}"><span class="mid"><span class="nm">${esc(c.name || c.id)}</span></span></div>`;
         // 远端模型行尾:「对话」+「启停代理」两个小号按钮。
-        // 在线可点;离线置灰禁用(presence 语义与实体详情一致:truthy=在线)。
+        // 在线可点;离线置灰禁用。presence 语义="online|away|busy|dnd|offline"(或空)——
+        // "offline" 是真值字符串,不能用 !!presence(会把离线当在线);仅空与 offline 视为离线。
         // 特例:离线但本地代理还在跑 → 「停止」保持可点,否则没法关掉已打不通的代理。
         if (typeof nmIcon === "function") {
-          const online = !!c.presence;
+          const pz = (c.presence || "").toLowerCase();
+          const online = pz !== "" && pz !== "offline";
           const run = PROXY_RUN[(c.id || "").toLowerCase()];
           const chatDis = online ? "" : " disabled";
           const pxDis = online || run ? "" : " disabled";

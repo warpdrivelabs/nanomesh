@@ -156,6 +156,9 @@ function handleAgentDelta(m) {
   let d;
   try { d = JSON.parse(m.body || "{}"); } catch (_) { return; }
   if (!d || typeof d.streamId !== "string") return;
+  // 委托助手代答流：以 "delegate:" 前缀的 streamId 旁路，不渲染/不落库到模型会话，
+  // 由 Delegate 收尾（done 帧 → send_to 发回好友）。契约：必须是本函数触碰 peer/STREAMS 前的第一步。
+  if (d.streamId.indexOf("delegate:") === 0) { if (window.Delegate) Delegate.onFrame(d); return; }
   hideModelThinking(d.streamId); // 首帧(含错误帧)到达 → 撤「正在思考」
   const peer = m.from;
   const sid = d.streamId;
@@ -267,6 +270,11 @@ function onCoreEvent(ev) {
   // 被动加群 / 刚订频道：消息可能先到，目录未刷 → 触发去抖刷新群/频道列表。
   if ((m.group || m.channel) && typeof ensureRoomDirectory === "function") ensureRoomDirectory(key, m);
   pushMsg(key, m).then((fresh) => {
+    // 委托助手（每会话独立）：新消息触发代答。私聊=好友消息直接代答；群聊=仅当 @我（内部判）。
+    if (fresh && !mine && !m.channel && window.Delegate && Delegate.onInbound) {
+      if (m.group) Delegate.onInbound(key, m.from, m, true);        // 群聊：key=群id，from=发言人
+      else Delegate.onInbound(key, m.from, m, false);               // 私聊：key=from=好友
+    }
     // 「已读」只看主区是否正在显示该聊天框，不看消息列表残留选中。
     const seen = isChatOpen(key) && (!window.Tray || Tray.focused());
     if (seen) {

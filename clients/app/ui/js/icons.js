@@ -20,6 +20,7 @@ const NM_ICON_PATHS = {
   maximize: '<rect x="5" y="5" width="14" height="14" rx="1.5"/>',
   restore: '<rect x="8" y="4" width="12" height="12" rx="1.5"/><path d="M8 8H5.5A1.5 1.5 0 0 0 4 9.5v9A1.5 1.5 0 0 0 5.5 20h9a1.5 1.5 0 0 0 1.5-1.5V16"/>',
   close: '<path d="M7 7l10 10M17 7 7 17"/>',
+  check: '<path d="M20 6 9 17l-5-5"/>',
   chevron: '<path d="m6 9 6 6 6-6"/>',
   refresh: '<path d="M21 12a9 9 0 1 1-2.6-6.3M21 4v5h-5"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',

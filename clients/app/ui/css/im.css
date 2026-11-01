@@ -990,6 +990,21 @@ html[data-theme="light"] .home-feats li { background: color-mix(in srgb, var(--p
 /* 送达回执双对号 */
 /* 送达对号：紧跟在时间(.im-time)后面，行内显示。 */
 .im-tick { margin-left: 4px; font-size: 11px; line-height: 1; opacity: 0.85; vertical-align: middle; white-space: nowrap; }
+/* 委托助手代答徽标（仅本侧可见）：跟在时间/对号后，描边机器人图标 + 文案。 */
+.im-agent-tag { display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; font-size: 10px; font-weight: 600;
+  color: var(--aqua, #58a6ff); background: var(--accent-soft, rgba(88,166,255,.12)); padding: 1px 6px; border-radius: 999px; vertical-align: middle; white-space: nowrap; }
+.im-agent-tag .nm-ico { width: 11px; height: 11px; }
+/* 会话助手 picker（标题栏机器人按钮弹出）：复用 .um-item 行样式的锚定下拉。 */
+.conv-dg-pop { position: fixed; z-index: 2600; width: 260px; max-height: 60vh; overflow: auto;
+  background: var(--panel, #141414); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 10px 34px rgba(0,0,0,.42); padding: 6px; }
+.conv-dg-pop .conv-dg-row { position: relative; }
+.conv-dg-pop .conv-dg-off { opacity: .42; pointer-events: none; }
+.conv-dg-sec { padding: 8px 10px 4px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .02em; }
+.conv-dg-hint { padding: 8px 10px; font-size: 11px; color: var(--muted); line-height: 1.4; }
+.conv-dg-load { padding: 14px; color: var(--muted); font-size: 12px; }
+.conv-dg-ck { margin-left: auto; color: var(--aqua, #58a6ff); display: inline-flex; }
+.conv-dg-ck .nm-ico { width: 15px; height: 15px; }
 /* 发送中：转动的小圆圈 */
 .im-spin { display: inline-block; width: 9px; height: 9px; border: 1.5px solid var(--muted, #8b949e);
   border-top-color: transparent; border-radius: 50%; animation: im-spin 0.7s linear infinite; vertical-align: middle; }
