@@ -18,7 +18,8 @@
 #   3) 前端依赖已装：clients/app 下 npm install
 #
 # 用法：
-#   ./release-build-and-sign.sh                # 全流程
+#   ./release-build-and-sign.sh                # 全流程（默认 aarch64/M 系列）
+#   ./release-build-and-sign.sh --arch=x86_64  # Intel 包（LLM 与 app 均按 target 编译）
 #   ./release-build-and-sign.sh --no-build     # 跳过编译（不重编 LLM 二进制，用 target 里现有的）
 #   ./release-build-and-sign.sh --no-notarize  # 只签名+打包，不公证（仅自用调试）
 #   ./release-build-and-sign.sh --no-llm       # 跳过 LLM 二进制的编译与嵌入
@@ -30,7 +31,7 @@ IDENTITY="Developer ID Application: Pansoft Company Limited (W8H2ZU6LLY)"
 TEAM_ID="W8H2ZU6LLY"
 NOTARY_PROFILE="${NOTARY_PROFILE:-cmx-agent-notary}" # 复用 cmx-agent 的公证凭据（同团队）
 APP_NAME="nmspace"
-ARCH="aarch64"
+ARCH="${NMSPACE_ARCH:-aarch64}" # aarch64(M 系列) / x86_64(Intel)，可用 --arch= 覆盖
 LLM_BINS=(nm-llm-gatewayd nm-llm-proxy)
 # 自动更新签名（minisign）：私钥放仓库外 ~/.tauri/，密码存登录钥匙串，绝不进 git。
 # 这对钥与 tauri.conf.json 烧录公钥（keyid E0BF7148449E4FE4）配对（20261030 验签确认）。
@@ -52,9 +53,11 @@ for arg in "$@"; do
     --no-build)    DO_BUILD=0 ;;
     --no-notarize) DO_NOTARIZE=0 ;;
     --no-llm)      DO_LLM=0 ;;
-    *) echo "未知参数: ${arg}（支持 --no-build / --no-notarize / --no-llm）" >&2; exit 2 ;;
+    --arch=aarch64|--arch=x86_64) ARCH="${arg#--arch=}" ;;
+    *) echo "未知参数: ${arg}（支持 --no-build / --no-notarize / --no-llm / --arch=aarch64|x86_64）" >&2; exit 2 ;;
   esac
 done
+TRIPLE="${ARCH}-apple-darwin" # rust --target；产物路径 target/$TRIPLE/...
 
 log() { printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }
 die() { printf '\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
@@ -114,14 +117,14 @@ sync_cmx_ui() {
 if [ "$DO_BUILD" -eq 1 ]; then
   if [ "$DO_LLM" -eq 1 ]; then
     log "编译 LLM 二进制（release）"
-    ( cd "$REPO_ROOT" && cargo build --release -p nm-llm-gatewayd -p nm-llm-proxy )
+    ( cd "$REPO_ROOT" && cargo build --release --target "$TRIPLE" -p nm-llm-gatewayd -p nm-llm-proxy )
   fi
   # 先同步 UI 再 tauri build：bundle.resources 构建期取 src-tauri/cmx-agent-ui，
   # 顺序反了包里只会带 README 占位（20261029 踩坑）。
   log "同步 cmx-agent UI 到 Resources"
   sync_cmx_ui
   log "tauri build（release，较久；vendored OpenSSL 首次会编译 OpenSSL 源码）"
-  ( cd "$APP_DIR" && npx tauri build --bundles app \
+  ( cd "$APP_DIR" && npx tauri build --bundles app --target "$TRIPLE" \
       -c "{\"bundle\":{\"macOS\":{\"signingIdentity\":\"$IDENTITY\"}}}" )
 fi
 
@@ -136,11 +139,11 @@ TDIR="$( cd "$APP_DIR/src-tauri" \
   && cargo metadata --no-deps --format-version 1 2>/dev/null \
   | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' | head -1 )"
 [ -n "$TDIR" ] || TDIR="$APP_DIR/src-tauri/target"
-BUNDLE_DIR="$TDIR/release/bundle/macos"
+BUNDLE_DIR="$TDIR/$TRIPLE/release/bundle/macos" # --target 构建的产物在 per-triple 子目录
 APP="$BUNDLE_DIR/$APP_NAME.app"
 [ -d "$APP" ] || die "未找到产物: $APP"
 VERSION="$( sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$APP_DIR/src-tauri/tauri.conf.json" | head -1 )"
-DIST_DIR="$TDIR/release/dist"
+DIST_DIR="$TDIR/$TRIPLE/release/dist"
 ZIP="$DIST_DIR/$APP_NAME-app-$VERSION-$ARCH-macos.zip"
 DMG="$DIST_DIR/$APP_NAME-app_${VERSION}_$ARCH.dmg"
 
@@ -148,7 +151,7 @@ DMG="$DIST_DIR/$APP_NAME-app_${VERSION}_$ARCH.dmg"
 if [ "$DO_LLM" -eq 1 ]; then
   log "嵌入 LLM 二进制到 Contents/MacOS/（app 按 exe 同级目录解析）"
   for b in "${LLM_BINS[@]}"; do
-    SRC="$TDIR/release/$b"
+    SRC="$TDIR/$TRIPLE/release/$b"
     [ -f "$SRC" ] || die "缺 ${SRC}（先编译，或用 --no-llm 跳过）"
     # 分发炸弹检查：任何 Homebrew 路径的动态库都过不了别人机器。
     if otool -L "$SRC" | grep -qE "/opt/homebrew|/usr/local/opt"; then
@@ -206,17 +209,17 @@ mkdir -p "$DIST_DIR"
 [ -f "$TAR_GZ.sig" ] || die "minisign 签名未产出: $TAR_GZ.sig"
 # latest.json 半成品：signature 已填，url 按 FEED_FILES_URL 拼（未传则留占位），
 # 供服务端登记时直接取用（服务端也可自行渲染 latest，此处仅为对接便利）。
-LATEST_JSON="$DIST_DIR/latest-$VERSION-darwin-aarch64.json"
+LATEST_JSON="$DIST_DIR/latest-$VERSION-darwin-$ARCH.json"
 SIG_B64="$(tr -d '\n' < "$TAR_GZ.sig")"
-python3 - "$LATEST_JSON" "$VERSION" "$SIG_B64" "$FEED_FILES_URL" "$(basename "$TAR_GZ")" <<'PYEOF'
+python3 - "$LATEST_JSON" "$VERSION" "$SIG_B64" "$FEED_FILES_URL" "$(basename "$TAR_GZ")" "darwin-$ARCH" <<'PYEOF'
 import json, sys, datetime
-path, version, sig, base, fname = sys.argv[1:6]
+path, version, sig, base, fname, platform_key = sys.argv[1:7]
 url = (base.rstrip("/") + "/" + fname) if base else ("REPLACE_WITH_FEED_URL/" + fname)
 json.dump({
     "version": version,
     "notes": "",
     "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "platforms": {"darwin-aarch64": {"signature": sig, "url": url}},
+    "platforms": {platform_key: {"signature": sig, "url": url}},
 }, open(path, "w"), ensure_ascii=False, indent=2)
 PYEOF
 echo "updater 产物: OK（stapled .app 重打包 + minisign）"
