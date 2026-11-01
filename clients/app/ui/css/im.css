@@ -518,12 +518,13 @@
 
 /* ── 主区会话 ── */
 /* 主区多 tab 工作区（cmx-agent 样式）*/
-.tabbar { position: relative; display: flex; align-items: stretch; height: 28px; flex: 1 1 auto; min-width: 0; box-sizing: border-box; border-bottom: none; background: transparent; -webkit-app-region: no-drag; }
-.titlebar .tab { height: 28px; align-self: center; border-right: none; border-radius: 8px; margin-right: 2px; }
+/* tabbar 空白处可拖窗口；标签/溢出按钮单独 no-drag，避免挡住标题栏拖动。 */
+.tabbar { position: relative; display: flex; align-items: stretch; height: 28px; flex: 1 1 auto; min-width: 0; box-sizing: border-box; border-bottom: none; background: transparent; -webkit-app-region: drag; }
+.titlebar .tab { height: 28px; align-self: center; border-right: none; border-radius: 8px; margin-right: 2px; -webkit-app-region: no-drag; }
 .titlebar .tab.active::before { top: auto; bottom: 0; border-radius: 2px 2px 0 0; }
-.tabstrip { flex: 1; min-width: 0; display: flex; align-items: stretch; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.tabstrip { flex: 1; min-width: 0; display: flex; align-items: stretch; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; -webkit-app-region: drag; }
 .tabstrip::-webkit-scrollbar { display: none; width: 0; height: 0; }
-.tab { display: flex; align-items: center; gap: 7px; padding: 0 8px 0 12px; max-width: 200px; flex: 0 0 auto; border-right: 1px solid var(--border); position: relative; cursor: pointer; font-size: 13px; color: var(--muted); background: transparent; }
+.tab { display: flex; align-items: center; gap: 7px; padding: 0 8px 0 12px; max-width: 200px; flex: 0 0 auto; border-right: 1px solid var(--border); position: relative; cursor: pointer; font-size: 13px; color: var(--muted); background: transparent; -webkit-app-region: no-drag; }
 .tab:hover { background: var(--hover); }
 .tab.active { background: var(--bg); color: var(--ink); }
 .tab.active::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 2px; background: var(--aqua); }
@@ -538,10 +539,10 @@
 .tab .tab-x { width: 18px; height: 18px; border-radius: var(--r-ctrl); display: flex; align-items: center; justify-content: center; color: var(--muted); opacity: 0; }
 .tab:hover .tab-x, .tab.active .tab-x { opacity: .7; }
 .tab .tab-x:hover { background: var(--border2); color: var(--ink); opacity: 1; }
-.tab-more { display: none; flex: 0 0 32px; width: 32px; align-items: center; justify-content: center; border-left: 1px solid var(--border); color: var(--muted); background: var(--panel); }
+.tab-more { display: none; flex: 0 0 32px; width: 32px; align-items: center; justify-content: center; border-left: 1px solid var(--border); color: var(--muted); background: var(--panel); -webkit-app-region: no-drag; }
 .tab-more.on { display: inline-flex; }
 .tab-more:hover, .tab-more.open { background: var(--hover); color: var(--ink); }
-.tab-ctx, .tab-over { z-index: 2600; min-width: 168px; max-width: 280px; max-height: 320px; overflow: auto; padding: 4px; background: var(--panel2); border: 1px solid var(--border2); border-radius: var(--r-float); box-shadow: 0 10px 34px rgba(0,0,0,.4); }
+.tab-ctx, .tab-over { z-index: 2600; min-width: 168px; max-width: 280px; max-height: 320px; overflow: auto; padding: 4px; background: var(--panel2); border: 1px solid var(--border2); border-radius: var(--r-float); box-shadow: 0 10px 34px rgba(0,0,0,.4); -webkit-app-region: no-drag; }
 .tab-ctx { position: fixed; }
 .tab-over { position: absolute; top: calc(100% + 4px); right: 4px; }
 .tab-ctx[hidden], .tab-over[hidden] { display: none; }
