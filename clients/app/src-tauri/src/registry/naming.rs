@@ -47,9 +47,7 @@ pub(crate) async fn name_reverse(
 /// 断开当前连接（清空会话，便于切换节点/模式）。
 #[tauri::command]
 pub(crate) async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
-    // 优雅下线：先发 Logout + 关连接（节点即时移除会话，后续消息正确入离线库），再丢弃句柄。
-    if let Some(c) = state.conn.lock().await.take() {
-        c.session.disconnect().await;
-    }
+    // 优雅下线：Logout + Endpoint::close，避免残留端点占着同一 id 导致下次 connect 互踢。
+    crate::connection::clear_conn(&state).await;
     Ok(())
 }

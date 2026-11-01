@@ -9,6 +9,22 @@ use crate::{
     AppState, Conn, ConnectArgs, devices, hex, pair, pairing, parse_id, session_of, vk_of,
 };
 
+/// 优雅拆除一条连接：先 Logout 会话，再 `Endpoint::close`。
+/// 避免同一设备密钥再次 `bind` 时在 relay 上互踢（`Another endpoint connected with the same endpoint id`），
+/// 以及 Drop 未 close 的 `Endpoint dropped without calling Endpoint::close` 噪声。
+/// **不可**用于「复用同一端点换 session」的重连路径（那里只应 `session.disconnect`，勿 close 端点）。
+pub(crate) async fn teardown_conn(c: Conn) {
+    c.session.disconnect().await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), c._client.close()).await;
+}
+
+/// 取走并拆除当前连接（若有）。`connect` / `disconnect` / `lock` 在新建端点前调用。
+pub(crate) async fn clear_conn(state: &State<'_, AppState>) {
+    if let Some(c) = state.conn.lock().await.take() {
+        teardown_conn(c).await;
+    }
+}
+
 /// 完成会话建立：注册为 person、起消息推送循环、存入状态，返回自己的 id(hex)。
 /// `wait_ready`：首连 true（保留 im_ready 8s 门控，防登录瞬间补投的离线消息早于前端监听器丢失）；
 /// 重连 false（前端监听器早已在，立即放水，不白等 8s）。`gen`：写入 Conn 的连接世代，供单飞重连判重。
@@ -329,6 +345,10 @@ pub(crate) async fn connect(
     if user.is_empty() {
         return Err("请先选择用户身份".into());
     }
+    // 与重连单飞共用锁：避免并发 connect / reconnect 同时 bind 同一设备密钥。
+    let _guard = state.reconnect_lock.lock().await;
+    // 先拆掉已有端点再 dial——否则新 Endpoint 同 id 上 relay 会互踢旧连接并刷 Endpoint dropped。
+    clear_conn(&state).await;
     // 存 AppHandle（供重连 helper 在任意位置取），缓存入参供待机唤醒后自动重连。
     let _ = state.app_handle.set(app.clone());
     let args = ConnectArgs {
@@ -575,10 +595,10 @@ pub(crate) async fn dial(
                         tokio::time::timeout(std::time::Duration::from_secs(1), c1.close()).await;
                     return Err(e);
                 }
-                // 同网连不上（超时/其它错误）：关掉探测端点，转穿透兜底。
+                // 同网连不上：必须等 Endpoint 关干净再按同种子绑穿透，否则 Same endpoint id → connection lost。
                 _ => {
                     let _ =
-                        tokio::time::timeout(std::time::Duration::from_secs(1), c1.close()).await;
+                        tokio::time::timeout(std::time::Duration::from_secs(3), c1.close()).await;
                 }
             }
         }

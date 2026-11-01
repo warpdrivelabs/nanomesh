@@ -55,6 +55,8 @@ pub(crate) fn unlock(
 /// 上锁：清零内存 VK + 断开当前连接。
 #[tauri::command]
 pub(crate) async fn lock(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    // 先拆连接（需在清 VK 前：teardown 本身不读 vault；清 VK 后重连路径会停）。
+    crate::connection::clear_conn(&state).await;
     {
         let mut g = state.vault.lock().unwrap();
         if let Some(mut vk) = g.take() {
@@ -62,7 +64,6 @@ pub(crate) async fn lock(app: AppHandle, state: State<'_, AppState>) -> Result<(
             vk.zeroize();
         }
     }
-    *state.conn.lock().await = None;
     if let Ok(dir) = data_dir(&app) {
         auth::audit(&dir, "lock");
     }

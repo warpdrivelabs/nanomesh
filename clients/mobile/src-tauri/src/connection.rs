@@ -172,11 +172,25 @@ pub(crate) async fn connect(
     if user.is_empty() {
         return Err("请先选择用户身份".into());
     }
+    // 先拆旧端点再 dial，避免同设备密钥二次 bind 在 relay 上互踢。
+    clear_conn(&state).await;
     let (client, session) = devices::dial_account(
         &app, &vk, user, &mode, &node, relay_urls, pkarr_url, dns_origin,
     )
     .await?;
     finish_session(&app, &state, client, session, &display_name).await
+}
+
+/// 优雅拆除：Logout + Endpoint::close（勿用于端点复用重连）。
+pub(crate) async fn teardown_conn(c: Conn) {
+    c.session.disconnect().await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), c._client.close()).await;
+}
+
+pub(crate) async fn clear_conn(state: &State<'_, AppState>) {
+    if let Some(c) = state.conn.lock().await.take() {
+        teardown_conn(c).await;
+    }
 }
 
 /// 上线：给了设备证书则以设备密钥连接后出示证书（账号身份收发），否则按连接密钥本身上线。
@@ -209,8 +223,13 @@ pub(crate) async fn dial(
     if matches!(m.as_str(), "lan" | "local") {
         let addr = nm_transport::addr_from_string(node).map_err(|e| e.to_string())?;
         let client = Client::bind_local(seed).await.map_err(|e| e.to_string())?;
-        let session = go_online(&client, addr, cert).await?;
-        return Ok((client, session));
+        match go_online(&client, addr, cert).await {
+            Ok(session) => return Ok((client, session)),
+            Err(e) => {
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(1), client.close()).await;
+                return Err(e);
+            }
+        }
     }
 
     // nat/selfhost：输入可为公钥(hex) 或完整地址(JSON)。地址先试同网直连，失败转穿透。
@@ -233,9 +252,15 @@ pub(crate) async fn dial(
                         || e.contains("unknown method")
                         || e.contains("cert") =>
                 {
+                    let _ =
+                        tokio::time::timeout(std::time::Duration::from_secs(1), c1.close()).await;
                     return Err(e);
                 }
-                _ => {}
+                // 同网失败：必须等 Endpoint 关干净再按同种子绑穿透，否则 Same endpoint id → connection lost。
+                _ => {
+                    let _ =
+                        tokio::time::timeout(std::time::Duration::from_secs(3), c1.close()).await;
+                }
             }
         }
     }
@@ -261,8 +286,13 @@ pub(crate) async fn dial(
         _ => Client::bind(seed).await.map_err(|e| e.to_string())?, // nat(N0) 默认
     };
     let addr = nm_transport::addr_from_id(id).map_err(|e| e.to_string())?;
-    let session = go_online(&client, addr, cert).await?;
-    Ok((client, session))
+    match go_online(&client, addr, cert).await {
+        Ok(session) => Ok((client, session)),
+        Err(e) => {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), client.close()).await;
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]

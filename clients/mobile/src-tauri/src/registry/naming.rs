@@ -47,6 +47,6 @@ pub(crate) async fn name_reverse(
 /// 断开当前连接（清空会话，便于切换节点/模式）。
 #[tauri::command]
 pub(crate) async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
-    *state.conn.lock().await = None;
+    crate::connection::clear_conn(&state).await;
     Ok(())
 }

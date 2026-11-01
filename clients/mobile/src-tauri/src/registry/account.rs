@@ -62,6 +62,13 @@ pub(crate) fn norm_account(local: &str, domain: &str) -> Result<(String, String)
     Ok((local, domain))
 }
 
+/// 探测端点用完即弃：不阻塞正式 connect。种子须是一次性随机身份，勿与账号/设备密钥相同。
+fn dispose_probe(client: nm_client::Client) {
+    tauri::async_runtime::spawn(async move {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), client.close()).await;
+    });
+}
+
 async fn node_account(
     node: &str,
     seed: [u8; 32],
@@ -72,13 +79,15 @@ async fn node_account(
     dns_origin: &Option<String>,
 ) -> Result<String, String> {
     let (m, relays, pkarr, dns) = selfhost_infra(relay_urls, pkarr_url, dns_origin);
-    let (_client, session) = dial(seed, m, node, relays, pkarr, dns, None).await?;
+    let (client, session) = dial(seed, m, node, relays, pkarr, dns, None).await?;
     let out = session
         .name_account(method, body)
         .await
-        .map_err(|e| registry_phrase(&e.to_string()))?;
+        .map_err(|e| registry_phrase(&e.to_string()));
+    // 探测会话：只关 Endpoint，不发 Logout。
     drop(session);
-    Ok(out)
+    dispose_probe(client);
+    out
 }
 
 #[tauri::command]
@@ -162,20 +171,22 @@ pub(crate) async fn account_login(
     let (local, domain) = norm_account(&local, &domain)?;
     let node = resolve_home_node(&registry, &domain).await?;
     let user = user.trim().to_string();
-    let vk = vk_of(&state)?;
-    let seed = match user.is_empty() {
-        true => None,
-        false => load_identity_seed(&app, &vk, &user).ok(),
-    }
-    .unwrap_or_else(|| nm_transport::SecretKey::generate().to_bytes());
+    // name.login 只比对口令；探测用一次性随机种子，避免与账号/设备端点在 relay 上互踢。
+    let probe_seed = nm_transport::SecretKey::generate().to_bytes();
     let (m, relays, pkarr, dns) = selfhost_infra(&relay_urls, &pkarr_url, &dns_origin);
-    let (_probe_client, probe) = dial(seed, m, &node, relays.clone(), pkarr.clone(), dns.clone(), None).await?;
+    let (probe_client, probe) =
+        dial(probe_seed, m, &node, relays.clone(), pkarr.clone(), dns.clone(), None).await?;
     let body = json!({ "local": local, "domain": domain, "password": password }).to_string();
-    let got = probe
-        .name_account("name.login", &body)
-        .await
-        .map_err(|e| registry_phrase(&e.to_string()))?;
+    let got = match probe.name_account("name.login", &body).await {
+        Ok(g) => g,
+        Err(e) => {
+            drop(probe);
+            dispose_probe(probe_client);
+            return Err(registry_phrase(&e.to_string()));
+        }
+    };
     drop(probe);
+    dispose_probe(probe_client);
     let got = got.trim().to_ascii_lowercase();
     let user = if !user.is_empty() && got == user.to_ascii_lowercase() {
         user
