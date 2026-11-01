@@ -41,7 +41,18 @@ function renderConversations() {
   wireItems(box, selectContact);
 }
 
-// ── 📇 实体目录：仅朋友 + 群聊 ──
+/** 朋友所属域名：取 handle（或形如 local@domain 的 name）里 `@` 后一段；没有则空串。 */
+function friendDomainOf(c) {
+  const pick = (s) => {
+    s = String(s || "").trim();
+    const at = s.lastIndexOf("@");
+    if (at <= 0 || at >= s.length - 1 || /\s/.test(s)) return "";
+    return s.slice(at + 1).toLowerCase();
+  };
+  return pick(c && c.handle) || pick(c && c.name) || "";
+}
+
+// ── 📇 实体目录：朋友按域名分组 + 群聊 ──
 function renderEntities() {
   const box = document.getElementById("entity-list");
   if (!box) return;
@@ -55,6 +66,25 @@ function renderEntities() {
   const friends = mergedEntities().filter(
     (c) => c.id !== MY_ID && kindType(c.kind) === "person" && match(c.name, c.id, c.handle)
   );
+  const byDomain = new Map();
+  friends.forEach((c) => {
+    const d = friendDomainOf(c);
+    if (!byDomain.has(d)) byDomain.set(d, []);
+    byDomain.get(d).push(c);
+  });
+  const domains = Array.from(byDomain.keys()).sort((a, b) => {
+    if (!a) return 1;
+    if (!b) return -1;
+    return a.localeCompare(b);
+  });
+  const friendSections = domains.map((d) => {
+    const items = byDomain.get(d).slice().sort((a, b) =>
+      String(a.name || a.id).localeCompare(String(b.name || b.id), "zh")
+    );
+    const key = d ? "person:" + d : "person:_";
+    return renderGroup(key, "person", d || "无域名", items);
+  });
+
   const groupRows = ((window.Groups && Groups.list && Groups.list()) || [])
     .map((g) => ({
       id: g.id,
@@ -66,12 +96,12 @@ function renderEntities() {
     .filter((c) => match(c.name, c.id, ""));
 
   const sections = [
-    renderGroup("person", "person", "朋友", friends),
+    ...friendSections,
     renderGroup("group", "groups", "群组", groupRows),
   ];
   box.innerHTML = sections.join("") || `<div class="im-empty">暂无朋友或群组</div>`;
 
-  box.querySelectorAll('.ent-group[data-type="person"] .im-item').forEach((el) => {
+  box.querySelectorAll('.ent-group[data-type^="person"] .im-item').forEach((el) => {
     el.addEventListener("click", () => showEntityDetail(el.dataset.id));
   });
   box.querySelectorAll('.ent-group[data-type="group"] .im-item').forEach((el) => {
@@ -100,7 +130,7 @@ function renderModels() {
 function renderGroup(key, icon, label, items) {
   const q = (document.getElementById("entity-search-input").value || "").trim();
   const folded = !q && (ENT_FOLDED.has(key) || !items.length);
-  const person = key === "person";
+  const person = key === "person" || String(key).startsWith("person:");
   const group = key === "group";
   const rows = items.map((c) => {
     const tag = c.added ? " · 手动" : "";

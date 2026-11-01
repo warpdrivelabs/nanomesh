@@ -201,7 +201,18 @@ function renderConversations() {
   wireItems(box, selectContact);
 }
 
-// ── 📇 实体目录：合并实体按类型分组；点击看详情 ──
+/** 朋友所属域名：取 handle（或形如 local@domain 的 name）里 `@` 后一段；没有则空串。 */
+function friendDomainOf(c) {
+  const pick = (s) => {
+    s = String(s || "").trim();
+    const at = s.lastIndexOf("@");
+    if (at <= 0 || at >= s.length - 1 || /\s/.test(s)) return "";
+    return s.slice(at + 1).toLowerCase();
+  };
+  return pick(c && c.handle) || pick(c && c.name) || "";
+}
+
+// ── 📇 实体目录：合并实体按类型分组；朋友按域名再分组；点击看详情 ──
 function renderEntities() {
   const box = document.getElementById("entity-list");
   if (!box) return;
@@ -209,7 +220,35 @@ function renderEntities() {
   const list = mergedEntities().filter((c) => c.id !== MY_ID && (!q || (c.name || "").toLowerCase().includes(q) || (c.id || "").includes(q) || (c.handle || "").toLowerCase().includes(q)));
   const groups = {};
   list.forEach((c) => { (groups[kindType(c.kind)] = groups[kindType(c.kind)] || []).push(c); });
-  const sections = ENTITY_TYPES.map((t) => renderGroup(t.key, t.icon, t.label, groups[t.key] || []));
+  const sections = [];
+  ENTITY_TYPES.forEach((t) => {
+    if (t.key !== "person") {
+      sections.push(renderGroup(t.key, t.icon, t.label, groups[t.key] || []));
+      return;
+    }
+    const friends = groups.person || [];
+    const byDomain = new Map();
+    friends.forEach((c) => {
+      const d = friendDomainOf(c);
+      if (!byDomain.has(d)) byDomain.set(d, []);
+      byDomain.get(d).push(c);
+    });
+    const domains = Array.from(byDomain.keys()).sort((a, b) => {
+      if (!a) return 1;
+      if (!b) return -1;
+      return a.localeCompare(b);
+    });
+    if (!domains.length) {
+      sections.push(renderGroup("person:_", t.icon, "朋友", []));
+      return;
+    }
+    domains.forEach((d) => {
+      const items = byDomain.get(d).slice().sort((a, b) =>
+        String(a.name || a.id).localeCompare(String(b.name || b.id), "zh")
+      );
+      sections.push(renderGroup(d ? "person:" + d : "person:_", t.icon, d || "无域名", items));
+    });
+  });
   if ((groups.other || []).length) sections.push(renderGroup("other", "file", "其他", groups.other));
   box.innerHTML = sections.join("");
   wireItems(box, showEntityDetail);
@@ -225,7 +264,7 @@ function renderEntities() {
 function renderGroup(key, icon, label, items) {
   const q = (document.getElementById("entity-search-input").value || "").trim();
   const folded = !q && (ENT_FOLDED.has(key) || !items.length);
-  const person = key === "person";
+  const person = key === "person" || String(key).startsWith("person:");
   const rows = items.map((c) => {
     const tag = c.added ? " · 手动" : "";
     if (person) {
