@@ -11,7 +11,9 @@ use zeroize::Zeroize;
 
 use super::*;
 use crate::pair;
-use crate::registry::{norm_account, open_device_vault, registry_phrase, resolve_home_node};
+use crate::registry::{
+    norm_account, open_device_vault, registry_phrase, resolve_home_node, selfhost_infra,
+};
 
 const EVENT: &str = "pair://event";
 const MAX_PENDING: usize = 4;
@@ -95,12 +97,18 @@ async fn start_new(
     password: Option<String>,
     registry: String,
     device: String,
+    relay_urls: Vec<String>,
+    pkarr_url: Option<String>,
+    dns_origin: Option<String>,
 ) -> Result<Value, String> {
     open_device_vault(&app, &state)?;
     let (local, domain) = norm_account(&local, &domain)?;
     let node = resolve_home_node(&registry, &domain).await?;
     let eph_seed = nm_transport::SecretKey::generate().to_bytes();
-    let (client, mut session) = dial(eph_seed, "nat", &node, Vec::new(), None, None, None).await?;
+    // 家节点只把地址发布到自建 pkarr，不在 N0。按公钥拨号必须走和登录相同的 selfhost，
+    // 否则 iroh 报 No addressing information available。
+    let (mode, relays, pkarr, dns) = selfhost_infra(&relay_urls, &pkarr_url, &dns_origin);
+    let (client, mut session) = dial(eph_seed, mode, &node, relays, pkarr, dns, None).await?;
     let name = format!("{local}@{domain}");
     let owner = match password {
         Some(pw) => {
@@ -343,8 +351,23 @@ pub async fn pair_request(
     password: String,
     registry: String,
     device: String,
+    relay_urls: Vec<String>,
+    pkarr_url: Option<String>,
+    dns_origin: Option<String>,
 ) -> Result<Value, String> {
-    start_new(app, state, local, domain, Some(password), registry, device).await
+    start_new(
+        app,
+        state,
+        local,
+        domain,
+        Some(password),
+        registry,
+        device,
+        relay_urls,
+        pkarr_url,
+        dns_origin,
+    )
+    .await
 }
 
 /// 新设备：只填账号，生成一次性迁移串，交给旧设备粘贴。
@@ -356,8 +379,23 @@ pub async fn pair_ticket(
     domain: String,
     registry: String,
     device: String,
+    relay_urls: Vec<String>,
+    pkarr_url: Option<String>,
+    dns_origin: Option<String>,
 ) -> Result<Value, String> {
-    start_new(app, state, local, domain, None, registry, device).await
+    start_new(
+        app,
+        state,
+        local,
+        domain,
+        None,
+        registry,
+        device,
+        relay_urls,
+        pkarr_url,
+        dns_origin,
+    )
+    .await
 }
 
 #[tauri::command]

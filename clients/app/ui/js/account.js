@@ -159,9 +159,11 @@
     const btn = document.getElementById(kind === "push" ? "acct-pair-go" : "acct-ticket-go");
     btn.disabled = true;
     stopPair();
+    const inf = infra();
+    const sh = { relayUrls: inf.relayUrls, pkarrUrl: inf.pkarrUrl, dnsOrigin: inf.dnsOrigin };
     try {
       if (kind === "push") {
-        const r = await NM.inv("pair_request", { local, domain, password, registry: "", device: "" });
+        const r = await NM.inv("pair_request", { local, domain, password, registry: "", device: "", ...sh });
         if (r && r.have) {
           showImport(false);
           await submit();
@@ -170,7 +172,7 @@
         pairRid = r.rid;
         pairStatus("请求已发送，等待旧设备响应…", "");
       } else {
-        const r = await NM.inv("pair_ticket", { local, domain, registry: "", device: "" });
+        const r = await NM.inv("pair_ticket", { local, domain, registry: "", device: "", ...sh });
         pairRid = r.rid;
         document.getElementById("acct-ticket-out").value = r.ticket;
         pairStatus("迁移串已生成，请在 5 分钟内到旧设备粘贴。", "");

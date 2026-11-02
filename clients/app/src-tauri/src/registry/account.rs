@@ -16,7 +16,7 @@ use super::vault::open_device_vault;
 const DEFAULT_SELFHOST_RELAY: &str = "https://relay.robot.link:8443";
 const DEFAULT_SELFHOST_PKARR: &str = "https://relay.robot.link:8444/pkarr";
 /// 归一化账户流程的自建基础设施参数：传入为空则用默认。返回 (mode, relay_urls, pkarr_url, dns_origin)。
-fn selfhost_infra(
+pub(crate) fn selfhost_infra(
     relay_urls: &[String],
     pkarr_url: &Option<String>,
     dns_origin: &Option<String>,

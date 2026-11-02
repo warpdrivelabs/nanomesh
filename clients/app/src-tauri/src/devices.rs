@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
 use super::*;
-use crate::registry::{norm_account, registry_phrase, resolve_home_node};
+use crate::registry::{norm_account, registry_phrase, resolve_home_node, selfhost_infra};
 
 pub const EVENT: &str = "device://event";
 /// 节点推来的设备事件（吊销等）。
@@ -345,7 +345,8 @@ pub async fn device_freeze(
         Some(parse_id(&device)?)
     };
     let node = resolve_home_node(&registry, &domain).await?;
-    let (_client, session) = dial(new_seed(), "nat", &node, Vec::new(), None, None, None).await?;
+    let (mode, relays, pkarr, dns) = selfhost_infra(&[], &None, &None);
+    let (_client, session) = dial(new_seed(), mode, &node, relays, pkarr, dns, None).await?;
     let n = session
         .device_freeze(&local, &domain, &password, device)
         .await
