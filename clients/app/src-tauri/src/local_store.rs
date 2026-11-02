@@ -563,10 +563,26 @@ pub(crate) fn chat_mark(
     let conn = open_chat_db(&app, &user)?;
     let conv = conv_key(&conv)?;
     let n = if !id.is_empty() {
-        conn.execute(
-            "UPDATE msg SET body=json_set(body,'$.status',?1,'$.gramId',?2) WHERE conv=?3 AND id=?4",
-            rusqlite::params![status, gram_id, conv, id],
-        )
+        if status == -1 {
+            // 失败：强设差号（无 gramId，status 0→-1 不走只升不降）。
+            conn.execute(
+                "UPDATE msg SET body=json_set(body,'$.status',-1) WHERE conv=?2 AND id=?3",
+                rusqlite::params![conv, id],
+            )
+        } else {
+            // 只升不降：单勾(1)落库时，乐观行可能已被先到的回执升为双勾(2)——
+            // 回执按 gramId 匹配不到尚未写入 gramId 的行（静默丢弃），随后单勾回写
+            // 若无条件覆盖会把 2 降回 1。重开/切走会话再回来，DB 里就是错的。
+            // 所以：status 取 MAX(现有, 新值)；gramId 首次写入（0/缺省视为未写）。
+            conn.execute(
+                "UPDATE msg SET body=json_set(\
+                   body,'$.status',MAX(COALESCE(json_extract(body,'$.status'),0),?1),\
+                   '$.gramId',CASE WHEN COALESCE(json_extract(body,'$.gramId'),0)=0 THEN ?2 \
+                     ELSE json_extract(body,'$.gramId') END) \
+                 WHERE conv=?3 AND id=?4",
+                rusqlite::params![status, gram_id, conv, id],
+            )
+        }
     } else {
         conn.execute(
             "UPDATE msg SET body=json_set(body,'$.status',?1) \

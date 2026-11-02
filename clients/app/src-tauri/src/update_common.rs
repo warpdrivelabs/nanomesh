@@ -650,7 +650,7 @@ async fn finalize_part(part: &Path, bin: &Path) -> Result<(), String> {
 fn disk_free_bytes(dir: &Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
-    extern "system" {
+    unsafe extern "system" {
         fn GetDiskFreeSpaceExW(
             lp_dir: *const u16,
             lp_free: *mut u64,

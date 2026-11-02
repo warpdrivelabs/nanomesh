@@ -265,6 +265,14 @@ fn registry_get(url: &str) -> Result<(u16, String), String> {
         .map_err(|e| format!("TLS 初始化失败: {e}"))?;
     if std::path::Path::new("/etc/ssl/cert.pem").exists() {
         builder.set_ca_file("/etc/ssl/cert.pem").map_err(|e| format!("无法加载系统证书: {e}"))?;
+    } else {
+        // 无系统 cert.pem 的平台（如 Windows）用编译期内嵌的 Mozilla CA 包灌入证书库。
+        let certs = openssl::x509::X509::stack_from_pem(include_bytes!("../src/registry-ca.pem"))
+            .map_err(|e| format!("内置 CA 证书解析失败: {e}"))?;
+        let store = builder.cert_store_mut();
+        for cert in certs {
+            store.add_cert(cert).map_err(|e| format!("内置 CA 证书加载失败: {e}"))?;
+        }
     }
     let mut stream = builder.build().connect(host, tcp).map_err(|e| format!("注册中心 TLS 失败: {e}"))?;
     let req = format!(

@@ -23,4 +23,6 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }
 # macOS 系统 TLS 访问 robot.link 会在握手时被断开，注册中心请求改用 OpenSSL。
-openssl = "0.10"
+# vendored：静态链接。动态链接时 exe 依赖 libssl-4-x64.dll/libcrypto-4-x64.dll，
+# 分发到没装 OpenSSL 的机器直接起不来。
+openssl = { version = "0.10", features = ["vendored"] }

@@ -228,8 +228,13 @@ function handleReceipt(ev) {
   const conv = ev.from, g = ev.ref;
   if (!conv || !g) return;
   if (typeof VIEW !== "undefined" && VIEW.id === conv) {
-    const row = VIEW.rows.find((r) => r.from === MY_ID && r.gramId === g);
-    if (row && (row.status || 0) < 2) { row.status = 2; if (window.paintVirtual) paintVirtual(false); }
+    const row = VIEW.rows.find((r) => r.from === MY_ID && (r.gramId === g || (r.id || "").startsWith("l")));
+    if (row && (row.status || 0) < 2) {
+      // 行还没写 gramId（单勾 ack 未回来/未落库）时记下 ref，切走再回也匹配。
+      if (!row.gramId) row.gramId = g;
+      row.status = 2;
+      if (window.paintVirtual) paintVirtual(false);
+    }
   }
   if (window.ChatLog && ChatLog.mark) ChatLog.mark(conv, { gramId: g }, 2);
 }
