@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#050b16" />
-  <meta name="description" content="NANO MESH 是一个基于 iroh 的去中心化网格通信客户端。公钥就是身份，消息点对点直达，数据留在你自己的设备里。支持 Windows / macOS / Linux。" />
+  <meta name="description" content="NANO MESH 是一个基于 QUIC 的去中心化网格通信客户端。公钥就是身份，消息点对点直达，数据留在你自己的设备里。支持 Windows / macOS / Linux。" />
   <title>NANO MESH · nmspace — 去中心化网格通信</title>
   <link rel="icon" type="image/png" href="assets/app-icon.png" />
   <script>document.documentElement.classList.remove('no-js');document.documentElement.classList.add('js');</script>
@@ -307,7 +307,7 @@
         <div class="hero-copy">
           <p class="eyebrow fade-up d1"><span class="dot"></span> Decentralized mesh · Open source</p>
           <h1 class="fade-up d1">让连接，<br /><span>回归彼此。</span></h1>
-          <p class="lead fade-up d2">NANO MESH 是一个基于 iroh 的去中心化网格通信客户端。公钥就是身份，消息点对点直达，数据留在你自己的设备里。</p>
+          <p class="lead fade-up d2">NANO MESH 是一个基于 QUIC 的去中心化网格通信客户端。公钥就是身份，消息点对点直达，数据留在你自己的设备里。</p>
           <div class="hero-cta fade-up d3">
             <a class="btn btn-primary btn-lg" href="#download">下载桌面端
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
@@ -355,7 +355,7 @@
             </div>
             <span class="status"><span class="pulse"></span>node online</span>
           </div>
-          <span class="chip chip-1">iroh / QUIC</span>
+          <span class="chip chip-1">QUIC / P2P</span>
           <span class="chip chip-2">公钥身份</span>
           <span class="chip chip-3">redb 本地存储</span>
           <span class="chip chip-4">离线信箱</span>
@@ -430,7 +430,7 @@
           <article class="feature-card reveal" style="--d:.03s">
             <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="5" r="2.2"/><circle cx="5" cy="18" r="2.2"/><circle cx="19" cy="18" r="2.2"/><path d="M12 7.2v3.6M10.2 12.2 6.6 16M13.8 12.2l3.6 3.8"/></svg></div>
             <h3>点对点直连</h3>
-            <p>基于 iroh QUIC，节点之间直接传输。中心服务器不参与消息路由。</p>
+            <p>基于 QUIC，节点之间直接传输。中心服务器不参与消息路由。</p>
           </article>
           <article class="feature-card reveal" style="--d:.08s">
             <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="12" r="4"/><path d="M12 12h9M17 12v4M20 12v3"/></svg></div>
@@ -487,7 +487,7 @@
         </div>
         <div class="arch-row reveal" style="--d:.18s" aria-label="通信链路">
           <span class="arch-chip">nmspace 客户端</span><span class="arch-arrow">→</span>
-          <span class="arch-chip">iroh / QUIC</span><span class="arch-arrow">→</span>
+          <span class="arch-chip">QUIC / P2P</span><span class="arch-arrow">→</span>
           <span class="arch-chip">nmd 节点</span><span class="arch-arrow">→</span>
           <span class="arch-chip">redb 本地存储</span>
         </div>
@@ -504,7 +504,7 @@
         <div class="faq-list reveal">
           <details class="faq-item" open>
             <summary>NANO MESH 是什么？</summary>
-            <div class="faq-answer">NANO MESH 是一套基于 iroh 的去中心化网格通信系统与桌面客户端，包含 P2P 私聊、群组、频道、离线信箱、多设备、去中心命名与联邦同步。</div>
+            <div class="faq-answer">NANO MESH 是一套基于 QUIC 的去中心化网格通信系统与桌面客户端，包含 P2P 私聊、群组、频道、离线信箱、多设备、去中心命名与联邦同步。</div>
           </details>
           <details class="faq-item">
             <summary>需要注册账号或中心服务器吗？</summary>
@@ -524,7 +524,7 @@
           </details>
           <details class="faq-item">
             <summary>可以自建节点吗？</summary>
-            <div class="faq-answer">可以。nmd 支持 selfhost / nat / lan 三种模式；自建 iroh-relay 与 iroh-dns-server 即可脱离公共网络。部署方式见仓库 <a href="https://gitee.com/warpdrivelabs/nanomesh/tree/main/docs" target="_blank" rel="noopener">docs</a>。</div>
+            <div class="faq-answer">可以。nmd 支持 selfhost / nat / lan 三种模式；自建 QUIC-relay 与 QUIC-dns-server 即可脱离公共网络。部署方式见仓库 <a href="https://gitee.com/warpdrivelabs/nanomesh/tree/main/docs" target="_blank" rel="noopener">docs</a>。</div>
           </details>
           <details class="faq-item">
             <summary>从哪里获取最新版本？</summary>
@@ -560,7 +560,7 @@
         <a href="https://gitee.com/warpdrivelabs/nanomesh/blob/main/LICENSE" target="_blank" rel="noopener">许可证</a>
         <a href="https://gitee.com/warpdrivelabs/nanomesh/blob/main/docs/CLIENT_AUTH_SECURITY.md" target="_blank" rel="noopener">安全说明</a>
       </nav>
-      <p class="footer-note"><span>© <span id="year">2026</span> NANO MESH · nmspace</span><span>Built with iroh &amp; Tauri</span></p>
+      <p class="footer-note"><span>© <span id="year">2026</span> NANO MESH · nmspace</span><span>Built with QUIC &amp; Tauri</span></p>
     </div>
   </footer>
 
