@@ -146,11 +146,13 @@ fn save_share(dir: &Path, m: &ModelShare) -> Result<(), String> {
 fn load_seed(dir: &Path, vk: &[u8; 32], id: &str) -> Result<[u8; 32], String> {
     let data = std::fs::read(path_seed(dir, id)).map_err(|_| "模型身份种子缺失".to_string())?;
     auth::decrypt_seed(vk, &data)
+        .map_err(|_| "模型身份与当前保险库不匹配（保险库可能被重置过），请删除该模型后重新添加".to_string())
 }
 
 pub(crate) fn load_key(dir: &Path, vk: &[u8; 32], id: &str) -> Result<String, String> {
     let data = std::fs::read(path_key(dir, id)).map_err(|_| "未配置 API Key".to_string())?;
-    let pt = auth::decrypt_blob(vk, &data)?;
+    let pt = auth::decrypt_blob(vk, &data)
+        .map_err(|_| "API Key 与当前保险库不匹配（保险库可能被重置过），请重新填写".to_string())?;
     String::from_utf8(pt).map_err(|_| "Key 不是合法 UTF-8".into())
 }
 

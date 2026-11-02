@@ -68,7 +68,11 @@ pub fn load(app: &AppHandle, vk: &[u8; 32], account: &str) -> Result<Option<Devi
     let Ok(data) = std::fs::read(&p) else {
         return Ok(None);
     };
-    let mut pt = auth::decrypt_blob(vk, &data)?;
+    // 解不开多半是保险库被重置过（设备密钥是旧库 VK 加密的）；普通设备只有这份凭据，不能当没有处理。
+    let mut pt = auth::decrypt_blob(vk, &data).map_err(|_| {
+        "本机设备密钥与当前保险库不匹配（保险库可能被重置过），请点「换了设备？」重新授权本机"
+            .to_string()
+    })?;
     let parsed = serde_json::from_slice::<Stored>(&pt);
     pt.zeroize();
     let mut st = parsed.map_err(|_| "设备密钥文件损坏".to_string())?;

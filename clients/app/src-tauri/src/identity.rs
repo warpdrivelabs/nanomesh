@@ -58,5 +58,8 @@ pub(crate) fn load_identity_seed(
 ) -> Result<[u8; 32], String> {
     let data = std::fs::read(identities_dir(app)?.join(format!("{}.enc", pubkey)))
         .map_err(|_| "用户身份不存在（可能已删除）".to_string())?;
-    auth::decrypt_seed(vk, &data)
+    // 解不开多半是保险库被重置过（身份是旧库 VK 加密的），区别于口令输错，文案要能区分。
+    auth::decrypt_seed(vk, &data).map_err(|_| {
+        "本机身份与当前保险库不匹配（保险库可能被重置过），请删除该身份或恢复旧保险库".to_string()
+    })
 }

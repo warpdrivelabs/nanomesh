@@ -108,6 +108,59 @@ fn store_device_key(dir: &std::path::Path, pw: &str) -> Result<(), String> {
     }
 }
 
+/// 旧库及其全部本机 VK 加密数据整体归档到 `vault.legacy-<ts>/`。identities/ devices/
+/// llm_models/ llm_grants/ 都用旧库 VK 加密，只挪 vault.json 会留下解不开的孤儿数据
+/// （2026-10-30 事故：静默重建后新旧数据混挂，登录报「解密失败」）。挪完记审计。
+fn orphan_vault_data(dir: &std::path::Path) -> Result<(), String> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let name = format!("vault.legacy-{ts}");
+    let legacy = dir.join(&name);
+    std::fs::create_dir_all(&legacy).map_err(|e| e.to_string())?;
+    let victims: Vec<String> = std::iter::once("vault.json".to_string())
+        .chain(
+            ["identities", "devices", "llm_models", "llm_grants"]
+                .iter()
+                .map(|s| s.to_string()),
+        )
+        // 历次旧版平铺的 vault.json.legacy-* 一并收进归档目录
+        .chain(
+            std::fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.ok())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|n| n.starts_with("vault.json.legacy-")),
+        )
+        .collect();
+    let mut moved = false;
+    for name in victims {
+        let from = dir.join(&name);
+        if !from.exists() {
+            continue;
+        }
+        std::fs::rename(&from, legacy.join(&name)).map_err(|e| e.to_string())?;
+        moved = true;
+    }
+    if moved {
+        auth::audit(dir, "vault:legacy-reset");
+    }
+    Ok(())
+}
+
+/// 用随机设备口令新建保险库并解锁。
+fn setup_device_vault(dir: &std::path::Path, state: &State<'_, AppState>) -> Result<(), String> {
+    let mut raw = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut raw);
+    let pw = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, raw);
+    let vk = auth::setup(dir, &pw)?;
+    store_device_key(dir, &pw)?;
+    *state.vault.lock().unwrap() = Some(vk);
+    Ok(())
+}
+
 pub(crate) fn open_device_vault(
     app: &AppHandle,
     state: &State<'_, AppState>,
@@ -141,27 +194,79 @@ pub(crate) fn open_device_vault(
         if let Some(e) = denied {
             return Err(format!("无法读取系统钥匙串，请允许本应用访问后重试：{e}"));
         }
-        // 旧主口令库无法在无界面下打开。挪走后改由本机设备密钥建库，不再弹出解锁页。
-        let legacy = dir.join(format!(
-            "vault.json.legacy-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0)
-        ));
-        std::fs::rename(dir.join("vault.json"), legacy).map_err(|e| e.to_string())?;
+        // 旧库无法在无界面下打开。绝不静默重建（会作废全部本机身份）：
+        // 返回固定错误码，前端征得用户确认后再调 device_vault_reset。
+        return Err("vault_orphaned".into());
     }
-    let mut raw = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut raw);
-    let pw = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, raw);
-    let vk = auth::setup(&dir, &pw)?;
-    store_device_key(&dir, &pw)?;
-    *state.vault.lock().unwrap() = Some(vk);
-    Ok(())
+    setup_device_vault(&dir, state)
 }
 
 /// 打开应用时准备本机钥匙库，不再向用户要主口令。
 #[tauri::command]
 pub(crate) fn ensure_device(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     open_device_vault(&app, &state)
+}
+
+/// 用户确认后重置保险库：旧库及全部本机 VK 加密数据归档到 legacy 目录，再建新库。
+/// 前端必须在收到 vault_orphaned 并征得用户同意后才能调用。
+#[tauri::command]
+pub(crate) fn device_vault_reset(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    // 库还能打开（比如刚被别的命令解锁）就不是孤儿，拒绝归档健康数据。
+    if state.vault.lock().unwrap().is_some() {
+        return Err("vault_not_orphaned".into());
+    }
+    let dir = data_dir(&app)?;
+    orphan_vault_data(&dir)?;
+    setup_device_vault(&dir, &state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn orphan_moves_vault_and_vk_data() {
+        let dir = std::env::temp_dir().join(format!(
+            "nm-vault-orphan-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("identities")).unwrap();
+        std::fs::create_dir_all(dir.join("devices")).unwrap();
+        std::fs::create_dir_all(dir.join("identities.orphaned")).unwrap();
+        std::fs::write(dir.join("vault.json"), "{}").unwrap();
+        std::fs::write(dir.join("vault.json.legacy-123"), "{}").unwrap();
+        std::fs::write(dir.join("identities").join("abc.enc"), "x").unwrap();
+        std::fs::write(dir.join("devices").join("abc.dev.enc"), "x").unwrap();
+        orphan_vault_data(&dir).unwrap();
+        let legacy = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.file_name().to_string_lossy().starts_with("vault.legacy-"))
+            .expect("legacy dir created")
+            .path();
+        assert!(legacy.join("vault.json").exists());
+        assert!(legacy.join("vault.json.legacy-123").exists());
+        assert!(legacy.join("identities").join("abc.enc").exists());
+        assert!(legacy.join("devices").join("abc.dev.enc").exists());
+        assert!(!dir.join("vault.json").exists());
+        assert!(!dir.join("identities").exists());
+        assert!(!dir.join("devices").exists());
+        // 手工归档目录（identities.orphaned）不受牵连
+        assert!(dir.join("identities.orphaned").exists());
+        let audit = std::fs::read_to_string(dir.join("audit.log")).unwrap();
+        assert!(audit.contains("vault:legacy-reset"));
+        // 空跑：无可挪数据不报错、不重复记审计
+        orphan_vault_data(&dir).unwrap();
+        let audit = std::fs::read_to_string(dir.join("audit.log")).unwrap();
+        assert_eq!(audit.lines().filter(|l| l.contains("vault:legacy-reset")).count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

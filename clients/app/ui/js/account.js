@@ -34,6 +34,7 @@
     no_store: "Home Node 暂时无法保存口令",
     device_revoked: "本设备已被吊销。若这是你自己的设备，请点「换了设备？」重新授权本机。",
     not_admin_device: "本机是普通设备（没有账号私钥），请在管理设备上操作。",
+    vault_orphaned: "本机保险库无法打开，操作已取消。",
   };
 
   function map() {
@@ -97,6 +98,7 @@
     if (msg.indexOf("not_admin_device") >= 0) return "not_admin_device";
     if (msg.indexOf("域名未登记") >= 0) return "domain_unknown";
     if (msg.indexOf("域名已停用") >= 0) return "domain_disabled";
+    if (msg.indexOf("vault_orphaned") >= 0) return "vault_orphaned";
     return msg;
   }
   function explain(err) {
@@ -150,6 +152,23 @@
     return { local, domain, password: document.getElementById("acct-password").value };
   }
 
+  // 确保本机保险库可用。打不开（vault_orphaned）说明钥匙串里的设备口令与库失配：
+  // 旧库及本机身份已无法解密，须征得用户确认才重置（后端不再静默重建）。
+  async function ensureDevice() {
+    try {
+      await NM.inv("ensure_device");
+    } catch (err) {
+      if (codeOf(err) !== "vault_orphaned") throw err;
+      const yes = await ask(
+        "本机保险库无法打开（设备口令与库失配）。重置会归档旧保险库和本机身份，且无法恢复；之后需重新注册或导入备份。是否重置？",
+        "重置保险库"
+      );
+      if (!yes) throw err;
+      await NM.inv("device_vault_reset");
+      await NM.inv("ensure_device");
+    }
+  }
+
   async function startPair(kind) {
     const { local, domain, password } = accountFields();
     const box = errBox();
@@ -162,6 +181,7 @@
     const inf = infra();
     const sh = { relayUrls: inf.relayUrls, pkarrUrl: inf.pkarrUrl, dnsOrigin: inf.dnsOrigin };
     try {
+      await ensureDevice();
       if (kind === "push") {
         const r = await NM.inv("pair_request", { local, domain, password, registry: "", device: "", ...sh });
         if (r && r.have) {
@@ -222,7 +242,7 @@
     btn.disabled = true;
     btn.textContent = "导入中…";
     try {
-      await NM.inv("ensure_device");
+      await ensureDevice();
       const n = await NM.inv("import_backup", { blob, password });
       document.getElementById("acct-import-blob").value = "";
       document.getElementById("acct-import-pw").value = "";
@@ -341,6 +361,7 @@
     btn.disabled = true;
     btn.textContent = mode === "register" ? "注册中…" : mode === "reset" ? "设置中…" : "登录中…";
     try {
+      await ensureDevice();
       const inf = infra();
       const sh = { relayUrls: inf.relayUrls, pkarrUrl: inf.pkarrUrl, dnsOrigin: inf.dnsOrigin };
       if (mode === "reset") {

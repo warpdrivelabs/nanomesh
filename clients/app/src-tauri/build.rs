@@ -38,12 +38,7 @@ fn fallback_local(manifest_dir: &Path) -> Option<PathBuf> {
         candidates.push(h.join("cmx-agent/crates/cmx-agent-web/ui"));
         candidates.push(h.join("cmx-workspace/backend/cmx-agent/crates/cmx-agent-web/ui"));
     }
-    for c in candidates {
-        if ui_qualified(&c) {
-            return Some(c);
-        }
-    }
-    None
+    candidates.into_iter().find(|c| ui_qualified(c))
 }
 
 fn find_in_cargo_git_checkouts() -> Option<PathBuf> {

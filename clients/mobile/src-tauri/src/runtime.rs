@@ -89,6 +89,7 @@ pub(crate) fn run() {
             registry::naming::name_claim,
             registry::naming::name_resolve,
             registry::vault::ensure_device,
+            registry::vault::device_vault_reset,
             registry::account::account_domains,
             registry::account::account_register,
             registry::account::account_login,
