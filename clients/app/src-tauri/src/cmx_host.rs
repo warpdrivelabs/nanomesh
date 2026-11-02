@@ -25,7 +25,7 @@ use axum::routing::{get, post};
 use cmx_agent_app::{dispatch_json, AgentApp, AuthConfig, DesktopAppBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tauri::{AppHandle, State as TState};
+use tauri::{AppHandle, Manager, State as TState};
 
 use crate::state::AppState;
 
@@ -173,11 +173,10 @@ async fn dispatch_on_net(app: Arc<AgentApp>, payload: String) -> String {
         .unwrap_or_else(|e| json!({"ok":false,"error":format!("task failed: {e}")}).to_string())
 }
 
-/// ui 目录解析:配置显式 > build.rs 从 git/path 依赖定位 > 常见本地 checkout。
-/// 打包 resources 版 P1 接线。
+/// ui 目录解析:配置显式 > Tauri 资源目录 > build.rs 从 git/path 依赖定位 > 常见本地 checkout。
 /// 组件化嵌入后,合格 ui 目录须含 `embed/truemate-app.js`——旧本地 checkout(无 embed/)
 /// 会导致组件脚本 404「组件脚本加载失败」(cmxlinux 实测踩中),故逐候选校验,不合格跳过。
-fn resolve_ui_dir(cfg: &CmxCfg) -> Option<PathBuf> {
+fn resolve_ui_dir(app: &AppHandle, cfg: &CmxCfg) -> Option<PathBuf> {
     let ok = |p: &Path| p.join("index.html").is_file() && p.join("embed/truemate-app.js").is_file();
     if !cfg.ui_dir.trim().is_empty() {
         let p = expand_home(cfg.ui_dir.trim());
@@ -199,10 +198,16 @@ fn resolve_ui_dir(cfg: &CmxCfg) -> Option<PathBuf> {
             tracing::warn!(ui = %p.display(), "build.rs 定位的 ui 缺 embed/,跳过并继续找(本地 checkout 过旧?)");
         }
     }
-    // 打包 resources 版：发布脚本把选中的 checkout 同步到 src-tauri/cmx-agent-ui，
-    // tauri bundle.resources 带到 <bundle>/Contents/Resources/cmx-agent-ui（macOS）/
-    // exe 同级 cmx-agent-ui（linux/无 bundle 运行）。分发机上没有 cargo checkout，
-    // 必须先于各开发机路径命中，否则报「找不到 cmx-agent UI 资产」。
+    // 打包 resources 版：发布脚本把选中的 checkout 同步到 src-tauri/cmx-agent-ui。
+    // Linux deb/rpm 的资源目录是 /usr/lib/<productName>(不是 exe 同级),必须走 Tauri
+    // 资源目录才能命中;macOS 同路径即 Contents/Resources,Windows 为 exe 同级。
+    if let Ok(dir) = app.path().resource_dir() {
+        let p = dir.join("cmx-agent-ui");
+        if ok(&p) {
+            return Some(p);
+        }
+    }
+    // 兜底:exe 同级(Windows / 无 bundle 直接运行)。
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             for p in [dir.join("cmx-agent-ui"), dir.join("../Resources/cmx-agent-ui")] {
@@ -565,7 +570,7 @@ async fn start_inner(app: &AppHandle, state: &TState<'_, AppState>) -> Result<se
     if !cfg.enabled {
         return Err("工作台已在配置中停用(enabled=false)".into());
     }
-    let Some(ui) = resolve_ui_dir(&cfg) else {
+    let Some(ui) = resolve_ui_dir(app, &cfg) else {
         return Err(
             "找不到 cmx-agent UI 资产(配置 uiDir，或确保已拉取 gitee.com/warpdrivelabs/cmx-agent 依赖)"
                 .into(),
