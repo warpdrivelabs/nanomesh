@@ -319,10 +319,10 @@ async fn handle_gram(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Optio
             clear_inbox_on_receipt(ctx, rid, caller, orig_id);
         }
         // receiver 已是原 sender → deliver_direct 本地直投 / 离线入库 / 远端 gossip 转回。
-        // 跨节点走 track=true（outbox 持久重试直到对端 home DirectAck）——此前 fire-and-forget
-        // gossip 丢回执：消息本体可靠投递（对方能看到）但回执单程丢失 → 发送方永远单勾。
+        // 维持 track=false（fire-and-forget gossip）：回执走 outbox 重试会在对端长期离线时
+        // 积压 24h 且重复唤醒会话（重试风暴/信箱膨胀），权衡后保持轻量单程。
         let (g, c) = (gram.clone(), ctx.clone());
-        ctx.tracker.spawn(async move { deliver_direct(&g, &c, true).await; });
+        ctx.tracker.spawn(async move { deliver_direct(&g, &c, false).await; }); // Receipt 转回不入 outbox
         return Some(reply_gram(gram, GramKind::Reply, None));
     }
     let to = &gram.receiver;
