@@ -368,7 +368,12 @@
     return "";
   }
 
-  async function publish() {
+  // 发布本人资料。opts.force=true（手动编辑保存）无条件发布；
+  // auto（连接后自动回推）多设备互踩保护：同账号双设备 profile 存储各自独立，
+  // 无脑全量回推会用本设备旧资料把别处刚改的头像从目录 LWW 顶掉 → 先查目录，
+  // 目录有头像且与本地不同 = 其它端改过 → 合入本地（清过期本地原图缓存）不回推。
+  async function publish(opts) {
+    const force = !!(opts && opts.force);
     const pk = window.Identity && Identity.current();
     if (!pk || !window.NM || !NM.hasTauri || !NM.hasTauri()) return false;
     const p = get(pk);
@@ -376,6 +381,25 @@
     const links = Array.isArray(p.links) ? p.links
       : (p.links ? String(p.links).split(/[,\n]/).map((s) => s.trim()).filter(Boolean) : []);
     let avatar = (isRef(p.avatar) || isImg(p.avatar)) ? p.avatar : ""; // 发布 b3:hash（或 P0 遗留内联）
+    if (!force) {
+      try {
+        const ents = await NM.inv("directory_query", { kindPrefix: "person" });
+        const me = (ents || []).find((e) => e && e.id === pk) || null;
+        const dirAvatar = (me && me.avatar) || "";
+        if (dirAvatar && dirAvatar !== p.avatar) {
+          // 目录头像 ≠ 本地 → 其它端改过 → 合入本地（清 avatarData：旧原图不再对应当前头像）。
+          p.avatar = dirAvatar;
+          if (me.displayName) p.displayName = me.displayName;
+          if (me.statusText != null) p.statusText = me.statusText;
+          if (me.bio != null) p.bio = me.bio;
+          p.avatarData = "";
+          save(pk, p);
+          if (window.Identity && Identity.hydrateUser) Identity.hydrateUser(pk);
+          return true;
+        }
+        if (!dirAvatar && !avatar && !isImg(p.avatarData)) return true; // 两边皆空，无事可做
+      } catch (_) { /* 目录查询失败则按原样回推，行为同旧 */ }
+    }
     // 头像若为内容寻址引用：用本地原图幂等重传，确保 blob 在「当前家节点」。
     // 否则换机/重连/换节点后 blob 不在本家节点 → 他人 blob_get 拉不到 → 头像不显示，
     // 得「再改一次」才好（用户反馈的问题）；内容寻址 hash 恒定，重传不改变引用。
@@ -511,7 +535,7 @@
       save(pk, Object.assign({}, prev, { extAttrs: rows }));
       refreshAttrsTip();
       close();
-      const ok = await publish();
+      const ok = await publish({ force: true });
       if (window.toast) toast(ok ? "扩展属性已保存并发布" : "扩展属性已本地保存（连接后随资料发布）");
     };
     m.querySelector(".pf-attrs-close").onclick = close;
@@ -779,7 +803,7 @@
     if (displayName && window.Identity) Identity.setName(pk, displayName);
     if (typeof updateUserChip === "function") updateUserChip();
     document.getElementById("profile-modal").classList.remove("on");
-    const ok = await publish();
+    const ok = await publish({ force: true });
     applyPresence(); // P2：把所选状态应用为 live presence
     if (window.toast) toast(ok ? "资料已保存并发布" : "资料已本地保存（连接后自动发布）");
   }

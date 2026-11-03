@@ -262,7 +262,7 @@ async function imStart(myId) {
   if (typeof window.renderGroupsList === "function") window.renderGroupsList(); // P3：刷新群组列表
   if (typeof window.renderChannelsList === "function") window.renderChannelsList(); // P4：刷新频道列表
   if (window.Channels && Channels.primeChannels) Channels.primeChannels(); // P4：订阅已知频道 + 回填历史
-  if (window.Profile) { Profile.publish(); Profile.applyPresence(); } // 连接后发布资料 + 应用在线状态(P2)
+  if (window.Profile) { Profile.publish({ auto: true }); Profile.applyPresence(); } // 连接后同步资料（auto=多设备互踩保护）+ 应用在线状态(P2)
   // 登录就绪：把本用户扩展属性灌进 Identity.user（attrs），全局随时可读。
   if (window.Identity && Identity.hydrateUser) Identity.hydrateUser(MY_ID);
   if (window._nmPresenceTimer) clearInterval(window._nmPresenceTimer);
