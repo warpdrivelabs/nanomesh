@@ -148,6 +148,29 @@ impl Node {
         self.roam.changes.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// 活性自愈（2026-11-03）：membership 循环每收到一条 gossip 即调，刷新"最近收到"时间戳。
+    /// gossip 静默比 neighbor_count 更可靠——换网/抖动后半开连接仍计数为在线、但收不到 card。
+    pub fn note_gossip_rx(&self) {
+        self.last_gossip_rx_ms
+            .store(crate::now_ms(), std::sync::atomic::Ordering::Relaxed);
+    }
+    /// 是否自启动以来收到过任意 gossip（false=从未连上，自愈不该自重启，避免离线环境重启环）。
+    pub fn ever_received_gossip(&self) -> bool {
+        self.last_gossip_rx_ms.load(std::sync::atomic::Ordering::Relaxed) != 0
+    }
+    /// 距最近一次收到 gossip 的毫秒数；从未收到返回 None（孤点/离线，不作降级依据）。
+    pub fn gossip_silent_ms(&self) -> Option<u64> {
+        let last = self.last_gossip_rx_ms.load(std::sync::atomic::Ordering::Relaxed);
+        if last == 0 {
+            return None;
+        }
+        Some(crate::now_ms().saturating_sub(last))
+    }
+    /// 是否有"应当能收到其广播"的已知对等（种子 + 持久 PEERS）；空=孤点，不触发静默自愈。
+    pub fn has_known_peers(&self) -> bool {
+        !self.peers_list().is_empty()
+    }
+
     fn from_ep(ep: NodeEndpoint, store: Option<Arc<RedbStore>>) -> Result<Self, NodeError> {
         let dir = Arc::new(MemDirectory::new());
         let groups: Arc<DashMap<Vec<u8>, Group>> = Arc::new(DashMap::new());
@@ -250,6 +273,7 @@ impl Node {
             revoked,
             pending_fwd: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             roam: Arc::new(crate::RoamStat::default()),
+            last_gossip_rx_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             shutdown: tokio_util::sync::CancellationToken::new(),
             tracker: tokio_util::task::TaskTracker::new(),
             drain_timeout: std::time::Duration::from_secs(5),

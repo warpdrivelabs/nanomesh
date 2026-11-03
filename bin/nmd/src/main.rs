@@ -666,7 +666,8 @@ async fn async_main() -> anyhow::Result<()> {
             let node = roam_node.clone();
             tokio::spawn(async move {
                 tracing::info!("nmd 检测到本端点地址变化（疑似换网）——重新 online + 重发布地址");
-                node.notify_network_change().await; // 兜底：促使 iroh 重探测/重发布
+                // 限时：底层端点换网后 network_change() 可能同步卡死（app 同类教训），无界 await 会钉死本 spawn。
+                let _ = tokio::time::timeout(Duration::from_secs(2), node.notify_network_change()).await;
                 // 重新 online（限时，避免网络瞬断时卡住哨兵）。
                 match tokio::time::timeout(Duration::from_secs(10), node.online()).await {
                     Ok(()) => tracing::info!("nmd 换网后 online — 地址已重发布，可继续被按 id 发现"),
@@ -677,13 +678,19 @@ async fn async_main() -> anyhow::Result<()> {
             });
         });
 
-        // 换网/休眠自愈兜底：换网后 gossip 的热重 join 无法重建 iroh 到对端的旧连接(half-open/旧地址)，
-        // 实测只有【冷启动】(全新 iroh 实例)能恢复动态发现。故换网稳定后(SETTLE 内无新换网，吸收唤醒时
-        // 的连环换网)**保留身份自 exec 重启**——PID 原地用新镜像重跑、cwd 不变(identity/db 相对路径照旧)、
-        // redb 崩溃安全，等效冷启动，必然恢复。换网频繁时去抖只在网络稳定后触发一次。
+        // 换网/休眠/抖动自愈兜底：换网后 gossip 的热重 join 无法重建 iroh 到对端的旧连接(half-open/旧地址)，
+        // 实测只有【冷启动】(全新 iroh 实例)能恢复动态发现。故两种情形后(各自 SETTLE 去抖)**保留身份自 exec 重启**
+        // ——PID 原地用新镜像重跑、cwd 不变(identity/db 相对路径照旧)、redb 崩溃安全，等效冷启动，必然恢复：
+        //  ① 换网(net_epoch 变)稳定后；
+        //  ② gossip 持续静默(HARD)——覆盖"addr 未变的抖动"：同 IP 断重连/路由抖动/relay 掉线，net_epoch 不变、
+        //     neighbor_count 被半开连接盖住，membership Tier-1 的 rejoin 若治不好，就由此兜底。
+        //     三重闸收窄触发：ever_received_gossip(只重启"曾连上又变静默"的，离线启动→从不重启、不空转)
+        //     + has_known_peers(孤点不重启) + HARD 窗口。
         let reexec_node = node.clone();
         tokio::spawn(async move {
             const SETTLE: Duration = Duration::from_secs(30);
+            // gossip 静默自重启硬阈值（8×announce≈4min）：Tier-1 进程内 rejoin 的宽限期，超时仍静默=只能冷启动。
+            const HARD_SILENCE: Duration = Duration::from_secs(240);
             let mut last_epoch = reexec_node.net_epoch();
             let mut pending_since: Option<std::time::Instant> = None;
             loop {
@@ -694,11 +701,21 @@ async fn async_main() -> anyhow::Result<()> {
                     pending_since = Some(std::time::Instant::now()); // 新换网 → 重置去抖计时
                     continue;
                 }
-                let Some(t) = pending_since else { continue };
-                if t.elapsed() < SETTLE {
-                    continue;
-                }
-                tracing::warn!("换网已稳定（{:?} 无新变化）→ 保留身份自重启 nmd 以恢复动态发现（等效冷启动）", SETTLE);
+                // 触发原因：① 换网 settle；② gossip 持续静默（addr 未变的抖动）。
+                let reason: Option<&str> = if pending_since.is_some_and(|t| t.elapsed() >= SETTLE) {
+                    Some("换网已稳定（30s 无新变化）")
+                } else if reexec_node.ever_received_gossip()
+                    && reexec_node.has_known_peers()
+                    && reexec_node
+                        .gossip_silent_ms()
+                        .is_some_and(|ms| ms >= HARD_SILENCE.as_millis() as u64)
+                {
+                    Some("gossip 持续静默（疑似抖动后半开连接、进程内 rejoin 未恢复）")
+                } else {
+                    None
+                };
+                let Some(reason) = reason else { continue };
+                tracing::warn!("{reason} → 保留身份自重启 nmd 以恢复动态发现（等效冷启动）");
                 let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("nmd"));
                 #[cfg(unix)]
                 {

@@ -400,16 +400,27 @@ impl Node {
             // 0-邻居自愈重注入的退避(2s→30s,收到消息即重置)：防正反馈冲垮 mesh（镜像火管）。
             let mut rejoin_backoff = std::time::Duration::from_secs(2);
             let mut last_rejoin: Option<tokio::time::Instant> = None;
+            // 活性自愈(2026-11-03)：gossip 静默时长是比 neighbor_count 更可靠的断连信号——换网/抖动后
+            // 和种子的连接常半开(计数≠0)、却收不到任何 card。静默超阈即视为降级，走与 0-邻居同一套自愈。
+            // STALE=3×announce：活 mesh 里每节点每 announce 重播 card，3 轮收不到=真断连。
+            let stale = announce_iv.saturating_mul(3).max(std::time::Duration::from_secs(90));
+            let mut last_rx = tokio::time::Instant::now();
+            let mut degraded_logged = false; // 可观测：降级→恢复 配对日志（金丝雀验证）
             loop {
                 let ep = self.net_epoch();
                 if ep != seen_epoch {
                     seen_epoch = ep;
                     tracing::info!("membership 换网(epoch 变) → 强制重 join gossip 以恢复动态发现");
-                    self.notify_network_change().await;
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        self.notify_network_change(),
+                    )
+                    .await;
                     if let Ok(t) = self.join_channel(channel, self.gossip_bootstrap()).await {
                         topic = t;
                         let _ = topic.publish(self.membership_card(&cfg.card)).await; // 立即广播本节点,加速被重新发现
                     }
+                    last_rx = tokio::time::Instant::now(); // 给新 join 一个 STALE 窗口,别立刻又判静默
                 }
                 if last_announce.elapsed() >= announce_iv {
                     if let Err(e) = topic.publish(self.membership_card(&cfg.card)).await {
@@ -425,6 +436,12 @@ impl Node {
                         Ok(Some(msg)) => {
                             rejoin_backoff = std::time::Duration::from_secs(2);
                             last_rejoin = None;
+                            last_rx = tokio::time::Instant::now();
+                            if degraded_logged {
+                                tracing::info!("membership 自愈成功（重新收到 gossip card）");
+                                degraded_logged = false;
+                            }
+                            self.note_gossip_rx(); // 喂 Tier-2 静默自重启看门狗
                             self.on_membership_msg(&msg.content, &cfg.federation)
                         }
                         Ok(None) => {
@@ -437,18 +454,39 @@ impl Node {
                             }
                         }
                         Err(_) => {
-                            // 超时(1s 无消息)：若悄悄掉到 0 邻居(休眠唤醒/换网后连接全死但订阅流未关闭,
-                            // 不会走 Ok(None) 重 join)→ 用【收敛】bootstrap 重连,否则动态发现永久失联,
-                            // 只剩手动种子,其他节点再也学不到。镜像 presence 的自愈。
-                            if topic.neighbor_count() == 0 {
+                            // 超时(1s 无消息)：两类降级都要自愈——
+                            // ① neighbor_count==0（休眠唤醒/换网后连接全死但订阅流未关闭，不会走 Ok(None)）；
+                            // ② 半开假活：neighbor_count≠0（和种子还连着）但持续静默超 STALE——抖动后的
+                            //    半开连接 neighbor_count 盖不住，静默才是真信号。有已知对等才判（排除孤点）。
+                            let degraded = topic.neighbor_count() == 0
+                                || (self.has_known_peers() && last_rx.elapsed() >= stale);
+                            if degraded {
+                                // 可观测：区分"0 邻居"与"半开静默"两类降级（金丝雀验证换网自愈用）。冷却窗内只记一次。
+                                if last_net_nudge.is_none_or(|t| tokio::time::Instant::now().duration_since(t).as_secs() >= 30) {
+                                    if topic.neighbor_count() == 0 {
+                                        tracing::info!("membership 降级(0 邻居) → notify+rejoin 自愈");
+                                    } else {
+                                        tracing::info!(
+                                            silent_s = last_rx.elapsed().as_secs(),
+                                            neighbors = topic.neighbor_count(),
+                                            "membership 降级(半开静默, neighbor≠0 但收不到 card) → notify+rejoin 自愈"
+                                        );
+                                    }
+                                    degraded_logged = true;
+                                }
                                 // 同 IP 唤醒不触发换网回调 → iroh 可能还抱着死的 relay 连接。
                                 // 带冷却地 nudge 它重探测/重 home relay,让后续 rejoin 真能连上。
                                 let now = tokio::time::Instant::now();
                                 if last_net_nudge.is_none_or(|t| now.duration_since(t).as_secs() >= 30) {
-                                    self.notify_network_change().await;
+                                    // 限时：底层端点若同步卡死，notify 无界 await 会钉死本循环（app 换网同类教训）。
+                                    let _ = tokio::time::timeout(
+                                        std::time::Duration::from_secs(2),
+                                        self.notify_network_change(),
+                                    )
+                                    .await;
                                     last_net_nudge = Some(now);
                                 }
-                                // 退避(2s→30s)重注入:斩断「0 邻居→每 1s 重灌全部 peers」正反馈;邻居恢复即重置。
+                                // 退避(2s→30s)重注入:斩断「降级→每 1s 重灌全部 peers」正反馈;邻居/收播恢复即重置。
                                 if last_rejoin.is_none_or(|t| now.duration_since(t) >= rejoin_backoff) {
                                     let _ = topic.rejoin(self.gossip_bootstrap()).await;
                                     last_rejoin = Some(now);
