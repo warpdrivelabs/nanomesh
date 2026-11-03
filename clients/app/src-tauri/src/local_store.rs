@@ -591,7 +591,14 @@ pub(crate) fn chat_mark(
             rusqlite::params![status, conv, gram_id, me],
         )
     }
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| {
+        tracing::error!("chat_mark 执行失败 conv={conv} id={id} gramId={gram_id} status={status}: {e}");
+        e.to_string()
+    })?;
+    tracing::info!(
+        "chat_mark conv={:.10} id={:.14} gramId={gram_id} status={status} me={:.10} → 更新 {n} 行",
+        conv, id, me
+    );
     Ok(n > 0)
 }
 

@@ -228,15 +228,23 @@ function handleReceipt(ev) {
   const conv = ev.from, g = ev.ref;
   if (!conv || !g) return;
   if (typeof VIEW !== "undefined" && VIEW.id === conv) {
-    const row = VIEW.rows.find((r) => r.from === MY_ID && (r.gramId === g || (r.id || "").startsWith("l")));
-    if (row && (row.status || 0) < 2) {
-      // 行还没写 gramId（单勾 ack 未回来/未落库）时记下 ref，切走再回也匹配。
+    // 精确匹配 gramId；兜底仅限「尚未写 gramId 的未确认乐观行」——
+    // 不能放宽到所有 l* 行，否则 gramId 每连接重排时会升错旧消息。
+    const row = VIEW.rows.find((r) => r.from === MY_ID && r.gramId === g)
+      || VIEW.rows.find((r) => r.from === MY_ID && !r.gramId && (r.id || "").startsWith("l") && (r.status || 0) !== -1);
+    if (row) {
       if (!row.gramId) row.gramId = g;
-      row.status = 2;
-      if (window.paintVirtual) paintVirtual(false);
+      if ((row.status || 0) < 2) {
+        row.status = 2;
+        if (window.paintVirtual) paintVirtual(false);
+      }
     }
   }
-  if (window.ChatLog && ChatLog.mark) ChatLog.mark(conv, { gramId: g }, 2);
+  if (window.ChatLog && ChatLog.mark) {
+    ChatLog.mark(conv, { gramId: g }, 2).then((ok) => {
+      if (!ok && window.NM) console.warn("[receipt] 双勾落库未命中", conv.slice(0, 10), "gramId=", g);
+    });
+  }
 }
 
 function onCoreEvent(ev) {

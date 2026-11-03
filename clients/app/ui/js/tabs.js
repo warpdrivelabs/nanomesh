@@ -268,6 +268,16 @@
   }
 
   function closeAll() { TABS = []; ACTIVE = null; renderStrip(); showEmpty(); syncSideLists(); }
+  // 从全区标签(智能体工作台/iframe)退回会话主区：激活最近一个聊天标签；没有则回介绍页。
+  // showPanel 切左侧面板不走 activate，主区若还停在全区页，靠这里显式退场(nm-tab-changed 由 activate/syncSideLists 派发)。
+  function backToChat() {
+    const chats = TABS.filter((t) => t.kind === "chat");
+    if (chats.length) { activate(chats[chats.length - 1].key); return; }
+    ACTIVE = null;
+    renderStrip();
+    showEmpty();
+    syncSideLists();
+  }
   // 某 tab 对应的目标被删除时移除该 tab（不重绘其它）。
   function remove(key) { const wasActive = ACTIVE === key; if (wasActive) return close(key); const i = TABS.findIndex((t) => t.key === key); if (i >= 0) { TABS.splice(i, 1); renderStrip(); } }
   function retitle(key, title, ico) { const t = find(key); if (t) { if (title != null) t.title = title; if (ico != null) t.ico = ico; renderStrip(); } }
@@ -281,5 +291,5 @@
   }
 
   showEmpty();
-  window.Tabs = { open, activate, close, closeAll, remove, retitle, showEmpty, paintBadges, active: () => ACTIVE, has: (k) => !!find(k) };
+  window.Tabs = { open, activate, close, closeAll, remove, retitle, showEmpty, paintBadges, backToChat, active: () => ACTIVE, has: (k) => !!find(k) };
 })();

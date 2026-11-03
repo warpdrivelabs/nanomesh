@@ -113,9 +113,12 @@ pub(crate) async fn finish_session(
             // (a) 转回的回执(kind=Receipt) → 发独立 receipt 事件给前端，升本人气泡为双勾。
             if matches!(gram.kind(), nm_proto::GramKind::Receipt) {
                 if let Some(refid) = gram.ref_gram_id {
+                    tracing::info!(ref = refid, from = %hex(&gram.sender), "送达回执到达，已派发 receipt 事件");
                     let _ = apph.emit("core://event", json!({
                         "type": "receipt", "ref": refid, "from": hex(&gram.sender), "ts": gram.timestamp_ms
                     }));
+                } else {
+                    tracing::debug!(from = %hex(&gram.sender), "回执无 ref_gram_id，忽略");
                 }
                 continue;
             }

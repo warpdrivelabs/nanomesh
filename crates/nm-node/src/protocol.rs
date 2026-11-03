@@ -319,8 +319,10 @@ async fn handle_gram(gram: &Gram, ctx: &Ctx, caller: &[u8], rid: &[u8]) -> Optio
             clear_inbox_on_receipt(ctx, rid, caller, orig_id);
         }
         // receiver 已是原 sender → deliver_direct 本地直投 / 离线入库 / 远端 gossip 转回。
+        // 跨节点走 track=true（outbox 持久重试直到对端 home DirectAck）——此前 fire-and-forget
+        // gossip 丢回执：消息本体可靠投递（对方能看到）但回执单程丢失 → 发送方永远单勾。
         let (g, c) = (gram.clone(), ctx.clone());
-        ctx.tracker.spawn(async move { deliver_direct(&g, &c, false).await; }); // Receipt 转回不入 outbox
+        ctx.tracker.spawn(async move { deliver_direct(&g, &c, true).await; });
         return Some(reply_gram(gram, GramKind::Reply, None));
     }
     let to = &gram.receiver;

@@ -21,6 +21,12 @@ function showPanel(name) {
   // 智能体工作台:无左侧栏目,整个工作区交给 cmx-agent(cmx_agent.js 全权接管显隐与高亮)。
   if (name === "cmx") { if (typeof window.openCmxWorkbench === "function") window.openCmxWorkbench(); return; }
   document.body.classList.remove("cmx-full");
+  // 从全区标签(智能体工作台/iframe)切回面板:主区仍被全区页占着(标签未切,nm-tab-changed 不触发,
+  // 舞台不会隐藏)→ 显式退回最近聊天标签或介绍页,让右侧显示聊天内容。
+  if (window.Tabs && typeof Tabs.backToChat === "function") {
+    const k = Tabs.active();
+    if (typeof k === "string" && (k.startsWith("cmx:") || k.startsWith("ext:"))) Tabs.backToChat();
+  }
   document.querySelectorAll(".activitybar .act").forEach((a) => a.classList.toggle("active", a.dataset.panel === name));
   document.querySelectorAll("aside .panel").forEach((p) => p.classList.toggle("on", p.id === "panel-" + name));
   if (name === "models" && typeof window.renderModels === "function") window.renderModels();

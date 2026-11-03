@@ -202,6 +202,8 @@ window.applyReadMarker = applyReadMarker;
 
 async function imStart(myId) {
   MY_ID = myId || "";
+  window.MY_ID = MY_ID; // 暴露给无模块作用域的消费者(chatlog.js 双勾落库按 from=me 过滤)
+
   // 解锁后重新加载本机资料：启动时 routeStart 那次 Profile.load() 在解锁前跑（profile_load 需 vk），
   // 会失败并清空 MEM；不在此重载，则 ownAvatar/updateUserChip 读到空 → 左下角头像按钮无图，
   // 且随后的 Profile.publish() 会用空资料覆盖节点上的昵称/头像。此处已连接=已解锁，load 必成。
@@ -337,7 +339,7 @@ window.refreshPresence = refreshPresence;
 async function imDisconnect() {
   if (window.ChatLog) ChatLog.setUnread(UNREAD);
   try { await NM.inv("disconnect"); } catch (_) {}
-  MY_ID = ""; CONTACTS = []; ADDED = []; PRESENCE = {}; CONVOS = {}; UNREAD = {}; ACTIVE = null; DETAIL_ID = null;
+  MY_ID = ""; window.MY_ID = ""; CONTACTS = []; ADDED = []; PRESENCE = {}; CONVOS = {}; UNREAD = {}; ACTIVE = null; DETAIL_ID = null;
   if (window.Identity && Identity.clearUser) Identity.clearUser();
   window.CURRENT_SVC = null;
   paintActUnread();
