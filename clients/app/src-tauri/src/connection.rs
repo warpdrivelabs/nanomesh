@@ -14,7 +14,8 @@ use crate::{
 /// 以及 Drop 未 close 的 `Endpoint dropped without calling Endpoint::close` 噪声。
 /// **不可**用于「复用同一端点换 session」的重连路径（那里只应 `session.disconnect`，勿 close 端点）。
 pub(crate) async fn teardown_conn(c: Conn) {
-    c.session.disconnect().await;
+    // disconnect 是对端点发 Logout——端点若已卡死(换网假死)会永挂,须与 close 一样限时。
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), c.session.disconnect()).await;
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), c._client.close()).await;
 }
 
@@ -318,14 +319,24 @@ pub(crate) async fn roam_reconnect_driver(
                 .as_ref()
                 .map(|c| c.conn_gen)
                 .unwrap_or(cur_gen);
-            match reconnect(&app, &state, conn_gen).await {
-                Ok(()) => {
+            match tokio::time::timeout(RECONNECT_WATCHDOG, reconnect(&app, &state, conn_gen)).await {
+                Ok(Ok(())) => {
                     tracing::info!("roam: 自愈重连成功");
                     break;
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::warn!(
                         "roam: 自愈重连失败：{e}；{}s 后重试",
+                        backoff.as_secs()
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(std::time::Duration::from_secs(30));
+                }
+                Err(_) => {
+                    // 看门狗兜底：reconnect 内部挂死（无界 await/锁链）→ 丢弃该 future 解锁，退避重试。
+                    tracing::warn!(
+                        "roam: 重连 {}s 无响应（底层挂死），丢弃本轮；{}s 后重试",
+                        RECONNECT_WATCHDOG.as_secs(),
                         backoff.as_secs()
                     );
                     tokio::time::sleep(backoff).await;
@@ -359,7 +370,9 @@ pub(crate) async fn connect(
         return Err("请先选择用户身份".into());
     }
     // 与重连单飞共用锁：避免并发 connect / reconnect 同时 bind 同一设备密钥。
+    tracing::debug!("connect: 等单飞锁");
     let _guard = state.reconnect_lock.lock().await;
+    tracing::debug!("connect: 已获单飞锁，拆旧端点");
     // 先拆掉已有端点再 dial——否则新 Endpoint 同 id 上 relay 会互踢旧连接并刷 Endpoint dropped。
     clear_conn(&state).await;
     // 存 AppHandle（供重连 helper 在任意位置取），缓存入参供待机唤醒后自动重连。
@@ -373,10 +386,20 @@ pub(crate) async fn connect(
         pkarr_url: pkarr_url.clone(),
         dns_origin: dns_origin.clone(),
     };
-    let (client, session) = devices::dial_account(
-        &app, &vk, user, &mode, &node, relay_urls, pkarr_url, dns_origin,
+    // 限时拨号：connect 持单飞锁，dial 无界挂死会把所有 reconnect 钉死在锁上（换网实测形态）。
+    let (client, session) = match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        devices::dial_account(&app, &vk, user, &mode, &node, relay_urls, pkarr_url, dns_origin),
     )
-    .await?;
+    .await
+    {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            tracing::warn!("connect: 拨号 30s 无响应，放弃（释放单飞锁）");
+            return Err("连接超时(30s)，请检查网络后重试".into());
+        }
+    };
     let out = finish_session(&app, &state, client, session, &display_name, true, true, 0).await?;
     *state.last_connect.lock().await = Some(args);
     Ok(out)
@@ -385,6 +408,10 @@ pub(crate) async fn connect(
 /// 发送短超时：待机唤醒后 QUIC 假死时，send 会一直等到底层 idle timeout(10s) 才报错；
 /// 用 5s 超时提前判死 → 触发重连，而非让用户干等。
 const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// reconnect 整体看门狗：软(2s notify+12s reonline)+硬(清端点~4s+0.8s+20s dial)最坏约 39s，取 45s。
+/// 超时=内部某无界 await 挂死（iroh actor 卡死/锁链）→ 调用方丢弃该 future（tokio Mutex guard
+/// 随 drop 释放，解开单飞锁链），退避后重试，下一轮走硬重绑换新端点。
+const RECONNECT_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// 判断一次失败是否意味着"连接死了、该重连"（而非业务错误如目标非法/节点拒绝）。
 fn looks_dead(session: &Session, err: &nm_client::ClientError) -> bool {
@@ -416,13 +443,24 @@ where
         _ => {} // 超时 或 连接死 → 重连
     }
 
-    // 重连（单飞 + gen 判重），再用新 session 重发一次。
-    if let Err(e) = reconnect(app, state, cur_gen).await {
-        // 这次重连没成——触发后台自愈驱动接管（退避重试直到连上），别让用户这条失败后就无人重连。
-        if let Some(tx) = state.roam_tx.get() {
-            let _ = tx.send(());
+    // 重连（单飞 + gen 判重 + 看门狗），再用新 session 重发一次。
+    match tokio::time::timeout(RECONNECT_WATCHDOG, reconnect(app, state, cur_gen)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            // 这次重连没成——触发后台自愈驱动接管（退避重试直到连上），别让用户这条失败后就无人重连。
+            if let Some(tx) = state.roam_tx.get() {
+                let _ = tx.send(());
+            }
+            return Err(e);
         }
-        return Err(e);
+        Err(_) => {
+            // 挂死兜底：丢弃该 future（释放锁链），转后台自愈接管。
+            tracing::warn!("send: 重连 {}s 无响应（底层挂死），转后台自愈", RECONNECT_WATCHDOG.as_secs());
+            if let Some(tx) = state.roam_tx.get() {
+                let _ = tx.send(());
+            }
+            return Err("重连无响应，已转后台自愈，请稍候再试".into());
+        }
     }
     let s2 = session_of(state).await?;
     match tokio::time::timeout(SEND_TIMEOUT, op(s2)).await {
@@ -446,7 +484,9 @@ pub(crate) async fn reconnect(
     state: &State<'_, AppState>,
     failed_gen: u64,
 ) -> Result<(), String> {
+    tracing::debug!(failed_gen, "reconnect: 入口，等单飞锁");
     let _guard = state.reconnect_lock.lock().await; // 单飞守卫
+    tracing::debug!("reconnect: 已获单飞锁");
 
     // 别人已经重连过了（gen 前进）→ 直接复用，不再拨号。
     {
@@ -457,6 +497,7 @@ pub(crate) async fn reconnect(
             }
         }
     }
+    tracing::debug!("reconnect: 世代检查通过，取重连上下文");
 
     let args = state
         .last_connect
@@ -465,6 +506,7 @@ pub(crate) async fn reconnect(
         .clone()
         .ok_or("无重连上下文（尚未成功连接过）")?;
     let vk = vk_of(state)?; // 库已锁 → 直接失败，提示解锁
+    tracing::debug!("reconnect: 上下文/vault 就绪");
 
     let _ = app.emit("core://event", json!({ "type": "reconnecting" }));
 
@@ -475,51 +517,19 @@ pub(crate) async fn reconnect(
     };
     let home_hex = hex(&home_id);
 
-    // —— 软重连：复用既有 Endpoint（对齐 serve_with_reconnect；避免无谓同 id 互踢）——
-    if let Some(client) = state.conn.lock().await.as_ref().map(|c| c._client.clone()) {
-        client.notify_network_change().await;
-        let dialed = tokio::time::timeout(
-            std::time::Duration::from_secs(12),
-            devices::reonline_account(app, &client, &vk, &args.user, home_id),
-        )
-        .await;
-        match dialed {
-            Ok(Ok(session)) => {
-                let old = state.conn.lock().await.take();
-                if let Some(old) = &old {
-                    session.seed_corr(old.session.current_corr());
-                }
-                let new_gen = failed_gen.wrapping_add(1);
-                finish_session(
-                    app,
-                    state,
-                    client,
-                    session,
-                    &args.display_name,
-                    false,
-                    false, // 软重连：端点未换，勿再挂 addr-watch
-                    new_gen,
-                )
-                .await?;
-                if let Some(old) = old {
-                    old.session.disconnect().await;
-                }
-                let _ = app.emit("core://event", json!({ "type": "reconnected" }));
-                return Ok(());
-            }
-            Ok(Err(e)) => {
-                tracing::warn!("roam: 软重连失败（{e}），升级为重建 Endpoint");
-            }
-            Err(_) => {
-                tracing::warn!("roam: 软重连超时（12s），升级为重建 Endpoint");
-            }
-        }
-    } else {
-        tracing::warn!("roam: 无既有 Endpoint，直接硬重绑");
+    // —— 换网硬重绑（唯一路径）——
+    // 不复用旧端点、不在其上做任何 await。根因（2026-11-03 实测+日志定位）：换网后 iroh 旧端点的
+    // `network_change()`/部分操作在 `poll()` 里**同步阻塞线程**，而 `tokio::time::timeout` 只能取消
+    // “异步 pending”的 future、对“同步阻塞的 poll”无能为力 → 2s/12s 超时全部失效、45s 看门狗每轮空转、
+    // 每轮还永久吃掉一个 worker 线程（换几次网整个进程假死，正是本次现象）。
+    // 对策：直接取走旧 Conn 并 **drop**（iroh Drop 仅 abort 后台任务，非阻塞；放弃优雅 close/Logout，
+    // 那两步正是会同步卡死的调用），再用**全新端点** dial —— 等价“进程内重启端点”，正是手动重启能恢复的原因。
+    tracing::debug!("reconnect: 丢弃旧端点（非阻塞 drop，不 close/不 Logout）");
+    {
+        let old = state.conn.lock().await.take();
+        drop(old); // 关键：不 await 旧端点任何方法，避免同步阻塞钉死线程
     }
-
-    // —— 硬重绑：优雅关闭旧 Endpoint，再 dial_account 新建（同种子须等旧端点从 relay 摘除）——
-    clear_conn(state).await;
+    // 等旧端点在 relay 上的注册自然过期，避免新端点同 id 被踢（旧端点已 drop，无并发写）。
     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
 
     let mode = if args.mode.trim().is_empty() {
@@ -532,6 +542,7 @@ pub(crate) async fn reconnect(
         args.mode.clone()
     };
 
+    tracing::debug!("reconnect: dial_account（全新端点，id-only 经 pkarr 解析）");
     let dialed = tokio::time::timeout(
         std::time::Duration::from_secs(20),
         devices::dial_account(
@@ -552,6 +563,7 @@ pub(crate) async fn reconnect(
         Ok(Err(e)) => return Err(format!("硬重绑失败：{e}")),
         Err(_) => return Err("硬重绑超时（20s）".into()),
     };
+    tracing::debug!("reconnect: dial 成功，finish_session");
 
     let new_gen = failed_gen.wrapping_add(1);
     finish_session(

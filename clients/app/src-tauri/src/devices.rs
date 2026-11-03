@@ -222,6 +222,9 @@ pub async fn dial_account(
 /// 端点已绑好 relay/发现、身份密钥也随端点不变，故只按 **node id**（`home_id`，调用方已收敛为公钥）
 /// 重新握手即可，无需再传 infra 配置。
 /// 若 Endpoint/pkarr 已卡死，由 `connection::reconnect` 在软重连失败后升级为硬重绑（`clear_conn` + [`dial_account`]）。
+// 2026-11-03：换网自愈已改为"丢弃旧端点 + 全新 dial"（旧端点 network_change 会同步卡死，软重连不可用）。
+// 本 helper 暂保留（手动/未来端点复用场景可能再用），当前无调用方。
+#[allow(dead_code)]
 pub async fn reonline_account(
     app: &AppHandle,
     client: &Client,
