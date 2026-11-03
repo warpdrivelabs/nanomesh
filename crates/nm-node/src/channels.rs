@@ -152,6 +152,7 @@ fn gossip_bootstrap(ctx: &Ctx) -> Vec<[u8; 32]> {
         .peers
         .iter()
         .filter_map(|e| <[u8; 32]>::try_from(e.key().as_slice()).ok())
+        .filter(|id| *id != ctx.node_id)
         .collect();
     let k = crate::GOSSIP_BOOTSTRAP_K;
     if all.len() > k {

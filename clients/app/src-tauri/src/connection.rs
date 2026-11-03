@@ -295,11 +295,12 @@ pub(crate) async fn roam_reconnect_driver(
         let _ = app.emit("core://event", json!({ "type": "roaming" }));
 
         // 无限退避自愈：反复重拨直到连上 / 用户断开 / 锁库。
+        // hard rebind 中途会短暂把 conn 置 None；以 last_connect 区分「用户主动断开」与「重建中」。
         let mut backoff = std::time::Duration::from_secs(2);
         loop {
-            // 终止：用户已断开连接（disconnect/lock 把 conn 置 None）。
-            if state.conn.lock().await.is_none() {
-                tracing::info!("roam: 连接已被清除（断开/切换账号），停止自愈");
+            // 终止：用户主动 disconnect/lock（二者都会清 last_connect）。
+            if state.last_connect.lock().await.is_none() {
+                tracing::info!("roam: 已断开（无重连上下文），停止自愈");
                 break;
             }
             // 终止：库已上锁——重连需 vault 现解身份，锁库下反复试无意义。
@@ -308,7 +309,16 @@ pub(crate) async fn roam_reconnect_driver(
                 break;
             }
             // 用进入自愈时的世代触发重连；若期间已被发送路径连上（gen 前进），reconnect 内判重即 Ok。
-            match reconnect(&app, &state, cur_gen).await {
+            // hard rebind 成功后 gen 已变；下一轮若再失败，用最新 gen。
+            // 注意：Rust 2024 里 `gen` 为保留字，变量名用 `conn_gen`。
+            let conn_gen = state
+                .conn
+                .lock()
+                .await
+                .as_ref()
+                .map(|c| c.conn_gen)
+                .unwrap_or(cur_gen);
+            match reconnect(&app, &state, conn_gen).await {
                 Ok(()) => {
                     tracing::info!("roam: 自愈重连成功");
                     break;
@@ -356,6 +366,7 @@ pub(crate) async fn connect(
     let _ = state.app_handle.set(app.clone());
     let args = ConnectArgs {
         user: user.to_string(),
+        mode: mode.clone(),
         node: node.clone(),
         display_name: display_name.clone(),
         relay_urls: relay_urls.clone(),
@@ -426,11 +437,10 @@ where
     }
 }
 
-/// 自动重连：**复用既有 iroh 端点**，用缓存的 connect 入参 + vault 身份在其上重做 online 握手，
-/// 替换当前死 session（不重绑端点——避免同一身份新端点在 relay 上与旧端点同 id 互踢、刷
-/// `Another endpoint connected with the same endpoint id`）。
-/// 单飞——并发发送同时触发时只有一个真正重连，其余发现 gen 已前进即复用。
-/// 先握手成功再换手：失败时旧（死）Conn 原样保留，不清成 None（防自愈循环误判用户已断开）。
+/// 自动重连：先**软重连**（复用 Endpoint + reonline），失败再**硬重绑**（关闭 Endpoint 后按
+/// `last_connect` 全新 dial）——换网后 Endpoint/pkarr 卡死时，仅 notify_network_change 不够，
+/// 必须进程内重建端点，否则只能靠重启 Tauri。
+/// 单飞——并发触发时只有一个真正重连，其余发现 gen 已前进即复用。
 pub(crate) async fn reconnect(
     app: &AppHandle,
     state: &State<'_, AppState>,
@@ -458,48 +468,91 @@ pub(crate) async fn reconnect(
 
     let _ = app.emit("core://event", json!({ "type": "reconnecting" }));
 
-    // 换网重连：home node 一律**按公钥 id** 重新握手（经发现服务 pkarr/DNS 重解析当前地址）。
-    // 缓存的完整地址换网后必失效，直接用它会把连接导向死地址；故收敛成纯公钥 id。
+    // home 一律按公钥 id 发现（缓存的完整地址换网后失效）。
     let home_id = match nm_transport::addr_from_string(args.node.trim()) {
         Ok(a) => *a.id.as_bytes(),
         Err(_) => parse_id(args.node.trim())?,
     };
+    let home_hex = hex(&home_id);
 
-    // 端点复用（而非重绑）：取现有连接的 client——克隆=共享同一 iroh 端点（同 NodeId / 同中继连接），
-    // 在其上重做 online 换 session。为何不 `dial_account` 新建端点：同一身份新建端点会与旧端点在
-    // relay 上同 id 互踢（`Another endpoint connected with the same endpoint id` + 每次刷
-    // `Endpoint dropped without close` 噪声），且更重。对齐服务端 serve_with_reconnect 的端点复用范式。
-    // 既有连接必存在（自愈循环上游已判 conn 非空，且本函数持单飞锁）；锁只在取 client 时短持、立即释放
-    // （不可跨 reonline 的 await 持 conn 锁——finish_session/take 也要锁）。
-    let client = {
-        let g = state.conn.lock().await;
-        g.as_ref().map(|c| c._client.clone())
+    // —— 软重连：复用既有 Endpoint（对齐 serve_with_reconnect；避免无谓同 id 互踢）——
+    if let Some(client) = state.conn.lock().await.as_ref().map(|c| c._client.clone()) {
+        client.notify_network_change().await;
+        let dialed = tokio::time::timeout(
+            std::time::Duration::from_secs(12),
+            devices::reonline_account(app, &client, &vk, &args.user, home_id),
+        )
+        .await;
+        match dialed {
+            Ok(Ok(session)) => {
+                let old = state.conn.lock().await.take();
+                if let Some(old) = &old {
+                    session.seed_corr(old.session.current_corr());
+                }
+                let new_gen = failed_gen.wrapping_add(1);
+                finish_session(
+                    app,
+                    state,
+                    client,
+                    session,
+                    &args.display_name,
+                    false,
+                    false, // 软重连：端点未换，勿再挂 addr-watch
+                    new_gen,
+                )
+                .await?;
+                if let Some(old) = old {
+                    old.session.disconnect().await;
+                }
+                let _ = app.emit("core://event", json!({ "type": "reconnected" }));
+                return Ok(());
+            }
+            Ok(Err(e)) => {
+                tracing::warn!("roam: 软重连失败（{e}），升级为重建 Endpoint");
+            }
+            Err(_) => {
+                tracing::warn!("roam: 软重连超时（12s），升级为重建 Endpoint");
+            }
+        }
+    } else {
+        tracing::warn!("roam: 无既有 Endpoint，直接硬重绑");
     }
-    .ok_or("无既有连接可复用（已断开）")?;
-    // 先通知底层「网络可能已变」→ 重 STUN + 重发布地址（桌面 iroh 多能自检，调用无害；移动端必需）。
-    client.notify_network_change().await;
 
-    // 先在既有端点上拨通新 session（12s 兜底）再换手；期间**不清空** state.conn
-    // （否则自愈循环会把 conn=None 误判为「用户已断开」而停止自愈）。
-    let dialed = tokio::time::timeout(
-        std::time::Duration::from_secs(12),
-        devices::reonline_account(app, &client, &vk, &args.user, home_id),
-    )
-    .await;
-    let session = match dialed {
-        Ok(Ok(s)) => s,
-        // 失败不发终态 reconnect_failed：自愈驱动会继续退避重试，发送路径会返回错误给用户。
-        Ok(Err(e)) => return Err(e),
-        Err(_) => return Err("重连超时（12s）".into()),
+    // —— 硬重绑：优雅关闭旧 Endpoint，再 dial_account 新建（同种子须等旧端点从 relay 摘除）——
+    clear_conn(state).await;
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+
+    let mode = if args.mode.trim().is_empty() {
+        if args.pkarr_url.as_ref().is_some_and(|s| !s.trim().is_empty()) {
+            "selfhost".to_string()
+        } else {
+            "nat".to_string()
+        }
+    } else {
+        args.mode.clone()
     };
 
-    // gram_id 续号：从旧 session 高水位接着走，避免被节点 SeenGrams 误去重（群/跨节点消息静默丢失）。
-    let old = state.conn.lock().await.take();
-    if let Some(old) = &old {
-        session.seed_corr(old.session.current_corr());
-    }
+    let dialed = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        devices::dial_account(
+            app,
+            &vk,
+            &args.user,
+            &mode,
+            &home_hex, // id-only：经 pkarr 解析当前可达地址
+            args.relay_urls.clone(),
+            args.pkarr_url.clone(),
+            args.dns_origin.clone(),
+        ),
+    )
+    .await;
 
-    // 装配新 session（重连跳过 im_ready 门控，立即放水）；gen+1。
+    let (client, session) = match dialed {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => return Err(format!("硬重绑失败：{e}")),
+        Err(_) => return Err("硬重绑超时（20s）".into()),
+    };
+
     let new_gen = failed_gen.wrapping_add(1);
     finish_session(
         app,
@@ -508,16 +561,10 @@ pub(crate) async fn reconnect(
         session,
         &args.display_name,
         false,
-        false,
+        true, // 新 Endpoint：重新挂换网哨兵
         new_gen,
     )
     .await?;
-
-    // 关旧连接 → 旧收流任务退出 → 旧 inbox 发送端 drop → 旧事件循环 recv()=None 退出，不双投。
-    // disconnect(&self) 自带 800ms 超时，死连接也不会挂住。
-    if let Some(old) = old {
-        old.session.disconnect().await;
-    }
 
     let _ = app.emit("core://event", json!({ "type": "reconnected" }));
     Ok(())

@@ -215,12 +215,13 @@ pub async fn dial_account(
     out
 }
 
-/// 换网/假死自愈**复用既有端点**重做 online 握手，拿一条到 home node 的新 session——
+/// 换网/假死自愈的**软重连**：复用既有端点重做 online 握手，拿一条到 home node 的新 session。
 /// 不像 [`dial_account`] 那样按同一身份新建 iroh 端点（新端点与旧端点同 NodeId，会在 relay 上
 /// 互踢：`Another endpoint connected with the same endpoint id`，并每次刷 `Endpoint dropped…` 噪声）。
 /// 对齐服务端 `serve_with_reconnect` 的端点复用范式。证书 / 版本回退语义与 [`dial_account`] 一致；
 /// 端点已绑好 relay/发现、身份密钥也随端点不变，故只按 **node id**（`home_id`，调用方已收敛为公钥）
 /// 重新握手即可，无需再传 infra 配置。
+/// 若 Endpoint/pkarr 已卡死，由 `connection::reconnect` 在软重连失败后升级为硬重绑（`clear_conn` + [`dial_account`]）。
 pub async fn reonline_account(
     app: &AppHandle,
     client: &Client,

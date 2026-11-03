@@ -49,5 +49,7 @@ pub(crate) async fn name_reverse(
 pub(crate) async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
     // 优雅下线：Logout + Endpoint::close，避免残留端点占着同一 id 导致下次 connect 互踢。
     crate::connection::clear_conn(&state).await;
+    // 清重连上下文，避免换网自愈把「用户主动断开」当成 hard-rebind 中途失败继续拨号。
+    *state.last_connect.lock().await = None;
     Ok(())
 }

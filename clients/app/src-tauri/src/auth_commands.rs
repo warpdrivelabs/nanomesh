@@ -57,6 +57,7 @@ pub(crate) fn unlock(
 pub(crate) async fn lock(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     // 先拆连接（需在清 VK 前：teardown 本身不读 vault；清 VK 后重连路径会停）。
     crate::connection::clear_conn(&state).await;
+    *state.last_connect.lock().await = None;
     {
         let mut g = state.vault.lock().unwrap();
         if let Some(mut vk) = g.take() {

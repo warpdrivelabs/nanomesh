@@ -112,6 +112,8 @@ impl ProtocolHandler for ImspaceProto {
         self.ctx
             .sessions_meta
             .insert(rid.clone(), SessionMeta { since: std::time::SystemTime::now() });
+        // 用会话续命/登记 discovered：不依赖 gossip 成员卡片（卡片收不到时 peer 表会被 TTL 清空）。
+        self.ctx.note_session_peer(rid_arr);
         tracing::info!(online = self.ctx.sessions.len(), "session up");
 
         // 连接关闭事件驱动地清理会话表（仅当表中仍是「这条」连接时移除，避免误删重连后的新会话）。

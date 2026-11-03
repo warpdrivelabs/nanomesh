@@ -153,6 +153,7 @@ struct Ctx {
     groups: Arc<DashMap<Vec<u8>, Group>>,
     store: Option<Arc<RedbStore>>,
     peers: Arc<Peers>,
+    peer_info: Arc<DashMap<Vec<u8>, PeerInfo>>, // 对等元数据（会话建连时也可刷新 discovered TTL）
     node_id: [u8; 32],
     blacklist: Arc<DashSet<[u8; 32]>>,
     sessions_meta: Arc<SessionsMeta>,

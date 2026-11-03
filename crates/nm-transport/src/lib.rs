@@ -312,8 +312,8 @@ impl NodeEndpoint {
     /// 更新都 `on_change` → 上层重连 → 新连接地址又抖 → 再触发，形成**自激重连风暴**
     /// （线上实测：单设备 1-3 秒重连一次，device.hello 反复、principals 映射时有时无 →
     /// 对方忽收忽不收、presence 忽在忽不在）。故此处两道闸：
-    /// 1) **实质变化判定**：只有「直连 IP 候选集合」发生变化才算换网；仅 relay 候选/端口微抖忽略。
-    ///    直连 IP 集合全空→有、或换了不同 IP，才是真的换了网络路径。
+    /// 1) **实质变化判定**：直连 IP 集合**无交集**（整网段切换）或空↔非空才算换网；
+    ///    仅 relay/端口微抖、或 STUN 公网映射增减但私网 IP 仍在（有交集）→ 忽略。
     /// 2) **冷却窗口**：两次触发至少间隔 `COOLDOWN`，吸收连环抖动，彻底断开自激回路。
     ///
     /// 首个值仅记基线、不触发。端点关闭即任务结束。
@@ -339,12 +339,20 @@ impl NodeEndpoint {
             let mut last_fire: Option<tokio::time::Instant> = None;
             while let Ok(cur) = w.updated().await {
                 let cur_ips = ip_set(&cur);
-                // 实质变化：直连 IP 集合不同（换网段 / 从无到有 / 丢失全部直连）。
-                // 仅 relay 候选或端口变化 → cur_ips == prev_ips → 跳过，不触发重连。
+                // 仅 relay 候选或端口变化 → 集合相同 → 跳过。
                 if cur_ips == prev_ips {
                     continue;
                 }
+                // 实质换网：新旧直连 IP **无交集**（整网段切换），或从无到有 / 从有到无。
+                // 有交集时多半是 STUN/云主机公网映射地址增减（如仅多/少一个 EIP），
+                // 私网 IP 仍在 → 不算换网。否则会 ips=1↔2 抖动 → epoch 狂涨 → nmd 自重启
+                // → membership TTL 清光且无种子时无法自动发现。
+                let real_roam =
+                    prev_ips.is_empty() || cur_ips.is_empty() || prev_ips.is_disjoint(&cur_ips);
                 prev_ips = cur_ips;
+                if !real_roam {
+                    continue;
+                }
                 // 冷却：窗口内的后续实质变化也压制（换网瞬间常多次重排地址）。
                 let now = tokio::time::Instant::now();
                 if last_fire.is_some_and(|t| now.duration_since(t) < COOLDOWN) {

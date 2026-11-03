@@ -4,8 +4,54 @@ use dashmap::DashSet;
 use prost::Message;
 
 use crate::records::{hex_decode, hex_decode_n, hex_encode, member_rec};
-use crate::{now_secs, Node};
+use crate::{now_secs, Ctx, Node};
 use nm_proto::AdmissionGrant;
+
+impl Ctx {
+    /// 会话建连时登记/续命 discovered peer（不依赖 gossip 成员卡片）。
+    /// gossip mesh 不稳时对端仍经 `nmspace/0` 连入；若只靠卡片刷新，TTL 会把 peer 表清空，
+    /// bootstrap 变空后更难恢复。15s 内重复建连不落盘（抗 churn）。
+    pub(crate) fn note_session_peer(&self, node_id: [u8; 32]) {
+        if node_id == self.node_id || self.blacklist.contains(&node_id) {
+            return;
+        }
+        let now = now_secs();
+        if let Some(existing) = self.peer_info.get(&node_id[..]) {
+            if existing.last_seen != 0 && now.saturating_sub(existing.last_seen) < 15 {
+                return;
+            }
+            // 手工/种子：只刷存活，不改来源。
+            if existing.source.is_empty() || existing.source == "manual" {
+                let mut e = existing.clone();
+                drop(existing);
+                e.last_seen = now;
+                self.peer_info.insert(node_id.to_vec(), e.clone());
+                if let Some(s) = &self.store {
+                    if let Ok(js) = serde_json::to_string(&e) {
+                        let _ = s.put_peer(&node_id, &js);
+                    }
+                }
+                return;
+            }
+        }
+        if let Ok(addr) = nm_transport::addr_from_id(node_id) {
+            self.peers.insert(node_id.to_vec(), addr);
+        }
+        let mut info = self
+            .peer_info
+            .get(&node_id[..])
+            .map(|e| e.clone())
+            .unwrap_or_default();
+        info.source = "discovered".to_string();
+        info.last_seen = now;
+        self.peer_info.insert(node_id.to_vec(), info.clone());
+        if let Some(s) = &self.store {
+            if let Ok(js) = serde_json::to_string(&info) {
+                let _ = s.put_peer(&node_id, &js);
+            }
+        }
+    }
+}
 
 /// 联邦对等元数据（管理台展示/持久化，可扩展）。连接一律按 node id（公钥）解析。
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]

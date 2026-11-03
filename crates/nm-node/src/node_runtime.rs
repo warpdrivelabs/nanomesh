@@ -273,6 +273,7 @@ impl Node {
             groups: self.groups.clone(),
             store: self.store.clone(),
             peers: self.peers.clone(),
+            peer_info: self.peer_info.clone(),
             node_id: self.ep.id_bytes(),
             blacklist: self.blacklist.clone(),
             sessions_meta: self.sessions_meta.clone(),

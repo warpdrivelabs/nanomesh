@@ -263,7 +263,10 @@ impl Node {
     /// join/rejoin 使用——避免用【全部】peers 做 bootstrap 造成单一 gossip actor + 共享 socket 连接风暴。
     /// peers<=K 时等价于 peers_list()（小集群行为不变）。见 `crate::GOSSIP_BOOTSTRAP_K`。
     pub(crate) fn gossip_bootstrap(&self) -> Vec<[u8; 32]> {
+        let me = self.ep.id_bytes();
         let mut all = self.peers_list();
+        // 拨自己会触发 iroh「Connecting to ourself is not supported」，且浪费 bootstrap 名额。
+        all.retain(|id| *id != me);
         let k = crate::GOSSIP_BOOTSTRAP_K;
         if all.len() > k {
             let seed = std::time::SystemTime::now()
