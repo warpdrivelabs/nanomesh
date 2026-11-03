@@ -657,7 +657,7 @@
         if (unavailable) e.preventDefault();
       });
 
-      fetch('/nanomesh-updates/latest.json', { cache: 'no-store' })
+      fetch('https://cmx.pansoft.com/nanomesh-updates/latest.json', { cache: 'no-store' })
         .then(function (res) { return res.ok ? res.json() : null; })
         .then(function (data) {
           if (!data) return;
