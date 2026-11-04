@@ -691,6 +691,9 @@ async fn async_main() -> anyhow::Result<()> {
             const SETTLE: Duration = Duration::from_secs(30);
             // gossip 静默自重启硬阈值（8×announce≈4min）：Tier-1 进程内 rejoin 的宽限期，超时仍静默=只能冷启动。
             const HARD_SILENCE: Duration = Duration::from_secs(240);
+            // relay 会话持续掉线硬阈值（3min）：Tier-1 notify+online 的宽限期，超时仍掉线=冷启动重建 relay 会话。
+            // 补"gossip 活(经同网邻居转发)但 relay 死、远端经 relay 连不上"盲区（2026-11-04 cmxdev46 实战）。
+            const HARD_RELAY_DOWN: Duration = Duration::from_secs(180);
             let mut last_epoch = reexec_node.net_epoch();
             let mut pending_since: Option<std::time::Instant> = None;
             loop {
@@ -701,7 +704,7 @@ async fn async_main() -> anyhow::Result<()> {
                     pending_since = Some(std::time::Instant::now()); // 新换网 → 重置去抖计时
                     continue;
                 }
-                // 触发原因：① 换网 settle；② gossip 持续静默（addr 未变的抖动）。
+                // 触发原因：① 换网 settle；② gossip 持续静默；③ relay 会话持续掉线。
                 let reason: Option<&str> = if pending_since.is_some_and(|t| t.elapsed() >= SETTLE) {
                     Some("换网已稳定（30s 无新变化）")
                 } else if reexec_node.ever_received_gossip()
@@ -711,6 +714,12 @@ async fn async_main() -> anyhow::Result<()> {
                         .is_some_and(|ms| ms >= HARD_SILENCE.as_millis() as u64)
                 {
                     Some("gossip 持续静默（疑似抖动后半开连接、进程内 rejoin 未恢复）")
+                } else if reexec_node.ever_relay_connected()
+                    && reexec_node
+                        .relay_down_ms()
+                        .is_some_and(|ms| ms >= HARD_RELAY_DOWN.as_millis() as u64)
+                {
+                    Some("relay 会话持续掉线（gossip 或仍活、但远端经 relay 连不上、online 未恢复）")
                 } else {
                     None
                 };

@@ -406,6 +406,12 @@ impl Node {
             let stale = announce_iv.saturating_mul(3).max(std::time::Duration::from_secs(90));
             let mut last_rx = tokio::time::Instant::now();
             let mut degraded_logged = false; // 可观测：降级→恢复 配对日志（金丝雀验证）
+            // relay 活性自愈（2026-11-04）：补"gossip 活但 relay 死"盲区。relay 会话掉线超 RELAY_STALE
+            // → notify+online 重连(Tier-1)；持续掉线由看门狗兜底重启(Tier-2)。恢复比 gossip 快，阈值更短。
+            const RELAY_STALE: std::time::Duration = std::time::Duration::from_secs(45);
+            let mut relay_down_since: Option<tokio::time::Instant> = None;
+            let mut relay_last_nudge: Option<tokio::time::Instant> = None;
+            let mut relay_down_logged = false;
             loop {
                 let ep = self.net_epoch();
                 if ep != seen_epoch {
@@ -421,6 +427,31 @@ impl Node {
                         let _ = topic.publish(self.membership_card(&cfg.card)).await; // 立即广播本节点,加速被重新发现
                     }
                     last_rx = tokio::time::Instant::now(); // 给新 join 一个 STALE 窗口,别立刻又判静默
+                }
+                // ── relay 活性检查（每轮）：喂 Tier-2 看门狗 + 本地 Tier-1 重连 ──
+                if self.relay_connected() {
+                    self.note_relay_ok();
+                    relay_down_since = None;
+                    if relay_down_logged {
+                        tracing::info!("relay 会话已恢复");
+                        relay_down_logged = false;
+                    }
+                } else if self.ever_relay_connected() {
+                    // 曾连上过才判降级（排除 lan/启动期 relay 全局不可达）。
+                    let now = tokio::time::Instant::now();
+                    let since = *relay_down_since.get_or_insert(now);
+                    if since.elapsed() >= RELAY_STALE {
+                        if relay_last_nudge.is_none_or(|t| now.duration_since(t).as_secs() >= 30) {
+                            if !relay_down_logged {
+                                tracing::info!(down_s = since.elapsed().as_secs(), "relay 会话掉线 → notify+online 重连");
+                                relay_down_logged = true;
+                            }
+                            // 限时 notify + online：促 iroh 重探测/重建 home relay 会话。
+                            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), self.notify_network_change()).await;
+                            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), self.online()).await;
+                            relay_last_nudge = Some(now);
+                        }
+                    }
                 }
                 if last_announce.elapsed() >= announce_iv {
                     if let Err(e) = topic.publish(self.membership_card(&cfg.card)).await {

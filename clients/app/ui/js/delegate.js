@@ -258,26 +258,41 @@
       const failed = !text || text.startsWith("⚠");                 // llm_chat.rs 错误 sink 统一 ⚠ 前缀
       if (!failed) {
         const localId = "a" + Date.now();
+        const fromId = (myId() || "").toLowerCase();
         // 乐观落库到会话（本侧带 byAgent 徽标）；群聊 group:true。仿 im_conversation.js 发送路径。
+        // from 统一小写：与已发同步/目录 id 大小写对齐，避免历史里 mine 判失败→气泡错到左侧。
         if (typeof pushMsg === "function") {
-          await pushMsg(convId, { id: localId, from: myId(), to: convId, body: text, ts: Date.now(), status: 0, byAgent: true, group: isGroup });
+          await pushMsg(convId, { id: localId, from: fromId, to: convId, body: text, ts: Date.now(), status: 0, byAgent: true, group: isGroup });
         }
         // 会话正打开时气泡以 status=0（转圈）插入 VIEW —— 收到 gram_id 后须同步更新内存 VIEW 行 + 重绘，
         // 否则对号只落库、屏幕一直转（仿 im_conversation.js 私聊/群聊发送收尾）。
-        const liveRow = () => (typeof VIEW !== "undefined" && VIEW.id === convId) ? VIEW.rows.find((r) => r.id === localId) : null;
+        // VIEW.id 与 ACTIVE 可能大小写不同：两侧都 lower 再比。
+        const liveRow = () => {
+          if (typeof VIEW === "undefined") return null;
+          const vid = (VIEW.id || "").toLowerCase();
+          if (vid !== convId) return null;
+          return VIEW.rows.find((r) => r.id === localId) || null;
+        };
         try {
           const g = isGroup
             ? await NM.inv("send_group", { groupId: convId, text })
             : await NM.inv("send_to", { target: convId, text });
-          if (g) {
-            const row = liveRow();
-            if (row) { row.gramId = g; row.status = 1; if (typeof paintVirtual === "function") paintVirtual(false); }
-            if (window.ChatLog && ChatLog.mark) ChatLog.mark(convId, { id: localId, gramId: g }, 1);
+          // g 为 0 时 JS 也当成功送达（ack 偶发缺 ref）；不可用 if(g) 否则永远不 mark，历史一直转圈。
+          const gramId = Number(g) || 0;
+          const row = liveRow();
+          if (row) {
+            if (gramId) row.gramId = gramId;
+            row.status = 1;
+            row.byAgent = true;
+            if (typeof paintVirtual === "function") paintVirtual(false);
+          }
+          if (window.ChatLog && ChatLog.mark) {
+            await ChatLog.mark(convId, { id: localId, gramId }, 1);
           }
         } catch (e) {
           const row = liveRow();
           if (row) { row.status = -1; if (typeof paintVirtual === "function") paintVirtual(false); }
-          if (window.ChatLog && ChatLog.mark) ChatLog.mark(convId, { id: localId }, -1); // 发送失败 ✗
+          if (window.ChatLog && ChatLog.mark) await ChatLog.mark(convId, { id: localId }, -1); // 发送失败 ✗
         }
         noteSent(convId);
         if (typeof renderPanels === "function") renderPanels();

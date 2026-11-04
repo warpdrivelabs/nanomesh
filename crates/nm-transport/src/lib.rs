@@ -277,6 +277,20 @@ impl NodeEndpoint {
         self.endpoint.network_change().await;
     }
 
+    /// home relay 会话是否连着（活性自愈信号）。读 iroh `home_relay_status()` watcher 的**当前值**
+    /// （同步、非阻塞、零探测开销）——任一 home relay `is_connected()` 即为真。
+    /// 语义与 `online()`（await 到任一 relay is_connected）一致，只是即时快照。
+    /// 用途：节点"gossip 经同网邻居还活、但自己 relay 会话死"时 gossip 信号报健康、远端却连不上它
+    /// （2026-11-04 cmxdev46 实战盲区）——上层据此判降级并重连/兜底重启。lan 模式无 relay，恒 false。
+    pub fn relay_connected(&self) -> bool {
+        use iroh::Watcher as _;
+        self.endpoint
+            .home_relay_status()
+            .get()
+            .iter()
+            .any(|s| s.is_connected())
+    }
+
     /// 地址(本节点 IP / home relay)变化的 Watcher。换网后地址变化→可驱动上层「重发布 / 重连」。
     pub fn watch_addr(&self) -> impl iroh::Watcher<Value = EndpointAddr> + use<> {
         self.endpoint.watch_addr()

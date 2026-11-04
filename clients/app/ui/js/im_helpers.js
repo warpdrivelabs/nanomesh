@@ -41,9 +41,12 @@ function slimMsg(m) {
       o.media.state = media.state || "";
     }
   }
-    if (m.seq) o.seq = m.seq;
-    if (m.byAgent) o.byAgent = true;   // 委托助手代答：本侧徽标，落库后重开仍显
-    return o;
+  if (m.seq) o.seq = m.seq;
+  if (m.byAgent) o.byAgent = true;   // 委托助手代答：本侧徽标，落库后重开仍显
+  // 公钥统一小写落库，避免重开会话时 mine 大小写判失败→气泡错位到左侧。
+  if (o.from) o.from = String(o.from).toLowerCase();
+  if (o.to) o.to = String(o.to).toLowerCase();
+  return o;
 }
 window.slimMsg = slimMsg;
 
@@ -81,7 +84,9 @@ function listTime(ts) {
 }
 function sameDay(a, b) { return new Date(a || 0).toDateString() === new Date(b || 0).toDateString(); }
 function continues(prev, m) {
-  return !!(prev && prev.from === m.from && sameDay(prev.ts, m.ts) && (m.ts || 0) - (prev.ts || 0) < 5 * 60 * 1000);
+  if (!prev || !m) return false;
+  const a = (prev.from || "").toLowerCase(), b = (m.from || "").toLowerCase();
+  return !!(a && a === b && sameDay(prev.ts, m.ts) && (m.ts || 0) - (prev.ts || 0) < 5 * 60 * 1000);
 }
 
 function shortId(id) { id = id || ""; return id.length <= 12 ? id : id.slice(0, 8) + "…"; }

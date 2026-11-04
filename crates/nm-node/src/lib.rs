@@ -250,6 +250,9 @@ pub struct Node {
     // gossip 静默是比 neighbor_count 更可靠的"我是否真在活 mesh 中"信号——neighbor_count 把换网/
     // 抖动后的半开连接也算在线，而静默盖不住。membership 循环每收到一条 card 即刷新；自愈据此判降级/重启。
     last_gossip_rx_ms: Arc<std::sync::atomic::AtomicU64>,
+    // relay 活性自愈（2026-11-04）：最近一次观测到 home relay 会话 is_connected 的 Unix ms（0=从未连上）。
+    // 补"gossip 活但 relay 死"盲区——gossip 经同网邻居转发会掩盖本节点 relay 会话假死，远端经 relay 连不上。
+    last_relay_ok_ms: Arc<std::sync::atomic::AtomicU64>,
     // 优雅关闭（P0）：收到 SIGTERM/SIGINT 时 cancel，后台 loop 协作退出、serve 收尾关 router。
     shutdown: tokio_util::sync::CancellationToken,
     // 在途投递任务追踪：关闭时有界等待其清零（drain），避免未发完的单播消息丢失。

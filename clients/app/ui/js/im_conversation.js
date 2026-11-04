@@ -193,24 +193,52 @@ function renderTicks(s) {
   if (s === 0)  return `<span class="im-tick im-tick--pend" title="发送中"><span class="im-spin"></span></span>`; // 转圈
   return ""; // status 未定义(历史消息无送达跟踪) → 不显示
 }
+/** 本侧消息判定：公钥 hex 大小写不敏感（助手落库/已发同步偶发大小写不一致会导致左右错位）。 */
+function isMineMsg(m) {
+  const a = (m && m.from) || "", b = (typeof MY_ID !== "undefined" && MY_ID) || "";
+  return !!a && !!b && a.toLowerCase() === b.toLowerCase();
+}
+/** 是否助手代答：显式 byAgent（兼容 true/1/"true"），或本地乐观 id `a`+时间戳。 */
+function isAgentMsg(m) {
+  if (!m) return false;
+  const flag = m.byAgent;
+  if (flag === true || flag === 1 || flag === "true" || flag === "1") return true;
+  return /^a\d+$/.test(String(m.id || ""));
+}
+function tickStatusOf(m) {
+  let s = Number(m && m.status);
+  if (!Number.isFinite(s)) s = 0;
+  // 历史里 status 仍为 0（发送中）但已不可能在飞：有 gramId / 助手代答 / 超过 30s → 按已送达显示，避免永久转圈。
+  if (s === 0) {
+    const age = Date.now() - (Number(m.ts) || 0);
+    if ((m && m.gramId) || isAgentMsg(m) || (age > 30_000 && age < 365 * 86400_000)) s = 1;
+  }
+  return s;
+}
 function msgHtml(m, showSender, cont) {
-  const mine = m.from === MY_ID;
+  const mine = isMineMsg(m);
   const named = mine
     ? ((window.Identity && Identity.label && Identity.label(MY_ID)) || "我")
     : (window.entityName ? entityName(m.from) : (m.from || "").slice(0, 6) + "…");
   const who = mine ? (window.t ? t("conv.me") : "我") : named;
-  // 委托助手代答：仅本侧可见的小徽标（好友收到的是干净文本，无标记）。
-  const agentTag = (mine && m.byAgent) ? `<span class="im-agent-tag" title="模型代答">${nmIcon ? nmIcon("robot") : ""}${window.t ? t("conv.byAgent") : "助手代答"}</span>` : "";
+  // 委托助手代答：仅本侧可见，贴在状态区（时间/对号旁），绿色徽标；好友侧无此标记。
+  const agentLabel = window.t ? t("conv.byAgent") : "助手代答";
+  const agentTag = (mine && isAgentMsg(m))
+    ? `<span class="im-agent-tag" title="${escapeHtml(agentLabel)}">${nmIcon ? nmIcon("robot") : ""}${escapeHtml(agentLabel)}</span>`
+    : "";
   const time = msgClock(m.ts);
   // 私聊：完整对号(转圈→单勾→双勾)；群聊：仅单勾(到达 home node，无逐成员已读聚合，status>1 钳回单勾)；频道：不显示。
+  const st = tickStatusOf(m);
   const ticks = (mine && !m.channel)
-    ? renderTicks((m.group && m.status > 1) ? 1 : m.status)
+    ? renderTicks((m.group && st > 1) ? 1 : st)
     : "";
-  // 对号跟在时间后面：有 sender 行则放 sender 的时间后；否则放 stamp(气泡下方时间)后。
+  // 名字行只放时间/对号；助手绿色徽标固定走 stamp，避免 continues 折叠或样式冲淡后看不到。
+  const statusBits = `${time ? `<span class="im-time">${time}</span>` : ""}${ticks}${agentTag}`;
   const sender = (showSender && !cont)
-    ? `<span class="im-sender">${escapeHtml(who)}${time ? `<span class="im-time">${time}</span>` : ""}${ticks}${agentTag}</span>`
+    ? `<span class="im-sender">${escapeHtml(who)}${time ? `<span class="im-time">${time}</span>` : ""}${ticks}</span>`
     : "";
-  const stamp = (!sender && (time || ticks || agentTag)) ? `<span class="im-time">${time}${ticks}${agentTag}</span>` : "";
+  const stampInner = sender ? agentTag : statusBits;
+  const stamp = stampInner ? `<span class="im-stamp">${stampInner}</span>` : "";
   const face = window.Profile ? Profile.faceHtml(m.from, named, 32) : "";
   // 模型会话的对端消息(模型回复):完整 Markdown 渲染(复用频道 marked+消毒管线);
   // 流式中也按 md 画(增量重渲,代码块/表格随 delta 长出)。用户自己的消息仍按普通文本/媒体。
@@ -220,7 +248,7 @@ function msgHtml(m, showSender, cont) {
     : (window.Composer ? Composer.bubble(m) : { cls: "", html: escapeHtml(m.body || "") });
   // 宽度:模型 md 回复整行 100%(表格/代码块需要);其余消息 50%(im.css .im-msg/.im-msg--wide)。
   const wide = rich.cls && rich.cls.indexOf("im-bubble--md") >= 0 ? " im-msg--wide" : "";
-  return `<div class="im-msg ${mine ? "me" : ""} with-av${cont ? " cont" : ""}${wide}" data-mid="${escapeHtml(m.id || "")}">
+  return `<div class="im-msg ${mine ? "me" : ""}${agentTag ? " is-agent" : ""} with-av${cont ? " cont" : ""}${wide}" data-mid="${escapeHtml(m.id || "")}"${agentTag ? ' data-agent="1"' : ""}>
     ${face}
     <span class="im-stack">
       ${sender}
@@ -258,13 +286,21 @@ function bindLog() {
     if (movedUp && canScroll && top < 64 && VIEW.start > 0) loadOlder();
   });
 }
+/** 按时间戳升序（同 ts 保持相对稳定）；兜底防止后端仍按插入序返回时左右各自成堆。 */
+function sortChrono(rows) {
+  return (rows || []).slice().sort((a, b) => {
+    const d = (Number(a && a.ts) || 0) - (Number(b && b.ts) || 0);
+    if (d) return d;
+    return String((a && a.id) || "").localeCompare(String((b && b.id) || ""));
+  });
+}
 async function openView(id, sender) {
   const total = window.ChatLog ? (ChatLog.meta(id).count || 0) : 0;
   VIEW = { id, start: 0, total, rows: [], sender: !!sender };
   viewKey = "";
   const rows = window.ChatLog ? await ChatLog.tail(id, 60) : [];
   if (VIEW.id !== id) return;
-  VIEW.rows = rows;
+  VIEW.rows = sortChrono(rows);
   VIEW.total = Math.max(total, rows.length);
   VIEW.start = Math.max(0, VIEW.total - rows.length);
   paintVirtual(true);
@@ -279,7 +315,7 @@ async function loadOlder() {
   if (VIEW.id !== id || !page.length) return;
   const log = document.getElementById("conv-log");
   const keep = log ? log.scrollHeight - log.scrollTop : 0;
-  VIEW.rows = page.concat(VIEW.rows);
+  VIEW.rows = sortChrono(page.concat(VIEW.rows));
   VIEW.start -= page.length;
   if (VIEW.rows.length > 240) {
     const extra = VIEW.rows.length - 240;
@@ -294,7 +330,7 @@ async function revealMsg(id) {
   if (!window.ChatLog || !ACTIVE) return;
   const pack = await ChatLog.around(ACTIVE, id, 80);
   if (!pack.msgs || !pack.msgs.length) return;
-  VIEW.rows = pack.msgs;
+  VIEW.rows = sortChrono(pack.msgs);
   VIEW.start = pack.start || 0;
   VIEW.total = Math.max(VIEW.total, VIEW.start + VIEW.rows.length);
   paintVirtual(false);

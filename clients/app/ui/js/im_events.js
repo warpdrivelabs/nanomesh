@@ -229,9 +229,14 @@ function handleReceipt(ev) {
   if (!conv || !g) return;
   if (typeof VIEW !== "undefined" && VIEW.id === conv) {
     // 精确匹配 gramId；兜底仅限「尚未写 gramId 的未确认乐观行」——
-    // 不能放宽到所有 l* 行，否则 gramId 每连接重排时会升错旧消息。
-    const row = VIEW.rows.find((r) => r.from === MY_ID && r.gramId === g)
-      || VIEW.rows.find((r) => r.from === MY_ID && !r.gramId && (r.id || "").startsWith("l") && (r.status || 0) !== -1);
+    // 人工发送 id=l*；助手代答 id=a*（delegate.js）。不能放宽到任意行，否则 gramId 重排会升错旧消息。
+    const me = (id) => {
+      const a = (id || "").toLowerCase(), b = ((typeof MY_ID !== "undefined" && MY_ID) || "").toLowerCase();
+      return !!a && !!b && a === b;
+    };
+    const localOptimistic = (id) => /^(l|a)\d+$/.test(String(id || ""));
+    const row = VIEW.rows.find((r) => me(r.from) && r.gramId === g)
+      || VIEW.rows.find((r) => me(r.from) && !r.gramId && localOptimistic(r.id) && (r.status || 0) !== -1);
     if (row) {
       if (!row.gramId) row.gramId = g;
       if ((row.status || 0) < 2) {
@@ -278,7 +283,10 @@ function onCoreEvent(ev) {
   if (ev.type !== "message" || !ev.msg) return;
   const m = ev.msg;
   if (m.typeUrl === AGENT_DELTA_TYPE) { handleAgentDelta(m); return; }
-  const mine = m.from === MY_ID;
+  const mine = (() => {
+    const a = (m.from || "").toLowerCase(), b = ((typeof MY_ID !== "undefined" && MY_ID) || "").toLowerCase();
+    return !!a && !!b && a === b;
+  })();
   const key = (m.group || m.channel || mine) ? m.to : m.from;
   // 被动加群 / 刚订频道：消息可能先到，目录未刷 → 触发去抖刷新群/频道列表。
   if ((m.group || m.channel) && typeof ensureRoomDirectory === "function") ensureRoomDirectory(key, m);
@@ -303,6 +311,15 @@ function onCoreEvent(ev) {
   });
 }
 
+/** 按时间戳插入（离线补投/已发同步的 ts 可能早于当前尾巴，不能一律 push 到末尾）。 */
+function insertChrono(rows, m) {
+  const ts = Number(m && m.ts) || 0;
+  let i = rows.length;
+  while (i > 0 && (Number(rows[i - 1].ts) || 0) > ts) i--;
+  rows.splice(i, 0, m);
+  return i;
+}
+
 async function pushMsg(peer, m) {
   m = window.Composer ? Composer.absorb(m) : m;
   if (!window.ChatLog) return false;
@@ -312,7 +329,7 @@ async function pushMsg(peer, m) {
     const coversTail = VIEW.start + VIEW.rows.length >= VIEW.total;
     VIEW.total = (ChatLog.meta(peer).count || VIEW.total + 1);
     if (coversTail) {
-      VIEW.rows.push(m);
+      insertChrono(VIEW.rows, m);
       if (VIEW.rows.length > 400) { VIEW.rows.shift(); VIEW.start += 1; }
       const log = document.getElementById("conv-log");
       const stick = !log || log.scrollHeight - log.scrollTop - log.clientHeight < 120;

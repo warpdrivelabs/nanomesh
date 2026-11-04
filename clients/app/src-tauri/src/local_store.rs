@@ -455,11 +455,12 @@ fn window_bodies(
     if end <= 0 || limit <= 0 {
         return Ok(Vec::new());
     }
+    // 按时间戳排序（ts, ord），勿只用插入序 ord——离线补投/已发同步会使本侧与对侧各自成堆。
     let mut stmt = conn
         .prepare(
             "SELECT body FROM (
                SELECT body, idx FROM (
-                 SELECT body, ROW_NUMBER() OVER (ORDER BY ord) - 1 AS idx
+                 SELECT body, ROW_NUMBER() OVER (ORDER BY ts, ord) - 1 AS idx
                  FROM msg WHERE conv = ?1
                ) WHERE idx < ?2
              ) ORDER BY idx DESC LIMIT ?3",
@@ -487,7 +488,7 @@ pub(crate) fn chat_open(app: AppHandle, user: String) -> Result<String, String> 
     {
         let mut stmt = conn
             .prepare(
-                "SELECT conv, COUNT(*), (SELECT body FROM msg m2 WHERE m2.conv = msg.conv ORDER BY ord DESC LIMIT 1)
+                "SELECT conv, COUNT(*), (SELECT body FROM msg m2 WHERE m2.conv = msg.conv ORDER BY ts DESC, ord DESC LIMIT 1)
                  FROM msg GROUP BY conv",
             )
             .map_err(|e| e.to_string())?;
@@ -534,7 +535,7 @@ pub(crate) fn chat_tail(
     let conv = conv_key(&conv)?;
     let n = (limit.max(1) as i64).min(200);
     let mut stmt = conn
-        .prepare("SELECT body FROM msg WHERE conv=?1 ORDER BY ord DESC LIMIT ?2")
+        .prepare("SELECT body FROM msg WHERE conv=?1 ORDER BY ts DESC, ord DESC LIMIT ?2")
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(rusqlite::params![conv, n], |r| r.get::<_, String>(0))
@@ -630,7 +631,7 @@ pub(crate) fn chat_around(
     let at: Option<i64> = conn
         .query_row(
             "SELECT idx FROM (
-               SELECT id, ROW_NUMBER() OVER (ORDER BY ord) - 1 AS idx
+               SELECT id, ROW_NUMBER() OVER (ORDER BY ts, ord) - 1 AS idx
                FROM msg WHERE conv=?1
              ) WHERE id=?2",
             rusqlite::params![conv, id],
@@ -645,7 +646,7 @@ pub(crate) fn chat_around(
     let mut stmt = conn
         .prepare(
             "SELECT body FROM (
-               SELECT body, ROW_NUMBER() OVER (ORDER BY ord) - 1 AS idx
+               SELECT body, ROW_NUMBER() OVER (ORDER BY ts, ord) - 1 AS idx
                FROM msg WHERE conv=?1
              ) WHERE idx >= ?2 AND idx < ?3 ORDER BY idx",
         )
@@ -731,7 +732,7 @@ pub(crate) fn chat_search(
     let n = (limit.max(1) as i64).min(80);
     let needle = format!("%{}%", q.trim().replace('%', ""));
     let mut stmt = conn
-        .prepare("SELECT body FROM msg WHERE conv=?1 AND (?2 = '%%' OR body LIKE ?2) ORDER BY ord DESC LIMIT ?3")
+        .prepare("SELECT body FROM msg WHERE conv=?1 AND (?2 = '%%' OR body LIKE ?2) ORDER BY ts DESC, ord DESC LIMIT ?3")
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(rusqlite::params![conv, needle, n], |r| {

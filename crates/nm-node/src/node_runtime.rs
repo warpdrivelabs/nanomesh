@@ -171,6 +171,28 @@ impl Node {
         !self.peers_list().is_empty()
     }
 
+    /// home relay 会话当前是否连着（relay 活性自愈信号，即时快照）。
+    pub fn relay_connected(&self) -> bool {
+        self.ep.relay_connected()
+    }
+    /// membership 循环每轮观测到 relay 连着即调，刷新"最近 relay OK"时间戳。
+    pub fn note_relay_ok(&self) {
+        self.last_relay_ok_ms
+            .store(crate::now_ms(), std::sync::atomic::Ordering::Relaxed);
+    }
+    /// 是否自启动以来 relay 曾连上过（false=relay 从未可用，misconfig/全局不可达，自愈不该自重启）。
+    pub fn ever_relay_connected(&self) -> bool {
+        self.last_relay_ok_ms.load(std::sync::atomic::Ordering::Relaxed) != 0
+    }
+    /// 距最近一次 relay 连着的毫秒数；从未连上返回 None（lan 模式/启动期 relay 不可达，不作降级依据）。
+    pub fn relay_down_ms(&self) -> Option<u64> {
+        let last = self.last_relay_ok_ms.load(std::sync::atomic::Ordering::Relaxed);
+        if last == 0 {
+            return None;
+        }
+        Some(crate::now_ms().saturating_sub(last))
+    }
+
     fn from_ep(ep: NodeEndpoint, store: Option<Arc<RedbStore>>) -> Result<Self, NodeError> {
         let dir = Arc::new(MemDirectory::new());
         let groups: Arc<DashMap<Vec<u8>, Group>> = Arc::new(DashMap::new());
@@ -274,6 +296,7 @@ impl Node {
             pending_fwd: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             roam: Arc::new(crate::RoamStat::default()),
             last_gossip_rx_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            last_relay_ok_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             shutdown: tokio_util::sync::CancellationToken::new(),
             tracker: tokio_util::task::TaskTracker::new(),
             drain_timeout: std::time::Duration::from_secs(5),
