@@ -51,6 +51,18 @@
   function lastAccount() {
     try { return JSON.parse(localStorage.getItem(LAST) || "null"); } catch (_) { return null; }
   }
+  /** 登录页默认焦点：已有默认用户名 → 密码框；否则 → 用户名框。 */
+  function focusLoginField() {
+    const localEl = document.getElementById("acct-local");
+    const pwdEl = document.getElementById("acct-password");
+    if (!localEl || !pwdEl) return;
+    const target = localEl.value.trim() ? pwdEl : localEl;
+    requestAnimationFrame(() => {
+      try { target.focus({ preventScroll: true }); } catch (_) {
+        try { target.focus(); } catch (__) {}
+      }
+    });
+  }
   /** 当前身份对应的联邦账号 ID（local@domain）；无则空串。 */
   function federationId(pk) {
     const id = (pk || "").trim();
@@ -301,16 +313,16 @@
       const status = (r && r.status) || "";
       if (document.getElementById("acct-domain").value.trim().toLowerCase() !== q) return;
       if (items.length) {
-        const exact = status === "exact" || items.some((it) => String(it.domain).toLowerCase() === q);
-        hint.textContent = exact ? "已登记" : "";
-        hint.classList.toggle("ok", exact);
+        // 域名已登记不提示（易被当成用户已登记）；仅保留错误态文案。
+        hint.textContent = "";
+        hint.classList.remove("ok");
         box.innerHTML = items.map((it) =>
           `<button type="button" data-domain="${escapeHtml(it.domain)}">${escapeHtml(it.domain)}</button>`).join("");
         box.hidden = false;
         box.querySelectorAll("button").forEach((btn) => btn.addEventListener("click", () => {
           input.value = btn.getAttribute("data-domain") || "";
-          hint.textContent = "已登记";
-          hint.classList.add("ok");
+          hint.textContent = "";
+          hint.classList.remove("ok");
           hideSuggest();
         }));
         return;
@@ -501,7 +513,7 @@
       if (prev) setDomainValue(prev);
       else sel.selectedIndex = 0;
       const hint = document.getElementById("acct-domain-hint");
-      if (hint && sel.value) { hint.textContent = "已登记"; hint.classList.add("ok"); }
+      if (hint) { hint.textContent = ""; hint.classList.remove("ok"); }
     } catch (e) {
       domainsLoaded = false;
       sel.innerHTML = `<option value="">域名加载失败,点击重试</option>`;
@@ -549,14 +561,10 @@
       document.getElementById("acct-pass2").value = "";
       setMode("reset");
     });
-    // 域名改为下拉(从注册中心读取,不手输):change 即视为已登记;加载失败时点击重拉。
+    // 域名下拉：不展示「已登记」（指域非用户）；加载失败时点击重拉。
     document.getElementById("acct-domain").addEventListener("change", () => {
       const hint = document.getElementById("acct-domain-hint");
-      if (hint) {
-        const v = document.getElementById("acct-domain").value;
-        hint.textContent = v ? "已登记" : "";
-        hint.classList.toggle("ok", !!v);
-      }
+      if (hint) { hint.textContent = ""; hint.classList.remove("ok"); }
     });
     document.getElementById("acct-domain").addEventListener("mousedown", () => {
       if (!domainsLoaded) loadAccountDomains();
@@ -564,14 +572,24 @@
     document.addEventListener("click", (ev) => {
       if (!ev.target.closest(".acct-id-wrap")) hideSuggest();
     });
-    document.querySelectorAll(".pwd-eye").forEach((btn) => btn.addEventListener("click", () => {
-      const input = document.getElementById(btn.getAttribute("data-eye"));
-      if (!input) return;
-      const show = input.type === "password";
-      input.type = show ? "text" : "password";
-      btn.textContent = show ? "隐藏" : "显示";
-    }));
+    // 密码显隐：右侧眼睛图标（通用作法）；密文=睁眼「显示」，明文=斜杠眼「隐藏」。
+    const paintEye = (btn, plain) => {
+      const label = plain ? "隐藏密码" : "显示密码";
+      btn.setAttribute("aria-label", label);
+      btn.title = label;
+      btn.innerHTML = typeof nmIcon === "function" ? nmIcon(plain ? "eye-off" : "eye") : "";
+    };
+    document.querySelectorAll(".pwd-eye").forEach((btn) => {
+      paintEye(btn, false);
+      btn.addEventListener("click", () => {
+        const input = document.getElementById(btn.getAttribute("data-eye"));
+        if (!input) return;
+        const show = input.type === "password";
+        input.type = show ? "text" : "password";
+        paintEye(btn, show);
+      });
+    });
   }
   init();
-  window.Account = { lastAccount, federationId, federationName, fullName };
+  window.Account = { lastAccount, federationId, federationName, fullName, focusLoginField };
 })();

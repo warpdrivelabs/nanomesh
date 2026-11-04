@@ -78,9 +78,13 @@ function renderEntities() {
     return a.localeCompare(b);
   });
   const friendSections = domains.map((d) => {
-    const items = byDomain.get(d).slice().sort((a, b) =>
-      String(a.name || a.id).localeCompare(String(b.name || b.id), "zh")
-    );
+    // 同域名内：在线优先，其次按名称。
+    const items = byDomain.get(d).slice().sort((a, b) => {
+      const ao = (a.presence || "") === "online" ? 0 : 1;
+      const bo = (b.presence || "") === "online" ? 0 : 1;
+      if (ao !== bo) return ao - bo;
+      return String(a.name || a.id).localeCompare(String(b.name || b.id), "zh");
+    });
     const key = d ? "person:" + d : "person:_";
     return renderGroup(key, "person", d || "无域名", items);
   });
@@ -114,9 +118,9 @@ function renderEntities() {
     head.addEventListener("click", () => {
       const g = head.closest(".ent-group");
       const key = g.dataset.type;
-      if (ENT_FOLDED.has(key)) ENT_FOLDED.delete(key);
-      else ENT_FOLDED.add(key);
-      const folded = ENT_FOLDED.has(key);
+      if (ENT_OPEN.has(key)) ENT_OPEN.delete(key);
+      else ENT_OPEN.add(key);
+      const folded = !ENT_OPEN.has(key);
       g.classList.toggle("folded", folded);
       head.setAttribute("aria-expanded", folded ? "false" : "true");
     })
@@ -129,7 +133,8 @@ function renderModels() {
 }
 function renderGroup(key, icon, label, items) {
   const q = (document.getElementById("entity-search-input").value || "").trim();
-  const folded = !q && (ENT_FOLDED.has(key) || !items.length);
+  // 默认收起；有搜索词时展开以便扫结果；空组始终收起。
+  const folded = !q && (!items.length || !ENT_OPEN.has(key));
   const person = key === "person" || String(key).startsWith("person:");
   const group = key === "group";
   const rows = items.map((c) => {
@@ -145,12 +150,18 @@ function renderGroup(key, icon, label, items) {
     }
     return itemHtml(c, escapeHtml(typeMeta(c.kind).label) + tag, 0, DETAIL_ID);
   }).join("");
+  // 域名分组：在线数/总数；群组等仍只显示总数。
+  const total = items.length;
+  const count = person
+    ? `${items.filter((c) => (c.presence || "") === "online").length}/${total}`
+    : String(total);
+  const countTitle = person ? "在线/全部" : "";
   return `<div class="ent-group${folded ? " folded" : ""}" data-type="${key}">
     <button type="button" class="ent-head" aria-expanded="${folded ? "false" : "true"}">
       <span class="ent-chev">${nmIcon("chevron")}</span>
       <span class="ent-ico">${nmIcon(icon)}</span>
       <span class="ent-label">${escapeHtml(label)}</span>
-      <span class="ent-count">${items.length}</span>
+      <span class="ent-count"${countTitle ? ` title="${countTitle}"` : ""}>${count}</span>
     </button>
     <div class="ent-body">${rows}</div>
   </div>`;

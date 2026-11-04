@@ -25,7 +25,7 @@ function viewingPeer() {
 function isChatOpen(id) {
   return !!id && viewingPeer() === id;
 }
-const ENT_FOLDED = new Set();  // 实体目录已收起的类型
+const ENT_OPEN = new Set();    // 实体目录已展开的分组（默认收起）
 let _coreUnlisten = null;
 let SHOW_MEMBERS = true;
 let CONVOS_BY_USER = {};

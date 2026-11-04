@@ -442,7 +442,7 @@
 .ent-ico { display: inline-flex; }
 .ent-ico .nm-ico { width: 14px; height: 14px; }
 .ent-label { flex: 1; }
-.ent-count { font-size: 11px; color: var(--muted); background: var(--hover); border: none; border-radius: 999px; padding: 0 7px; min-width: 20px; text-align: center; }
+.ent-count { font-size: 11px; color: var(--muted); background: var(--hover); border: none; border-radius: 999px; padding: 0 7px; min-width: 20px; text-align: center; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .ent-empty { color: var(--muted); font-size: 12px; padding: 4px 12px 8px; opacity: .7; }
 .entity-form { margin: 0 2px 8px; }
 

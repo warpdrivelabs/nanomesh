@@ -9,6 +9,8 @@ function showLoginView() {
   if (starsFar && !starsFar.childElementCount) seedLoginSpace();
   renderServiceOptions();
   renderUserOptions();
+  // 有默认用户名则焦点密码框，否则焦点用户名框。
+  if (window.Account && Account.focusLoginField) Account.focusLoginField();
 }
 function showMainView() {
   document.getElementById("login-view").style.display = "none";
