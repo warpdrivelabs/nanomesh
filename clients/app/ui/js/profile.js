@@ -9,6 +9,7 @@
   const avCache = new Map(); // "b3:<hash>" -> data:URI（内存；磁盘另有 app_data/blobs）
   // 实体当前头像：id -> { ref, uri }。ref 未变则直接用 uri，不调网络；仅头像变更时重拉并更新。
   const entityAv = new Map();
+  const _lastPublishedRef = Object.create(null); // pk -> 本端最近发布的头像 b3:ref（多设备同步判别用）
   let pendingAvatar = null;  // 模态框内待保存头像：null=未改动 / ""=移除 / data:URI=新图
 
   async function load() {
@@ -413,8 +414,29 @@
         links, locale: p.locale || "", status: p.status || "", avatar,
         attributes: normalizeExtAttrs(p.extAttrs),
       });
+      _lastPublishedRef[pk] = avatar; // 记录本端最近发布的头像 ref（多设备同步以此判「别人改过」）
       return true;
     } catch (e) { if (window.toast) toast("资料发布失败：" + (e && e.message ? e.message : e)); return false; }
+  }
+
+  // 本端最近发布的头像 ref（无则空串）。imRefresh 多设备头像同步用：
+  // 目录 ref ≠ 本端已发布 ref = 别的端改过 → 合入；等于 = 本端自己刚发的，不动。
+  function lastPublishedRef(pk) { return _lastPublishedRef[pk] || ""; }
+
+  // 多设备在线同步：把目录里的本人资料合入本地（im.js 15s 轮询发现 ref 变化时调）。
+  // 只合头像/基本字段，清 avatarData（旧原图不再对应当前头像）；不回推（publish 反向由 auto 闸把住）。
+  function adoptRemoteProfile(pk, ent) {
+    if (!pk || !ent) return;
+    const p = get(pk);
+    if (isRef(ent.avatar) && ent.avatar !== p.avatar) {
+      p.avatar = ent.avatar;
+      p.avatarData = "";
+      save(pk, p);
+      if (window.Identity && Identity.current && Identity.current() === pk && Identity.hydrateUser) Identity.hydrateUser(pk);
+      if (typeof updateUserChip === "function") updateUserChip();
+      renderPanels();
+      if (typeof renderConversation === "function") renderConversation();
+    }
   }
 
   // 扩展属性规范化：去空 key、禁系统保留键；供本地存储与 update_profile 共用。
@@ -848,7 +870,7 @@
     });
   }
 
-  window.Profile = { load, get, save, publish, open, statusLabel, avatarHtml, faceHtml, displayAvatar, isImg, isRef, resolveAvatar, resolveList, ownAvatar, fileToAvatar, putBlob, presenceColor, presenceLabel, presenceDot, applyPresence, metaEditor, openAvatarCrop, openImageCrop, extAttrRows, normalizeExtAttrs, invalidateEntityAvatar, rememberEntityAvatar };
+  window.Profile = { load, get, save, publish, open, statusLabel, avatarHtml, faceHtml, displayAvatar, isImg, isRef, resolveAvatar, resolveList, ownAvatar, fileToAvatar, putBlob, presenceColor, presenceLabel, presenceDot, applyPresence, metaEditor, openAvatarCrop, openImageCrop, extAttrRows, normalizeExtAttrs, invalidateEntityAvatar, rememberEntityAvatar, lastPublishedRef, adoptRemoteProfile };
   window.openProfileModal = open;
 
   // ── P2 在线状态 ──

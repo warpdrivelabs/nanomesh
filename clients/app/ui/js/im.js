@@ -282,6 +282,7 @@ function dirSig(list) {
   return (list || []).map((c) => [c.id, c.name, c.presence, c.statusText, c.handle, c.kind, c.avatar || ""].join("\u0001")).join("\n");
 }
 let lastDirSig = "";
+let _ownAvatarSyncAt = 0; // 本人头像多设备合入的冷却时间戳（60s 防横跳）
 async function imRefresh() {
   try {
     const next = await NM.inv("directory_query", { kindPrefix: "" });
@@ -302,6 +303,20 @@ async function imRefresh() {
           Profile.invalidateEntityAvatar(c.id);
         }
       });
+    }
+    // 多设备头像在线同步：目录里本人的头像 ref 变了（其它端改的）→ 合入本地资料并刷新 UI。
+    // publish(auto) 已防止本端回推顶掉目录；此处闭环「双端同时在线」场景。冷却窗口防双端
+    // 同时编辑时目录头像来回横跳（A 顶 B、B 顶 A）：合入后 60s 内不再反向合入。
+    if (window.Profile && MY_ID && Array.isArray(next)) {
+      const me = next.find((c) => c && c.id === MY_ID);
+      const dirRef = (me && me.avatar) || "";
+      if (dirRef && Profile.isRef(dirRef) && dirRef !== Profile.lastPublishedRef(MY_ID)) {
+        const now = Date.now();
+        if (now - (_ownAvatarSyncAt || 0) > 60000) {
+          _ownAvatarSyncAt = now;
+          Profile.adoptRemoteProfile(MY_ID, me);
+        }
+      }
     }
     lastDirSig = sig;
     CONTACTS = next || [];
