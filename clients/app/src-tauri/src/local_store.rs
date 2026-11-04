@@ -567,7 +567,7 @@ pub(crate) fn chat_mark(
         if status == -1 {
             // 失败：强设差号（无 gramId，status 0→-1 不走只升不降）。
             conn.execute(
-                "UPDATE msg SET body=json_set(body,'$.status',-1) WHERE conv=?2 AND id=?3",
+                "UPDATE msg SET body=json_set(body,'$.status',-1) WHERE conv=?1 AND id=?2",
                 rusqlite::params![conv, id],
             )
         } else {

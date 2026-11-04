@@ -274,20 +274,33 @@ pub(crate) async fn roam_reconnect_driver(
             .is_ok()
         {}
         let Some(state) = app.try_state::<AppState>() else { continue };
-        // 取当前会话 + 世代；未连接则忽略本次信号。
+        // 取当前会话 + 世代；conn=None 不等于「未连接」：
+        // 硬重绑失败后 conn 已被取走置 None，而 last_connect 仍在（非用户主动断开）——
+        // 这是上一轮自愈的中间态，必须继续拨号，否则信号被静默吞掉、无人再重连（卡死在重连态）。
         let (cur_gen, session) = {
             let g = state.conn.lock().await;
             match g.as_ref() {
-                Some(c) => (c.conn_gen, c.session.clone()),
-                None => continue,
+                Some(c) => (c.conn_gen, Some(c.session.clone())),
+                None => {
+                    if state.last_connect.lock().await.is_some() {
+                        (0, None) // 中间态：无会话可验活，直接进自愈循环
+                    } else {
+                        continue; // 真正的未连接（用户已断开/未登录）
+                    }
+                }
             }
         };
         // 主动验活：ping 通=连接仍活，忽略本次换网信号（交由发送路径按需重连）。
         // ping 超时/失败=真失活（含换网后假死，close_reason 可能仍为 None）→ 进入自愈。
-        let alive = matches!(
-            tokio::time::timeout(SEND_TIMEOUT, session.ping()).await,
-            Ok(Ok(()))
-        );
+        // conn=None 中间态无会话可 ping，视为失活。
+        let alive = if let Some(s) = &session {
+            matches!(
+                tokio::time::timeout(SEND_TIMEOUT, s.ping()).await,
+                Ok(Ok(()))
+            )
+        } else {
+            false
+        };
         if alive {
             continue;
         }
