@@ -375,6 +375,51 @@ fn load_or_create_identity(path: &str) -> anyhow::Result<[u8; 32]> {
     Ok(seed)
 }
 
+/// 探测「默认路由出口网卡」的 IPv4 —— 用作未配 bind_addr 时的自动绑定地址，
+/// 让 iroh 只发布这块能通外网的网卡地址，不枚举 docker0/br-* 等不可达私有段（见启动处注释）。
+///
+/// 做法（纯 std、无依赖、不发包）：
+///  1) 读 `/proc/net/route` 取默认路由（Destination==0）的网关 IP（Gateway 列是小端 hex）；
+///  2) `UdpSocket::connect(gateway:9)` —— UDP connect 不发任何包，只让内核按路由表选出「发往该网关
+///     应使用的源地址」，即默认出口网卡 IP；读 `local_addr()` 得之。
+///  3) 校验非 loopback/unspecified/link-local 才采用。
+/// 无 `/proc/net/route`（非 Linux，如 mac 开发机）或无默认路由时返回 None → 调用方回退绑 0.0.0.0。
+fn detect_default_egress_ipv4() -> Option<std::net::Ipv4Addr> {
+    use std::net::{Ipv4Addr, UdpSocket};
+    // ① 从 /proc/net/route 找默认路由网关（Destination 全 0 的那行，Gateway 列小端 hex）。
+    let route = std::fs::read_to_string("/proc/net/route").ok()?;
+    let mut gateway: Option<Ipv4Addr> = None;
+    for line in route.lines().skip(1) {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        // 格式：Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT
+        if cols.len() >= 3 && cols[1] == "00000000" {
+            if let Ok(gw_le) = u32::from_str_radix(cols[2], 16) {
+                if gw_le != 0 {
+                    // Gateway 是小端：/proc 按主机字节序(小端机)打印，转回点分需取各字节。
+                    let b = gw_le.to_le_bytes();
+                    gateway = Some(Ipv4Addr::new(b[0], b[1], b[2], b[3]));
+                    break;
+                }
+            }
+        }
+    }
+    // 目标地址：优先默认网关；拿不到网关（点对点链路等）退而用公网锚点让内核照样选默认出口。
+    let target = gateway.unwrap_or(Ipv4Addr::new(8, 8, 8, 8));
+    // ② UDP connect（不发包）→ 内核按路由表填源地址 = 默认出口 IP。
+    let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    sock.connect((target, 9)).ok()?;
+    let local = sock.local_addr().ok()?;
+    let ip = match local.ip() {
+        std::net::IpAddr::V4(v4) => v4,
+        _ => return None,
+    };
+    // ③ 校验：非 loopback/unspecified/link-local(169.254) 才算有效出口。
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_link_local() {
+        return None;
+    }
+    Some(ip)
+}
+
 /// 连通模式的展示名（供 banner 信息面板与「bound」日志复用）。
 fn mode_label(mode: &Mode) -> &'static str {
     match mode {
@@ -437,10 +482,32 @@ async fn async_main() -> anyhow::Result<()> {
     let raw = std::fs::read_to_string(&args.config).unwrap_or_default();
     let cfg: Config = toml::from_str(&raw)?;
 
-    // P2-13 修复：把监听限定到配置的 bind_addr（多网卡/docker 节点去地址污染，只广播可达地址）。
+    // P2-13 修复：把监听限定到可达地址（多网卡/docker 节点去地址污染，只广播可达地址）。
     // 经 NM_BIND_ADDR 内传给 nm-transport::bind_infra；在启动早期、建节点前设置，彼时无并发 env 访问。
-    if let Some(a) = cfg.bind_addr.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        unsafe { std::env::set_var("NM_BIND_ADDR", a) };
+    //
+    // 2026-11-05 实战根因：docker 多的节点绑 0.0.0.0 时，iroh 枚举**所有**网卡 IP（含 docker0/br-* 私有段）
+    // 并经 pkarr 发布，远端选路反复试这些不可达死地址→gossip 连接半死、failed-to-send 风暴→home node
+    // accept 争用致客户端登录 timed out。绑具体地址则 iroh 只发布该地址（见 iroh socket.rs collect_local_addresses
+    // 的 is_unspecified 分支）。故：
+    //  ① 显式 [bind_addr] 优先（手动指定，覆盖自动探测）；
+    //  ② 未配则**自动探测默认路由出口网卡 IP** 作绑定地址——免每台人工配、根除 docker 毒地址。
+    //     判据用「默认路由出口」而非 IP 私有段前缀：robot.link 的 172.16.x / relay 的 10.x 等私有段其实是
+    //     真实可达主网卡，按前缀过滤会误杀；默认出口才是「能通外网的那块网卡」的权威信号。
+    match cfg.bind_addr.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(a) => {
+            unsafe { std::env::set_var("NM_BIND_ADDR", a) };
+            tracing::info!(bind_addr = %a, "绑定到配置的 bind_addr（只广播此地址）");
+        }
+        None => match detect_default_egress_ipv4() {
+            Some(ip) => {
+                unsafe { std::env::set_var("NM_BIND_ADDR", ip.to_string()) };
+                tracing::info!(egress = %ip, "未配 bind_addr → 自动绑定默认路由出口网卡（去 docker/多网卡地址污染）");
+            }
+            None => {
+                // 探不到（无 /proc/net/route、无默认路由、或无合法出口）：回退不设 = 绑 0.0.0.0（行为中性）。
+                tracing::debug!("未配 bind_addr 且无法探测默认出口 → 绑全部接口（0.0.0.0）");
+            }
+        },
     }
 
     // P0-2 离线恢复：--restore <备份> → 覆盖 cfg.db 后退出（覆盖前把现有 db 另存一份，可回滚）。须在 nmd 停止时执行。
