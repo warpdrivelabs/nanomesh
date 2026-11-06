@@ -496,7 +496,7 @@ async fn async_main() -> anyhow::Result<()> {
     match cfg.bind_addr.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(a) => {
             unsafe { std::env::set_var("NM_BIND_ADDR", a) };
-            tracing::info!(bind_addr = %a, "绑定到配置的 bind_addr（只广播此地址）");
+            tracing::info!(bind_addr = %a, "绑定到配置的 bind_addr（逗号分隔可绑多个地址，只广播这些）");
         }
         None => match detect_default_egress_ipv4() {
             Some(ip) => {

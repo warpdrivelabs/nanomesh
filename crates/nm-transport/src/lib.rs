@@ -250,13 +250,41 @@ impl NodeEndpoint {
             .alpns(alpns);
         if port != 0 {
             // 固定 UDP 端口：让本节点地址稳定，便于 LAN 对等配置。
-            // NM_BIND_ADDR（nmd 据 [bind_addr] 配置设置）限定监听到某个本机 IP：多网卡/docker 节点据此
+            // NM_BIND_ADDR（nmd 据 [bind_addr] 配置设置）限定监听到指定本机 IP：多网卡/docker 节点据此
             // 只广播可达地址，避免广播一堆不可达地址（如 docker 网桥/公网段 bip）致对端选错路、连不稳。
-            let ip = std::env::var("NM_BIND_ADDR")
-                .ok()
-                .and_then(|s| s.trim().parse::<std::net::Ipv4Addr>().ok())
-                .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
-            builder = builder.bind_addr((ip, port)).map_err(err)?;
+            //
+            // 支持**逗号分隔的多个 IP**：每个 IP 用 bind_addr_with_opts 单独绑定一个 UDP socket，
+            // iroh 会把每个显式绑定的地址都纳入直连候选并经 pkarr 发布。
+            // 这样一台多网卡节点可同时在多个子网内被直连（如 ens34 的 192.168.1.x + tun0 的
+            // 192.168.157.x——后者是点对点隧道，iroh 绑 0.0.0.0 时不会自动采集，必须显式绑定）。
+            // 第一个地址标记为默认路由（is_default_route），其余作为附加子网。
+            let raw = std::env::var("NM_BIND_ADDR").unwrap_or_default();
+            let ips: Vec<std::net::Ipv4Addr> = raw
+                .split(',')
+                .filter_map(|s| s.trim().parse::<std::net::Ipv4Addr>().ok())
+                .collect();
+            match ips.as_slice() {
+                [] => {
+                    // 未配或解析失败：绑全部接口（0.0.0.0），行为与改造前一致。
+                    builder = builder.bind_addr((std::net::Ipv4Addr::UNSPECIFIED, port)).map_err(err)?;
+                }
+                [single] => {
+                    builder = builder.bind_addr((*single, port)).map_err(err)?;
+                }
+                multi => {
+                    use iroh::endpoint::BindOpts;
+                    for (i, ip) in multi.iter().enumerate() {
+                        // 第一个作默认路由，其余为附加地址；都标 is_required=false，
+                        // 避免某个地址（如隧道临时不在）绑定失败拖垮整个端点启动。
+                        let opts = BindOpts::default()
+                            .set_is_required(false)
+                            .set_is_default_route(i == 0);
+                        builder = builder
+                            .bind_addr_with_opts(std::net::SocketAddr::from((*ip, port)), opts)
+                            .map_err(err)?;
+                    }
+                }
+            }
         }
         let endpoint = builder.bind().await.map_err(err)?;
         // 注册一个内存地址簿：供「按公钥拨号」（如 gossip）在 LAN/无发现时解析对端地址。
