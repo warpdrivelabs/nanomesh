@@ -17,6 +17,126 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode};
 use iroh::address_lookup::memory::MemoryLookup;
 use prost::Message;
 
+/// 本系统不应对外发布的网卡名前缀：docker 网桥/虚拟网卡。这些接口上的地址
+/// （172.17.0.1 之类）对其它节点不可达，发布出去会污染对端选路（实测：远端反复
+/// 尝试死地址 → gossip 连接半死 → home node 转发风暴）。
+#[cfg(unix)]
+const NON_PUBLISHABLE_IFACE_PREFIXES: &[&str] =
+    &["docker", "br-", "veth", "virbr", "cni", "flannel", "podman", "lxc", "tunl", "dummy"];
+
+/// 枚举本机**可发布**的 IP 地址（剔除回环 / link-local / docker 等虚拟网卡）。
+/// 返回空集表示无法枚举（非 unix、或 getifaddrs 失败）→ 调用方回退到不过滤 IP。
+#[cfg(unix)]
+fn publishable_local_ips() -> Vec<std::net::IpAddr> {
+    use std::ffi::CStr;
+    let mut out = Vec::new();
+    unsafe {
+        let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut ifap) != 0 {
+            return out;
+        }
+        let mut cur = ifap;
+        while !cur.is_null() {
+            let ifa = &*cur;
+            cur = ifa.ifa_next;
+            // 只看 AF_INET/AF_INET6（跳过 AF_PACKET 等）。
+            let Some(sa) = ifa.ifa_addr.as_ref() else { continue };
+            let family = sa.sa_family as i32;
+            if family != libc::AF_INET && family != libc::AF_INET6 {
+                continue;
+            }
+            // 接口名 → 判定是否虚拟网卡。
+            let name = if ifa.ifa_name.is_null() {
+                String::new()
+            } else {
+                CStr::from_ptr(ifa.ifa_name).to_string_lossy().into_owned()
+            };
+            if NON_PUBLISHABLE_IFACE_PREFIXES
+                .iter()
+                .any(|p| name.starts_with(p))
+            {
+                continue;
+            }
+            // sockaddr → IpAddr。
+            let base = sa as *const libc::sockaddr;
+            let ip = if family == libc::AF_INET {
+                let sin = &*(base as *const libc::sockaddr_in);
+                std::net::IpAddr::V4(std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr)))
+            } else {
+                let sin6 = &*(base as *const libc::sockaddr_in6);
+                std::net::IpAddr::V6(std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr))
+            };
+            // 剔除回环 / 未指定 / link-local：这些发布给对端没有意义。
+            let skip = match ip {
+                std::net::IpAddr::V4(v4) => {
+                    v4.is_loopback() || v4.is_unspecified() || v4.is_link_local()
+                }
+                std::net::IpAddr::V6(v6) => {
+                    v6.is_loopback() || v6.is_unspecified() || (v6.segments()[0] & 0xffc0) == 0xfe80
+                }
+            };
+            if !skip {
+                out.push(ip);
+            }
+        }
+        libc::freeifaddrs(ifap);
+    }
+    out
+}
+
+#[cfg(not(unix))]
+fn publishable_local_ips() -> Vec<std::net::IpAddr> {
+    Vec::new()
+}
+
+/// 构造 pkarr 地址过滤器：保留 **relay + 公网地址 + 本机真实网卡地址**，剔除 docker/veth 等
+/// 虚拟网卡的私有段地址。iroh 默认 `relay_only`——只发 relay 会让客户端永远走中继。
+///
+/// 判定规则（必须同时满足"公网要发、内网要发、毒地址不发"）：
+/// - `Relay(_)` → 保留；
+/// - `Ip(公网地址)` → 保留（STUN 发现的 NAT 外网地址不在本机网卡列表里，必须单独放行，
+///   否则跨网客户端只能走 relay）；
+/// - `Ip(私有/回环/link-local)` → 仅当它是**本机真实网卡**地址时保留（robot.link 的
+///   172.16.2.136、cmxdev18 的 192.168.1.13 属此类，供同内网直连）；docker 网桥
+///   （172.17.0.1 等）不在白名单 → 剔除。
+fn pkarr_addr_filter() -> iroh::address_lookup::AddrFilter {
+    let allowed = publishable_local_ips();
+    iroh::address_lookup::AddrFilter::new(move |addrs: &Vec<iroh::TransportAddr>| {
+        let kept: Vec<_> = addrs
+            .iter()
+            .filter(|a| match a {
+                iroh::TransportAddr::Relay(_) => true,
+                iroh::TransportAddr::Ip(sa) => {
+                    let ip = sa.ip();
+                    // 本机真实网卡地址（含私有段）→ 保留，供同内网直连。
+                    if allowed.contains(&ip) {
+                        return true;
+                    }
+                    // 公网地址（非私有/回环/link-local）→ 保留，供跨网直连。
+                    match ip {
+                        std::net::IpAddr::V4(v4) => {
+                            !v4.is_private()
+                                && !v4.is_loopback()
+                                && !v4.is_link_local()
+                                && !v4.is_unspecified()
+                                && !v4.is_broadcast()
+                                && !v4.is_documentation()
+                        }
+                        std::net::IpAddr::V6(v6) => {
+                            !v6.is_loopback()
+                                && !v6.is_unspecified()
+                                && (v6.segments()[0] & 0xffc0) != 0xfe80
+                        }
+                    }
+                }
+                _ => false,
+            })
+            .cloned()
+            .collect();
+        std::borrow::Cow::Owned(kept)
+    })
+}
+
 /// 本系统的 ALPN 协议标识。
 pub const ALPN: &[u8] = b"nmspace/0";
 
@@ -99,7 +219,13 @@ impl NodeEndpoint {
                 // （弱锚多副本：地址发布写多个、解析查多个，任一可达即可 dial-by-key；退「单中继即单点」）。
                 // 单 URL（无逗号）= 原行为不变。
                 for u in pkarr_url.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                    b = b.address_lookup(PkarrPublisher::builder(u.parse().map_err(err)?));
+                    // iroh 默认 PkarrPublisher 用 AddrFilter::relay_only()：只发布中继地址，
+                    // 导致客户端永远走 relay（延迟高、监控看不到直连）。改为「relay + 本机真实网卡地址」：
+                    // 公网 IP 供跨网直连、内网 IP 供同内网直连，docker/veth 等毒地址剔除。
+                    b = b.address_lookup(
+                        PkarrPublisher::builder(u.parse().map_err(err)?)
+                            .addr_filter(pkarr_addr_filter()),
+                    );
                     b = b.address_lookup(PkarrResolver::builder(u.parse().map_err(err)?));
                 }
                 // 可选：额外用 DNS 查询解析（指向自建 dns 源域）。
@@ -461,4 +587,60 @@ pub fn addr_from_id(node_id: [u8; 32]) -> Result<EndpointAddr> {
     EndpointId::from_bytes(&node_id)
         .map(EndpointAddr::from)
         .map_err(err)
+}
+
+#[cfg(test)]
+mod addr_filter_tests {
+    use super::*;
+
+    fn ip(s: &str) -> iroh::TransportAddr {
+        iroh::TransportAddr::Ip(s.parse().unwrap())
+    }
+
+    #[test]
+    fn filter_keeps_relay_public_and_real_nic_drops_docker() {
+        let allowed: Vec<std::net::IpAddr> = vec!["192.168.1.13".parse().unwrap()];
+        let f = iroh::address_lookup::AddrFilter::new(move |addrs: &Vec<iroh::TransportAddr>| {
+            let kept: Vec<_> = addrs
+                .iter()
+                .filter(|a| match a {
+                    iroh::TransportAddr::Relay(_) => true,
+                    iroh::TransportAddr::Ip(sa) => {
+                        let ip = sa.ip();
+                        if allowed.contains(&ip) {
+                            return true;
+                        }
+                        match ip {
+                            std::net::IpAddr::V4(v4) => {
+                                !v4.is_private() && !v4.is_loopback() && !v4.is_link_local()
+                                    && !v4.is_unspecified() && !v4.is_broadcast() && !v4.is_documentation()
+                            }
+                            std::net::IpAddr::V6(v6) => {
+                                !v6.is_loopback() && !v6.is_unspecified() && (v6.segments()[0] & 0xffc0) != 0xfe80
+                            }
+                        }
+                    }
+                    _ => false,
+                })
+                .cloned()
+                .collect();
+            std::borrow::Cow::Owned(kept)
+        });
+
+        let relay: iroh::TransportAddr =
+            iroh::TransportAddr::Relay("https://relay.robot.link:8443/".parse().unwrap());
+        let input = vec![
+            relay.clone(),
+            ip("192.168.1.13:9600"),
+            ip("61.149.241.222:9600"),
+            ip("172.17.0.1:9600"),
+            ip("127.0.0.1:9600"),
+        ];
+        let out = f.apply(&input).to_vec();
+        assert!(out.contains(&relay), "relay 必须保留");
+        assert!(out.contains(&ip("192.168.1.13:9600")), "本机真实内网必须保留");
+        assert!(out.contains(&ip("61.149.241.222:9600")), "公网地址必须保留");
+        assert!(!out.contains(&ip("172.17.0.1:9600")), "docker 段必须剔除");
+        assert!(!out.contains(&ip("127.0.0.1:9600")), "回环必须剔除");
+    }
 }

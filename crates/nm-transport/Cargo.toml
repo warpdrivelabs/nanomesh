@@ -8,6 +8,8 @@ license.workspace = true
 nm-proto = { workspace = true }
 nm-core = { workspace = true }
 iroh = { workspace = true }
+# 枚举本机网卡（getifaddrs）以便 pkarr 只发布真实网卡地址、剔除 docker/veth 网桥。
+libc = "0.2"
 prost = "0.14"
 serde_json = { workspace = true }
 tokio = { workspace = true }
