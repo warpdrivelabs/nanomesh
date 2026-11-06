@@ -490,7 +490,7 @@ async fn nodes_with_addrs(State(s): State<AppState>, headers: HeaderMap, Query(q
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let bl = s.store.blacklist();
-    let resolve = q.resolve.unwrap_or(true);
+    let resolve = q.resolve.as_deref().map(|v| v != "0" && v != "false").unwrap_or(true);
     let snap = s.store.peers_snapshot();
     let now = now_secs();
     // 预先取出闭包需要的东西（join_all 的闭包是 FnMut，不能移动 s）。
@@ -536,8 +536,8 @@ async fn nodes_with_addrs(State(s): State<AppState>, headers: HeaderMap, Query(q
 
 #[derive(Deserialize)]
 struct NodesQuery {
-    /// 是否解析 pkarr 地址（默认 true）。
-    resolve: Option<bool>,
+    /// 是否解析 pkarr 地址（默认 true）；传 "0"/"false" 跳过。字符串以兼容 ?resolve=1。
+    resolve: Option<String>,
 }
 
 /// `/api/pkarr/records` — 枚举近期 DNS 中活跃的 pkarr key 并逐条解码。
