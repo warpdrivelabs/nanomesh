@@ -14,6 +14,7 @@
 
 mod auth;
 mod metrics;
+mod pkarr_decode;
 mod store;
 
 use std::net::SocketAddr;
@@ -21,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
-    extract::{Path, Request, State},
+    extract::{Path, Query, Request, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -147,6 +148,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/unban", post(unban))
         .route("/api/pkarr", get(pkarr_overview))
         .route("/api/pkarr/{key}", get(pkarr_lookup))
+        // 可观测性增强：节点地址详情 / pkarr 记录全量 / DNS 内容 / relay 明细
+        .route("/api/nodes", get(nodes_with_addrs))
+        .route("/api/pkarr/records", get(pkarr_records))
+        .route("/api/dns/records", get(dns_records))
+        .route("/api/relay/detail", get(relay_detail))
         .with_state(state);
 
     match (&args.tls_cert, &args.tls_key) {
@@ -447,6 +453,284 @@ async fn pkarr_lookup(
         )
             .into_response(),
     }
+}
+
+// ---------------------------------------------------------------
+// 可观测性增强：节点地址详情 / pkarr 全量记录 / DNS 内容 / relay 明细
+// ---------------------------------------------------------------
+
+/// 查询单个节点的 pkarr 记录并解码出 relay + 直连地址（不依赖 AppState，供并行闭包使用）。
+async fn fetch_node_addrs_with(
+    http: &reqwest::Client,
+    pkarr_base: &str,
+    node_id: &str,
+) -> pkarr_decode::NodeAddrs {
+    let Some(key) = pkarr_decode::to_pkarr_key(node_id) else {
+        return pkarr_decode::NodeAddrs { ok: false, error: Some("bad node id".into()), ..Default::default() };
+    };
+    let url = format!("{pkarr_base}/pkarr/{key}");
+    match http.get(&url).send().await {
+        Ok(res) if res.status().is_success() => match res.bytes().await {
+            Ok(b) => pkarr_decode::decode_signed_packet(&b),
+            Err(e) => pkarr_decode::NodeAddrs { ok: false, error: Some(e.to_string()), ..Default::default() },
+        },
+        Ok(res) => pkarr_decode::NodeAddrs {
+            ok: false,
+            error: Some(format!("pkarr HTTP {}", res.status().as_u16())),
+            ..Default::default()
+        },
+        Err(e) => pkarr_decode::NodeAddrs { ok: false, error: Some(e.to_string()), ..Default::default() },
+    }
+}
+
+/// `/api/nodes` — 节点清单，含 relay 连接次数、状态、以及从 pkarr 解出的**地址**。
+/// `?resolve=0` 可跳过 pkarr 解析（快速列表）。
+async fn nodes_with_addrs(State(s): State<AppState>, headers: HeaderMap, Query(q): Query<NodesQuery>) -> Response {
+    if !session_ok(&s, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let bl = s.store.blacklist();
+    let resolve = q.resolve.unwrap_or(true);
+    let snap = s.store.peers_snapshot();
+    let now = now_secs();
+    // 预先取出闭包需要的东西（join_all 的闭包是 FnMut，不能移动 s）。
+    let http = s.http.clone();
+    let pkarr_base = s.pkarr_base.clone();
+
+    let rows = futures::future::join_all(snap.into_iter().map(|p| {
+        let bl = bl.clone();
+        let http = http.clone();
+        let pkarr_base = pkarr_base.clone();
+        async move {
+            let banned = bl
+                .iter()
+                .any(|b| store::Store::normalize_id(b) == store::Store::normalize_id(&p.id));
+            let addrs = if resolve && !banned {
+                Some(fetch_node_addrs_with(&http, &pkarr_base, &p.id).await)
+            } else {
+                None
+            };
+            json!({
+                "id": p.id,
+                "status": if banned { "banned" }
+                    else if now.saturating_sub(p.last_seen) <= 60 { "active" }
+                    else if now.saturating_sub(p.last_seen) <= 600 { "idle" }
+                    else { "stale" },
+                "first_seen": p.first_seen,
+                "last_seen": p.last_seen,
+                "connects": p.connects,
+                "last_allowed": p.last_allowed,
+                "banned": banned,
+                "relays": addrs.as_ref().map(|a| a.relays.clone()).unwrap_or_default(),
+                "ips": addrs.as_ref().map(|a| a.ips.clone()).unwrap_or_default(),
+                "pkarr_ok": addrs.as_ref().map(|a| a.ok),
+                "pkarr_error": addrs.as_ref().and_then(|a| a.error.clone()),
+                "pkarr_bytes": addrs.as_ref().map(|a| a.bytes).unwrap_or(0),
+            })
+        }
+    }))
+    .await;
+
+    Json(json!({ "count": rows.len(), "nodes": rows })).into_response()
+}
+
+#[derive(Deserialize)]
+struct NodesQuery {
+    /// 是否解析 pkarr 地址（默认 true）。
+    resolve: Option<bool>,
+}
+
+/// `/api/pkarr/records` — 枚举近期 DNS 中活跃的 pkarr key 并逐条解码。
+/// key 来源：iroh-dns-server 的 journal（upsert 日志），故需可读 journal。
+async fn pkarr_records(State(s): State<AppState>, headers: HeaderMap, Query(q): Query<RecordsQuery>) -> Response {
+    if !session_ok(&s, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let limit = q.limit.unwrap_or(50).min(300);
+    let window = q.window_secs.unwrap_or(7200);
+
+    // 从 journal 提取活跃 key（z-base-32）
+    let keys = match collect_pkarr_keys(window, limit).await {
+        Ok(k) => k,
+        Err(e) => {
+            return Json(json!({
+                "ok": false,
+                "error": e,
+                "hint": "需要 nm-relay-admin 可读 journalctl；否则用 /api/nodes 基于 peers 解析",
+                "records": [],
+            }))
+            .into_response()
+        }
+    };
+
+    let recs = futures::future::join_all(keys.into_iter().map(|k| {
+        let http = s.http.clone();
+        let base = s.pkarr_base.clone();
+        async move {
+            let url = format!("{base}/pkarr/{k}");
+            let addrs = match http.get(&url).send().await {
+                Ok(r) if r.status().is_success() => match r.bytes().await {
+                    Ok(b) => pkarr_decode::decode_signed_packet(&b),
+                    Err(e) => pkarr_decode::NodeAddrs { ok: false, error: Some(e.to_string()), ..Default::default() },
+                },
+                Ok(r) => pkarr_decode::NodeAddrs {
+                    ok: false,
+                    error: Some(format!("HTTP {}", r.status().as_u16())),
+                    ..Default::default()
+                },
+                Err(e) => pkarr_decode::NodeAddrs { ok: false, error: Some(e.to_string()), ..Default::default() },
+            };
+            json!({
+                "key": k,
+                "ok": addrs.ok,
+                "bytes": addrs.bytes,
+                "relays": addrs.relays,
+                "ips": addrs.ips,
+                "error": addrs.error,
+            })
+        }
+    }))
+    .await;
+
+    Json(json!({ "ok": true, "count": recs.len(), "window_secs": window, "records": recs }))
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct RecordsQuery {
+    limit: Option<usize>,
+    window_secs: Option<u64>,
+}
+
+/// 从 journal 里收集近期 pkarr upsert 的 key（去重、最新优先）。
+async fn collect_pkarr_keys(window_secs: u64, limit: usize) -> Result<Vec<String>, String> {
+    let out = tokio::process::Command::new("journalctl")
+        .args(["-u", "iroh-dns", "--since", &format!("{window_secs} sec ago"), "--no-pager", "-o", "cat"])
+        .output()
+        .await
+        .map_err(|e| format!("spawn journalctl: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("journalctl exit {:?}", out.status.code()));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut seen = std::collections::HashSet::new();
+    let mut keys = Vec::new();
+    for line in text.lines().rev() {
+        if let Some(idx) = line.find("key=") {
+            let rest = &line[idx + 4..];
+            let key: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect();
+            if key.len() == 52 && seen.insert(key.clone()) {
+                keys.push(key);
+                if keys.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(keys)
+}
+
+/// `/api/dns/records` — DNS 侧明细：查询量、命中/未命中、pkarr 写入、存储统计。
+async fn dns_records(State(s): State<AppState>, headers: HeaderMap) -> Response {
+    if !session_ok(&s, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let m = s.metrics.scrape().await;
+    let d = &m.dns;
+    let get = |k: &str| d.get(k).copied().unwrap_or(0.0);
+
+    let total = get("dns_server_dns_requests_total");
+    let ok = get("dns_server_dns_lookup_success_total");
+    let nf = get("dns_server_dns_lookup_notfound_total");
+    let err = get("dns_server_dns_lookup_error_total");
+    let hit_rate = if total > 0.0 { ok / total * 100.0 } else { 0.0 };
+
+    Json(json!({
+        "up": m.dns_up,
+        "dns": {
+            "requests_total": total,
+            "requests_udp": get("dns_server_dns_requests_udp_total"),
+            "requests_https": get("dns_server_dns_requests_https_total"),
+            "lookup_success": ok,
+            "lookup_notfound": nf,
+            "lookup_error": err,
+            "hit_rate_pct": (hit_rate * 100.0).round() / 100.0,
+        },
+        "http": {
+            "requests_total": get("dns_server_http_requests_total"),
+            "success": get("dns_server_http_requests_success_total"),
+            "error": get("dns_server_http_requests_error_total"),
+            "duration_ms_total": get("dns_server_http_requests_duration_ms_total"),
+        },
+        "pkarr": {
+            "publish_update": get("dns_server_pkarr_publish_update_total"),
+            "publish_noop": get("dns_server_pkarr_publish_noop_total"),
+            "store_inserted": get("dns_server_store_packets_inserted_total"),
+            "store_updated": get("dns_server_store_packets_updated_total"),
+            "store_removed": get("dns_server_store_packets_removed_total"),
+            "store_expired": get("dns_server_store_packets_expired_total"),
+        },
+        "cache_zones": get("dns_server_cache_zones"),
+        "cache_zones_dht": get("dns_server_cache_zones_dht"),
+        "scraped_at_ms": m.scraped_at_ms,
+    }))
+    .into_response()
+}
+
+/// `/api/relay/detail` — relay 侧明细：连接、字节、丢包、限流、QAD、错误。
+async fn relay_detail(State(s): State<AppState>, headers: HeaderMap) -> Response {
+    if !session_ok(&s, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let m = s.metrics.scrape().await;
+    let r = &m.relay;
+    let get = |k: &str| r.get(k).copied().unwrap_or(0.0);
+
+    Json(json!({
+        "up": m.relay_up,
+        "conn": {
+            "accepts": get("relayserver_accepts_total"),
+            "disconnects": get("relayserver_disconnects_total"),
+            "http_connections": get("relayserver_http_connections_total"),
+            "http_closed": get("relayserver_http_connections_closed_total"),
+            "http_errored": get("relayserver_http_connections_errored_total"),
+            "unique_client_keys": get("relayserver_unique_client_keys"),
+            "clients_inactive_added": get("relayserver_clients_inactive_added_total"),
+            "clients_inactive_removed": get("relayserver_clients_inactive_removed_total"),
+        },
+        "traffic": {
+            "bytes_sent": get("relayserver_bytes_sent_total"),
+            "bytes_recv": get("relayserver_bytes_recv_total"),
+            "send_packets_sent": get("relayserver_send_packets_sent_total"),
+            "send_packets_recv": get("relayserver_send_packets_recv_total"),
+            "send_packets_dropped": get("relayserver_send_packets_dropped_total"),
+            "other_packets_sent": get("relayserver_other_packets_sent_total"),
+            "other_packets_recv": get("relayserver_other_packets_recv_total"),
+            "other_packets_dropped": get("relayserver_other_packets_dropped_total"),
+        },
+        "ratelimit": {
+            "bytes_rx_limited": get("relayserver_bytes_rx_ratelimited_total"),
+            "conns_rx_limited": get("relayserver_conns_rx_ratelimited_total"),
+        },
+        "qad": {
+            "connections": get("relayserver_qad_connections_total"),
+            "closed": get("relayserver_qad_connections_closed_total"),
+            "errored": get("relayserver_qad_connections_errored_total"),
+            "incoming": get("relayserver_qad_incoming_total"),
+            "incoming_error": get("relayserver_qad_incoming_error_total"),
+        },
+        "misc": {
+            "got_ping": get("relayserver_got_ping_total"),
+            "sent_pong": get("relayserver_sent_pong_total"),
+            "unknown_frames": get("relayserver_unknown_frames_total"),
+        },
+        "rates": m.rates,
+        "scraped_at_ms": m.scraped_at_ms,
+    }))
+    .into_response()
 }
 
 fn hex_preview(b: &[u8], n: usize) -> String {

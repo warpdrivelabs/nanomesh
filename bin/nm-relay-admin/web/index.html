@@ -31,6 +31,7 @@
 
         <nav class="tabs">
           <button data-tab="overview" class="on">总览</button>
+          <button data-tab="nodes">节点地址</button>
           <button data-tab="peers">对等节点</button>
           <button data-tab="blacklist">黑名单</button>
           <button data-tab="pkarr">Pkarr</button>
@@ -39,6 +40,27 @@
         <div id="tab-overview" class="tab">
           <div class="grid" id="overview-cards"></div>
           <pre id="overview-raw" class="raw"></pre>
+        </div>
+
+        <div id="tab-nodes" class="tab hidden">
+          <div class="toolbar">
+            <input id="node-filter" placeholder="过滤 node id / 地址…" />
+            <label class="muted"><input type="checkbox" id="node-resolve" checked /> 解析 pkarr 地址</label>
+            <button id="btn-nodes-refresh" class="ghost">刷新地址</button>
+            <span class="muted" id="node-count"></span>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Node</th>
+                <th>状态</th>
+                <th>Relay</th>
+                <th>直连地址</th>
+                <th>最近见到</th>
+              </tr>
+            </thead>
+            <tbody id="nodes-body"></tbody>
+          </table>
         </div>
 
         <div id="tab-peers" class="tab hidden">

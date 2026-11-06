@@ -22,3 +22,6 @@ argon2 = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
+# 解码 pkarr 签名包（把 DNS 里存的记录还原成 relay/直连地址），用于可观测性面板。
+iroh-dns = { workspace = true }
+futures = { workspace = true }

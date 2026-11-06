@@ -2683,6 +2683,8 @@ dependencies = [
  "axum",
  "axum-server",
  "clap",
+ "futures",
+ "iroh-dns",
  "reqwest",
  "rustls",
  "serde",

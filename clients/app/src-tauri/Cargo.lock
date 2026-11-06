@@ -4372,6 +4372,7 @@ name = "nm-transport"
 version = "0.1.1"
 dependencies = [
  "iroh",
+ "libc",
  "nm-core",
  "nm-proto",
  "prost",

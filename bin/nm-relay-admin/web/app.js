@@ -111,9 +111,10 @@
     btn.onclick = () => {
       document.querySelectorAll(".tabs button").forEach((b) => b.classList.remove("on"));
       btn.classList.add("on");
-      ["overview", "peers", "blacklist", "pkarr"].forEach((t) => {
+      ["overview", "nodes", "peers", "blacklist", "pkarr"].forEach((t) => {
         $("tab-" + t).classList.toggle("hidden", t !== btn.dataset.tab);
       });
+      if (btn.dataset.tab === "nodes") loadNodes();
     };
   });
 
@@ -167,6 +168,47 @@
     ].join("");
   }
 
+  let nodesCache = [];
+  async function loadNodes() {
+    const resolve = $("node-resolve").checked ? "1" : "0";
+    $("node-count").textContent = "加载中…";
+    try {
+      const r = await api("/api/nodes?resolve=" + resolve);
+      nodesCache = r.nodes || [];
+      renderNodes();
+    } catch (e) {
+      $("node-count").textContent = "失败: " + e.message;
+    }
+  }
+  function renderNodes() {
+    const q = ($("node-filter").value || "").trim().toLowerCase();
+    const rows = nodesCache.filter(
+      (n) =>
+        !q ||
+        (n.id || "").toLowerCase().includes(q) ||
+        (n.relays || []).join(" ").toLowerCase().includes(q) ||
+        (n.ips || []).join(" ").toLowerCase().includes(q)
+    );
+    $("node-count").textContent = `${rows.length} / ${nodesCache.length}`;
+    $("nodes-body").innerHTML =
+      rows
+        .map((n) => {
+          const st = n.status || "stale";
+          const relays = (n.relays || []).map((x) => `<div class="mono">${escapeHtml(x)}</div>`).join("") || '<span class="muted">—</span>';
+          const ips =
+            (n.ips || []).map((x) => `<div class="mono">${escapeHtml(x)}</div>`).join("") ||
+            (n.pkarr_ok === false ? `<span class="muted" title="${escapeHtml(n.pkarr_error || "")}">无记录</span>` : '<span class="muted">—</span>');
+          return `<tr>
+            <td class="code" title="${escapeHtml(n.id)}">${escapeHtml(shortId(n.id))}</td>
+            <td><span class="badge ${st}">${st}</span></td>
+            <td>${relays}</td>
+            <td>${ips}</td>
+            <td>${ago(n.last_seen)}</td>
+          </tr>`;
+        })
+        .join("") || `<tr><td colspan="5" class="muted">暂无节点</td></tr>`;
+  }
+
   function renderPeers() {
     const q = ($("peer-filter").value || "").trim().toLowerCase();
     const rows = peersCache.filter((p) => !q || (p.id || "").toLowerCase().includes(q));
@@ -202,6 +244,9 @@
   }
 
   $("peer-filter").oninput = renderPeers;
+  $("node-filter").oninput = renderNodes;
+  $("btn-nodes-refresh").onclick = () => loadNodes();
+  $("node-resolve").onchange = () => loadNodes();
   $("btn-ban").onclick = async () => {
     const id = $("ban-id").value.trim();
     if (!id) return;
