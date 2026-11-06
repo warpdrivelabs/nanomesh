@@ -93,8 +93,15 @@
 
         <div id="tab-pkarr" class="tab hidden">
           <div class="grid" id="pkarr-cards"></div>
+          <h3 class="sub">Pkarr 记录（节点发布到 DNS 的地址）</h3>
+          <table>
+            <thead>
+              <tr><th>Node</th><th>Relay</th><th>直连地址</th><th>字节</th></tr>
+            </thead>
+            <tbody id="pkarr-records-body"></tbody>
+          </table>
           <div class="toolbar">
-            <input id="pkarr-key" placeholder="z-base-32 public key…" style="min-width:28rem" />
+            <input id="pkarr-key" placeholder="按 z-base-32 / hex 公钥单独探针查询…" style="min-width:28rem" />
             <button id="btn-pkarr">查询</button>
           </div>
           <pre id="pkarr-result" class="raw"></pre>

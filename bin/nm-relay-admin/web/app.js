@@ -115,6 +115,7 @@
         $("tab-" + t).classList.toggle("hidden", t !== btn.dataset.tab);
       });
       if (btn.dataset.tab === "nodes") loadNodes();
+      if (btn.dataset.tab === "pkarr") loadPkarr().catch((e) => console.warn(e));
     };
   });
 
@@ -157,15 +158,41 @@
       };
     });
 
+    // Pkarr 面板独立加载（容错，不阻塞 refresh；切到该页也会重新加载）。
+    loadPkarr().catch((e) => console.warn("pkarr load failed", e));
+  }
+
+  async function loadPkarr() {
     const pk = await api("/api/pkarr");
     $("pkarr-cards").innerHTML = [
       card("Pkarr 服务", pk.up ? "在线" : "不可达"),
       card("HTTP 请求", (pk.http_requests || 0).toLocaleString()),
-      card("成功 / 错误", `${pk.http_success || 0} / ${pk.http_error || 0}`),
+      card("成功 / 错误", `${(pk.http_success || 0).toLocaleString()} / ${(pk.http_error || 0).toLocaleString()}`),
       card("发布更新", (pk.pkarr_publish_update || 0).toLocaleString()),
       card("入库 / 更新", `${pk.store_inserted || 0} / ${pk.store_updated || 0}`),
       card("过期删除", (pk.store_expired || 0).toLocaleString()),
     ].join("");
+    // 记录列表：复用 /api/nodes 的 pkarr 解码结果（节点公钥即 pkarr key）。
+    $("pkarr-records-body").innerHTML = `<tr><td colspan="4" class="muted">加载中…</td></tr>`;
+    try {
+      const r = await api("/api/nodes?resolve=1");
+      const rows = (r.nodes || []).filter((n) => (n.relays || []).length || (n.ips || []).length);
+      $("pkarr-records-body").innerHTML =
+        rows
+          .map((n) => {
+            const relays = (n.relays || []).map((x) => `<div class="mono">${escapeHtml(x)}</div>`).join("") || '<span class="muted">—</span>';
+            const ips = (n.ips || []).map((x) => `<div class="mono">${escapeHtml(x)}</div>`).join("") || '<span class="muted">—</span>';
+            return `<tr>
+              <td class="code" title="${escapeHtml(n.id)}">${escapeHtml(shortId(n.id))}</td>
+              <td>${relays}</td>
+              <td>${ips}</td>
+              <td>${n.pkarr_bytes || 0}</td>
+            </tr>`;
+          })
+          .join("") || `<tr><td colspan="4" class="muted">暂无已发布地址的记录</td></tr>`;
+    } catch (e) {
+      $("pkarr-records-body").innerHTML = `<tr><td colspan="4" class="err">记录加载失败: ${escapeHtml(String(e.message || e))}</td></tr>`;
+    }
   }
 
   let nodesCache = [];

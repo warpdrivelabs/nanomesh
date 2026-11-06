@@ -127,3 +127,6 @@ dialog {
 }
 dialog::backdrop { background: #0008; }
 dialog form { display: grid; gap: .75rem; min-width: 280px; }
+
+/* Pkarr 记录小标题 */
+.sub { margin: 1.2rem 0 0.4rem; font-size: 0.95rem; color: var(--muted, #8a93a6); font-weight: 600; }
