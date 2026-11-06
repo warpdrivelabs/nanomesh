@@ -148,9 +148,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/unban", post(unban))
         .route("/api/pkarr", get(pkarr_overview))
         .route("/api/pkarr/{key}", get(pkarr_lookup))
-        // 可观测性增强：节点地址详情 / pkarr 记录全量 / DNS 内容 / relay 明细
+        // 可观测性增强：节点地址详情 / DNS 内容 / relay 明细
         .route("/api/nodes", get(nodes_with_addrs))
-        .route("/api/pkarr/records", get(pkarr_records))
         .route("/api/dns/records", get(dns_records))
         .route("/api/relay/detail", get(relay_detail))
         .with_state(state);
@@ -468,10 +467,13 @@ async fn fetch_node_addrs_with(
     let Some(key) = pkarr_decode::to_pkarr_key(node_id) else {
         return pkarr_decode::NodeAddrs { ok: false, error: Some("bad node id".into()), ..Default::default() };
     };
+    let Some(pk) = pkarr_decode::pubkey_bytes(node_id) else {
+        return pkarr_decode::NodeAddrs { ok: false, error: Some("bad pubkey".into()), ..Default::default() };
+    };
     let url = format!("{pkarr_base}/pkarr/{key}");
     match http.get(&url).send().await {
         Ok(res) if res.status().is_success() => match res.bytes().await {
-            Ok(b) => pkarr_decode::decode_signed_packet(&b),
+            Ok(b) => pkarr_decode::decode_relay_payload(&pk, &b),
             Err(e) => pkarr_decode::NodeAddrs { ok: false, error: Some(e.to_string()), ..Default::default() },
         },
         Ok(res) => pkarr_decode::NodeAddrs {
@@ -538,99 +540,6 @@ async fn nodes_with_addrs(State(s): State<AppState>, headers: HeaderMap, Query(q
 struct NodesQuery {
     /// 是否解析 pkarr 地址（默认 true）；传 "0"/"false" 跳过。字符串以兼容 ?resolve=1。
     resolve: Option<String>,
-}
-
-/// `/api/pkarr/records` — 枚举近期 DNS 中活跃的 pkarr key 并逐条解码。
-/// key 来源：iroh-dns-server 的 journal（upsert 日志），故需可读 journal。
-async fn pkarr_records(State(s): State<AppState>, headers: HeaderMap, Query(q): Query<RecordsQuery>) -> Response {
-    if !session_ok(&s, &headers) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let limit = q.limit.unwrap_or(50).min(300);
-    let window = q.window_secs.unwrap_or(7200);
-
-    // 从 journal 提取活跃 key（z-base-32）
-    let keys = match collect_pkarr_keys(window, limit).await {
-        Ok(k) => k,
-        Err(e) => {
-            return Json(json!({
-                "ok": false,
-                "error": e,
-                "hint": "需要 nm-relay-admin 可读 journalctl；否则用 /api/nodes 基于 peers 解析",
-                "records": [],
-            }))
-            .into_response()
-        }
-    };
-
-    let recs = futures::future::join_all(keys.into_iter().map(|k| {
-        let http = s.http.clone();
-        let base = s.pkarr_base.clone();
-        async move {
-            let url = format!("{base}/pkarr/{k}");
-            let addrs = match http.get(&url).send().await {
-                Ok(r) if r.status().is_success() => match r.bytes().await {
-                    Ok(b) => pkarr_decode::decode_signed_packet(&b),
-                    Err(e) => pkarr_decode::NodeAddrs { ok: false, error: Some(e.to_string()), ..Default::default() },
-                },
-                Ok(r) => pkarr_decode::NodeAddrs {
-                    ok: false,
-                    error: Some(format!("HTTP {}", r.status().as_u16())),
-                    ..Default::default()
-                },
-                Err(e) => pkarr_decode::NodeAddrs { ok: false, error: Some(e.to_string()), ..Default::default() },
-            };
-            json!({
-                "key": k,
-                "ok": addrs.ok,
-                "bytes": addrs.bytes,
-                "relays": addrs.relays,
-                "ips": addrs.ips,
-                "error": addrs.error,
-            })
-        }
-    }))
-    .await;
-
-    Json(json!({ "ok": true, "count": recs.len(), "window_secs": window, "records": recs }))
-        .into_response()
-}
-
-#[derive(Deserialize)]
-struct RecordsQuery {
-    limit: Option<usize>,
-    window_secs: Option<u64>,
-}
-
-/// 从 journal 里收集近期 pkarr upsert 的 key（去重、最新优先）。
-async fn collect_pkarr_keys(window_secs: u64, limit: usize) -> Result<Vec<String>, String> {
-    let out = tokio::process::Command::new("journalctl")
-        .args(["-u", "iroh-dns", "--since", &format!("{window_secs} sec ago"), "--no-pager", "-o", "cat"])
-        .output()
-        .await
-        .map_err(|e| format!("spawn journalctl: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("journalctl exit {:?}", out.status.code()));
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut seen = std::collections::HashSet::new();
-    let mut keys = Vec::new();
-    for line in text.lines().rev() {
-        if let Some(idx) = line.find("key=") {
-            let rest = &line[idx + 4..];
-            let key: String = rest
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric())
-                .collect();
-            if key.len() == 52 && seen.insert(key.clone()) {
-                keys.push(key);
-                if keys.len() >= limit {
-                    break;
-                }
-            }
-        }
-    }
-    Ok(keys)
 }
 
 /// `/api/dns/records` — DNS 侧明细：查询量、命中/未命中、pkarr 写入、存储统计。

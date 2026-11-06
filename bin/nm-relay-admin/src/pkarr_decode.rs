@@ -28,12 +28,23 @@ impl NodeAddrs {
     }
 }
 
-/// 从 pkarr 原始字节（SignedPacket）解码出 relay + IP 地址。
-pub fn decode_signed_packet(bytes: &[u8]) -> NodeAddrs {
+/// 从 pkarr GET 响应字节解码出 relay + IP 地址。
+///
+/// 注意：iroh-dns-server 的 `/pkarr/{key}` 返回的是 **relay payload** 格式
+/// （`SignedPacket::to_relay_payload()`，即 64B 签名 + 8B 时间戳 + DNS 包），
+/// 必须用 `from_relay_payload(公钥, payload)` 解码，而非 `from_bytes`。
+/// 故需要节点的 32 字节公钥。
+pub fn decode_relay_payload(pubkey: &[u8; 32], bytes: &[u8]) -> NodeAddrs {
     if bytes.is_empty() {
         return NodeAddrs::err("empty packet");
     }
-    let packet = match iroh_dns::pkarr::SignedPacket::from_bytes(bytes) {
+    // iroh-dns 的 /pkarr/{key} 返回 relay payload（签名+时间戳+DNS 包，不含公钥前缀）。
+    // SignedPacket::from_relay_payload 的实现就是「公钥32字节 ++ payload」再 from_bytes，
+    // 这里直接自拼，避开 iroh_base::PublicKey 的可见性问题。
+    let mut full = Vec::with_capacity(32 + bytes.len());
+    full.extend_from_slice(pubkey);
+    full.extend_from_slice(bytes);
+    let packet = match iroh_dns::pkarr::SignedPacket::from_bytes(&full) {
         Ok(p) => p,
         Err(e) => return NodeAddrs::err(format!("verify/decode failed: {e}")),
     };
@@ -61,14 +72,55 @@ pub fn to_pkarr_key(node_id: &str) -> Option<String> {
     }
     // 64 位 hex → 32 字节 → z-base-32
     if t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit()) {
-        let mut raw = [0u8; 32];
-        for i in 0..32 {
-            raw[i] = u8::from_str_radix(&t[i * 2..i * 2 + 2], 16).ok()?;
-        }
+        let raw = hex32(t)?;
         return Some(z_base32_encode(&raw));
     }
     // 视为 z32 原样
     Some(t.to_string())
+}
+
+/// 由 node id（z32 或 64-hex）解出 32 字节公钥。
+pub fn pubkey_bytes(node_id: &str) -> Option<[u8; 32]> {
+    let t = node_id.trim();
+    if t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit()) {
+        return hex32(t);
+    }
+    // z32 解码
+    z_base32_decode(t)
+}
+
+fn hex32(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 {
+        return None;
+    }
+    let mut raw = [0u8; 32];
+    for i in 0..32 {
+        raw[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(raw)
+}
+
+/// z-base-32 解码（52 字符 → 32 字节）。
+fn z_base32_decode(s: &str) -> Option<[u8; 32]> {
+    const ALPH: &[u8] = b"ybndrfg8ejkmcpqxot1uwisza345h769";
+    let mut buf: u32 = 0;
+    let mut bits: u32 = 0;
+    let mut out = Vec::with_capacity(32);
+    for c in s.bytes() {
+        let v = ALPH.iter().position(|&a| a == c)? as u32;
+        buf = (buf << 5) | v;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    if out.len() != 32 {
+        return None;
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&out);
+    Some(arr)
 }
 
 /// z-base-32 编码（pkarr/iroh 使用的字母表，与 RFC4648 base32 不同）。
@@ -111,14 +163,28 @@ mod tests {
 
     #[test]
     fn decode_empty_is_error() {
-        let r = decode_signed_packet(&[]);
+        let r = decode_relay_payload(&[0u8; 32], &[]);
         assert!(!r.ok);
         assert!(r.error.is_some());
     }
 
     #[test]
     fn decode_garbage_is_error_not_panic() {
-        let r = decode_signed_packet(&[0xff; 200]);
+        let r = decode_relay_payload(&[1u8; 32], &[0xff; 200]);
         assert!(!r.ok);
+    }
+
+    #[test]
+    fn z32_decode_roundtrip() {
+        // 全 0 → z32 → 解回全 0
+        let z = z_base32_encode(&[0u8; 32]);
+        let back = z_base32_decode(&z).unwrap();
+        assert_eq!(back, [0u8; 32]);
+        // 已知公钥 hex → z32 → pubkey_bytes 应回到原 hex 字节
+        let hex = "d2aba10821698104f0b2400fb25ff98f027c09f4ccde6957aeb88cc5eb6c2193";
+        let raw = hex32(hex).unwrap();
+        let z = to_pkarr_key(hex).unwrap();
+        assert_eq!(pubkey_bytes(&z).unwrap(), raw);
+        assert_eq!(pubkey_bytes(hex).unwrap(), raw);
     }
 }
