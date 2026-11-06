@@ -36,7 +36,7 @@ function renderConversations() {
   box.innerHTML = peers.map(({ c, last }) => {
     const shown = last ? (window.Composer ? Composer.preview(last) : last.body) : "";
     const preview = last ? escapeHtml((last.from === MY_ID ? "我: " : "") + shown) : "";
-    return itemHtml(c, preview, UNREAD[c.id] || 0, ACTIVE, { time: listTime(last && last.ts), inlineHandle: false });
+    return itemHtml(c, preview, UNREAD[c.id] || 0, ACTIVE, { time: listTime(last && last.ts), inlineHandle: false, at: UNREAD_AT[c.id] || 0 });
   }).join("");
   wireItems(box, selectContact);
 }
@@ -174,7 +174,9 @@ function itemHtml(c, sub, unread, sel, opts) {
   const face = roomFace(c, 40, dot);
   const time = opts.time ? `<span class="tm">${escapeHtml(opts.time)}</span>` : "";
   const u = formatUnread(unread);
-  const badge = u ? `<span class="unread">${u}</span>` : "";
+  // @ 提及徽标（M1）：会话有未读且含 @我/@所有人 → 金色 @N；随已读一起消除。
+  const at = opts.at && u;
+  const badge = u ? `<span class="unread${at ? " unread--at" : ""}">${at ? "@" + u : u}</span>` : "";
   return `<div class="im-item ${c.id === sel ? "on" : ""}" data-id="${c.id}" title="${escapeHtml(c.id)}">
     ${face}
     <span class="mid">
@@ -354,7 +356,7 @@ function selectContact(id) {
   if (hint.kind === "channel" && window.openChannel) { openChannel(id); return; }
   const c = entityById(id) || { id, name: "" };
   const title = c.name || shortId(id);
-  const draw = () => { ACTIVE = id; DETAIL_ID = null; UNREAD[id] = 0; syncRead(id); scheduleUnread(); renderPanels(); renderConversation(); };
+  const draw = () => { ACTIVE = id; DETAIL_ID = null; UNREAD[id] = 0; if (window.UNREAD_AT) UNREAD_AT[id] = 0; syncRead(id); scheduleUnread(); renderPanels(); renderConversation(); };
   if (window.Tabs) Tabs.open({ key: "c:" + id, kind: "chat", title, ico: "chat", render: draw });
   else draw();
 }

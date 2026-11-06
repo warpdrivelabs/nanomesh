@@ -12,6 +12,7 @@ let CONVOS = {};                // 当前身份的会话：id -> [{id,from,body,
 let ACTIVE = null;              // 当前打开的聊天对端 id（与主区聊天框一致；关闭 tab 后清空）
 let DETAIL_ID = null;          // 当前查看详情的实体 id（实体目录高亮）
 let UNREAD = {};                // 当前身份的未读：id -> 数
+let UNREAD_AT = {};             // 其中含 @我/@所有人 的会话数：id -> 数（@ 徽标；内存 + localStorage 持久化）
 let READ_UPTO = {};             // P1-6：各会话已读到的时间戳 ms（多设备同步；用于清零未读/抑制已读消息重计）
 /** 主区当前正在显示的聊天对端：以 tab 为准，不用列表选中残留。 */
 function viewingPeer() {
@@ -97,7 +98,7 @@ window.entityName = function (id) { if (id === MY_ID) return "我"; const c = en
 window.openGroupChat = function (gid) {
   const g = window.Groups && Groups.byId(gid);
   const title = g ? (g.name || "群") : shortId(gid);
-  const draw = () => { ACTIVE = gid; DETAIL_ID = null; UNREAD[gid] = 0; syncRead(gid); scheduleUnread(); renderPanels(); renderConversation(); };
+  const draw = () => { ACTIVE = gid; DETAIL_ID = null; UNREAD[gid] = 0; UNREAD_AT[gid] = 0; syncRead(gid); scheduleUnread(); renderPanels(); renderConversation(); };
   if (window.Tabs) Tabs.open({ key: "c:" + gid, kind: "chat", title, ico: "groups", render: draw });
   else draw();
 };
@@ -105,7 +106,7 @@ window.openGroupChat = function (gid) {
 window.openChannel = function (cid) {
   const c = window.Channels && Channels.byId(cid);
   const title = c ? (c.name || "频道") : shortId(cid);
-  const draw = () => { ACTIVE = cid; DETAIL_ID = null; UNREAD[cid] = 0; syncRead(cid); scheduleUnread(); renderPanels(); renderConversation(); };
+  const draw = () => { ACTIVE = cid; DETAIL_ID = null; UNREAD[cid] = 0; UNREAD_AT[cid] = 0; syncRead(cid); scheduleUnread(); renderPanels(); renderConversation(); };
   if (window.Channels && Channels.pullHistory) Channels.pullHistory(cid);
   if (window.Tabs) Tabs.open({ key: "c:" + cid, kind: "chat", title, ico: "channels", render: draw });
   else draw();
@@ -168,7 +169,10 @@ function scheduleUnread() {
   paintActUnread();
   if (window.Tabs && Tabs.paintBadges) Tabs.paintBadges();
   clearTimeout(unreadTimer);
-  unreadTimer = setTimeout(() => { if (window.ChatLog) ChatLog.setUnread(UNREAD); }, 200);
+  unreadTimer = setTimeout(() => {
+    if (window.ChatLog) ChatLog.setUnread(UNREAD);
+    try { localStorage.setItem("nm.unread.at." + (typeof MY_ID !== "undefined" ? MY_ID : ""), JSON.stringify(UNREAD_AT || {})); } catch (_) {}
+  }, 200);
 }
 window.addEventListener("pagehide", () => { if (window.ChatLog) ChatLog.setUnread(UNREAD); });
 
@@ -196,7 +200,7 @@ function applyReadMarker(conv, ts) {
   ts = Number(ts) || 0;
   if (ts <= (READ_UPTO[conv] || 0)) return;
   READ_UPTO[conv] = ts;
-  if (ts >= convLastTs(conv) && UNREAD[conv]) { UNREAD[conv] = 0; scheduleUnread(); renderPanels(); }
+  if (ts >= convLastTs(conv) && UNREAD[conv]) { UNREAD[conv] = 0; UNREAD_AT[conv] = 0; scheduleUnread(); renderPanels(); }
 }
 window.applyReadMarker = applyReadMarker;
 
@@ -210,6 +214,7 @@ async function imStart(myId) {
   if (window.Profile && Profile.load) { try { await Profile.load(); } catch (_) {} }
   CONVOS = CONVOS_BY_USER[MY_ID] = {};
   UNREAD = UNREAD_BY_USER[MY_ID] = {};
+  try { UNREAD_AT = JSON.parse(localStorage.getItem("nm.unread.at." + MY_ID) || "{}") || {}; } catch (_) { UNREAD_AT = {}; }
   READ_UPTO = {}; // P1-6：每次（切身份）连接重置已读位，随后经 read_list 追平
   if (window.ChatLog) await ChatLog.open(MY_ID);
   if (MY_ID !== (myId || "")) return;
@@ -221,7 +226,7 @@ async function imStart(myId) {
       for (const [conv, ts] of marks) {
         const t = Number(ts) || 0;
         READ_UPTO[conv] = Math.max(READ_UPTO[conv] || 0, t);
-        if (t >= convLastTs(conv)) UNREAD[conv] = 0;
+        if (t >= convLastTs(conv)) { UNREAD[conv] = 0; UNREAD_AT[conv] = 0; }
       }
       scheduleUnread();
     }

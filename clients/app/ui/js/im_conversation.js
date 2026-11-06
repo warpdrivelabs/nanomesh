@@ -421,6 +421,15 @@ async function sendMsg(text) {
       await NM.inv("channel_publish", { channelId: ACTIVE, body: text }); // 节点会回投给本地订阅者(含自己)，不做乐观插入以免重复
       try { localStorage.removeItem("nm.chn.draft." + ACTIVE); } catch (_) {}
     } else if (isGroup) {
+      // @所有人权限：>50 人群仅群主/管理员可发（纯文本机制——按文本里的 @所有人 令牌检测）。
+      if (/@(所有人|全部|everyone|all)(?![A-Za-z0-9一-鿿])/i.test(text)) {
+        const g0 = Groups.byId(ACTIVE);
+        const can = !g0 || (g0.members || []).length <= 50 || g0.owner === MY_ID || (g0.admins || []).includes(MY_ID);
+        if (!can) {
+          if (window.toast) toast("超过 50 人的群仅群主/管理员可以 @所有人");
+          return;
+        }
+      }
       // 乐观插入(status=0 发送中)；send_group 返回原 gram_id → 升单勾✓(消息已达 home node)。
       // 群聊只到单勾(无逐成员已读聚合)；接收方不对群消息回 client-receipt，故不会升双勾。
       // 必须 await pushMsg：否则 agent 首包 delta 会同步抢先插入 VIEW/SQLite，气泡跑到用户消息上方。

@@ -118,6 +118,13 @@
   .im-item .msg{flex:1;font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .im-item .nm-handle{color:var(--aqua);font-family:ui-monospace,Menlo,monospace;font-size:11.5px}
   .im-item .nm-handle--inline{font-size:11px;flex:0 0 auto}
+  /* 群 @ 提及徽标（@N，金色）与消息气泡内 @ 高亮：统一低饱和蓝（--blue-soft，@我/@所有人 加重） */
+  .im-item .unread.unread--at{background:var(--gold);color:#141414;font-weight:700}
+  .im-msg .mention{color:var(--blue-soft);font-weight:600;cursor:pointer}
+  .im-msg .mention:hover{text-decoration:underline}
+  .im-msg .mention--me,
+  .im-msg .mention--all{font-weight:700}
+  .im-pop button.is-on{background:var(--hover)}
   .im-item .unread{min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:var(--aqua);color:var(--on-accent);
     font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
   /* VSCode 式插件行 */

@@ -25,6 +25,8 @@ let emojiTab = "最近";
 let rec = null;
 let sending = false;
 let installed = false;
+// 群 @ 联想面板状态：{start( "@" 在 text 中的偏移), query, sel, items}
+let at = null;
 
 function draft() {
   let d = drafts.get(viewId);
@@ -40,6 +42,7 @@ function snapshot() {
 
 function prepare(id, room, channel) {
   snapshot();
+  atClose();
   viewId = id || "";
   viewRoom = !!room;
   viewChannel = !!channel;
@@ -120,9 +123,10 @@ function attach(next) {
   const input = document.getElementById("conv-input");
   if (!input) return;
   input.addEventListener("keydown", (e) => {
+    if (atPanelKeys(e)) return; // @ 面板打开时优先消费导航/确认键
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); doSend(); }
   });
-  input.addEventListener("input", () => { draft().text = input.value; fit(input); syncSend(); });
+  input.addEventListener("input", () => { draft().text = input.value; fit(input); syncSend(); atUpdate(input); });
   fit(input);
   syncSend();
   const img = document.getElementById("conv-pick-image");
@@ -235,6 +239,8 @@ function onComposerClick(e) {
   if (act === "video") { const el = document.getElementById("conv-pick-video"); if (el) el.click(); return; }
   if (act === "file") { const el = document.getElementById("conv-pick-file"); if (el) el.click(); return; }
   if (act === "mic") { toggleMic(); return; }
+  if (act === "at-pick") { e.stopImmediatePropagation(); atApply(btn.getAttribute("data-name") || "", btn.getAttribute("data-id") || ""); return; }
+  if (act === "at-all") { e.stopImmediatePropagation(); atApply("所有人", ""); return; }
   if (act === "mention") { insertAt("@" + (btn.getAttribute("data-name") || "") + " "); closePop(); return; }
   if (act === "card") { closePop(); sendCard(btn.getAttribute("data-id") || "", btn.getAttribute("data-name") || ""); return; }
   if (act === "send") { doSend(); return; }
@@ -479,12 +485,145 @@ function togglePeople(anchor) {
   popKind = "people";
   if (viewRoom) {
     const list = (api && api.mentions ? api.mentions() : []);
-    openPop(list.length ? list.map((m) => `<button type="button" data-act="mention" data-name="${escapeHtml(m.name)}">${escapeHtml(m.name)}</button>`).join("") : `<div class="im-history-empty">没有可提及的成员</div>`, anchor);
+    openPop(list.length ? [
+      `<button type="button" data-act="at-all">@所有人</button>`,
+      ...list.map((m) => `<button type="button" data-act="at-pick" data-id="${escapeHtml(m.id)}" data-name="${escapeHtml(m.name)}">${escapeHtml(m.name)}<small>${escapeHtml((m.id || "").slice(0, 8))}</small></button>`),
+    ].join("") : `<div class="im-history-empty">没有可提及的成员</div>`, anchor);
   } else {
     const list = (api && api.cards ? api.cards() : []);
     openPop(list.length ? list.map((m) => `<button type="button" data-act="card" data-id="${escapeHtml(m.id)}" data-name="${escapeHtml(m.name)}">${escapeHtml(m.name)}</button>`).join("") : `<div class="im-history-empty">没有可发送的名片</div>`, anchor);
   }
 }
+
+// ── 群 @ 提及（纯文本机制增强）：输入联想面板 + 气泡名字反查高亮 ─────────
+// 与老 @（工具栏插 @名字）同机制：消息就是纯文本，不加线协议元数据。
+// 高亮/徽标接收端按群成员名单（及我的显示名集合）反查文本里的 "@名字" 片段。
+
+function atGroup() {
+  return viewRoom && !viewChannel && window.Groups && Groups.byId && Groups.byId(viewId);
+}
+
+/** 输入联动：光标前是「行首/空白后 的 @前缀」且当前是群聊 → 弹/更新联想面板。 */
+function atUpdate(input) {
+  const caret = input.selectionStart || 0;
+  const before = input.value.slice(0, caret);
+  const m = /(?:^|[\s（(【\[])@([^\s@]{0,30})$/.exec(before);
+  if (!m || !atGroup()) { if (at) atClose(); return; }
+  const q = m[1].toLowerCase();
+  const targets = (api && api.mentions ? api.mentions() : []);
+  const items = targets.filter((t) => t.name && t.name.toLowerCase().includes(q)).slice(0, 20);
+  at = { start: caret - m[1].length - 1, sel: 0, all: true, items };
+  popKind = "at";
+  openPop([
+    `<button type="button" data-act="at-all" class="${at.sel === 0 ? "is-on" : ""}">@所有人</button>`,
+    ...items.map((t, i) => `<button type="button" data-act="at-pick" data-i="${i + 1}" data-id="${escapeHtml(t.id)}" data-name="${escapeHtml(t.name)}" class="${at.sel === i + 1 ? "is-on" : ""}">${escapeHtml(t.name)}<small>${escapeHtml((t.id || "").slice(0, 8))}</small></button>`),
+  ].join("") || `<div class="im-history-empty">没有匹配的成员</div>`, input);
+}
+
+function atClose() {
+  at = null;
+  closePop();
+}
+
+/** @ 面板打开时消费按键；返回 true 表示已处理（不再触发发送）。 */
+function atPanelKeys(e) {
+  if (!at) return false;
+  const rows = 1 + (at.items ? at.items.length : 0);
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    at.sel = (at.sel + (e.key === "ArrowDown" ? 1 : rows - 1)) % rows;
+    const pop = document.getElementById("conv-pop");
+    if (pop) [...pop.children].forEach((el, i) => el.classList && el.classList.toggle("is-on", i === at.sel));
+    return true;
+  }
+  if (e.key === "Enter" || e.key === "Tab") {
+    e.preventDefault();
+    if (at.sel === 0) atApply("所有人", "");
+    else { const t = at.items[at.sel - 1]; if (t) atApply(t.name, t.id); }
+    return true;
+  }
+  if (e.key === "Escape") {
+    e.preventDefault();
+    e.stopPropagation();
+    atClose();
+    return true;
+  }
+  return false;
+}
+
+/** 选中成员/所有人：把光标前未完成的 @前缀 替换为完整的 "@名字 "，并记录选择（同名消歧用）。 */
+function atApply(name, id) {
+  const input = document.getElementById("conv-input");
+  if (!input) return;
+  const ins = "@" + name + " ";
+  if (at) {
+    // 打字联想面板：把光标前未完成的 @前缀 整体替换为 "@名字 "
+    const caret = input.selectionStart || 0;
+    input.value = input.value.slice(0, at.start) + ins + input.value.slice(caret);
+    const n = at.start + ins.length;
+    input.setSelectionRange(n, n);
+    draft().text = input.value;
+    fit(input);
+  } else {
+    // 工具栏面板（无打字上下文）：光标处直接插入
+    insertAt(ins);
+  }
+  atClose();
+  input.focus();
+}
+
+/** 气泡内 @ 高亮：纯文本机制——按当前群成员名单反查文本里的 "@名字" 片段（@所有人 单独识别）。 */
+function mentionNamesOf(m) {
+  const g = (m.group && window.Groups && Groups.byId) ? Groups.byId(m.to) : null;
+  if (!g) return [];
+  const ids = [...new Set([...(g.members || []), ...(g.admins || []), g.owner].filter(Boolean))];
+  return ids.map((id) => ({ id, name: window.entityName ? entityName(id) : "" })).filter((x) => x.name);
+}
+
+function mentionHtml(m) {
+  const src = m.text || m.body || "";
+  const ranges = [];
+  if (m.group && src.indexOf("@") >= 0) {
+    const taken = [];
+    // @所有人令牌优先（红色占位，防成员名恰好叫「所有人」时重叠命中）。
+    const re = /@(所有人|全部|everyone|all)(?![A-Za-z0-9一-鿿])/gi;
+    let mm;
+    while ((mm = re.exec(src))) {
+      taken.push({ start: mm.index, end: mm.index + mm[0].length });
+      ranges.push({ start: mm.index, end: mm.index + mm[0].length, id: "", all: true });
+    }
+    const targets = mentionNamesOf(m);
+    for (const name of targets.map((t) => t.name).sort((a, b) => b.length - a.length)) {
+      const tok = "@" + name;
+      let i = src.indexOf(tok);
+      while (i >= 0) {
+        const start = i, end = i + tok.length;
+        const next = src[end];
+        if ((next === undefined || /[\s，。；！？、)】）]/.test(next)) && !taken.some((r) => start < r.end && end > r.start)) {
+          taken.push({ start, end });
+          const t0 = targets.find((t) => t.name === name);
+          ranges.push({ start, end, id: t0 ? t0.id : "", all: false });
+        }
+        i = src.indexOf(tok, i + 1);
+      }
+    }
+  }
+  if (!ranges.length) return escapeHtml(src);
+  ranges.sort((a, b) => a.start - b.start);
+  const myId = (typeof MY_ID !== "undefined" && MY_ID) ? String(MY_ID).toLowerCase() : "";
+  let html = "", pos = 0;
+  for (const r of ranges) {
+    if (r.start < pos) continue;
+    html += escapeHtml(src.slice(pos, r.start));
+    const me = r.id && myId && r.id.toLowerCase() === myId;
+    const cls = "mention" + (me ? " mention--me" : "") + (r.all ? " mention--all" : "");
+    html += `<span class="${cls}"${r.id ? ` data-id="${escapeHtml(r.id)}"` : ""}>${escapeHtml(src.slice(r.start, r.end))}</span>`;
+    pos = r.end;
+  }
+  html += escapeHtml(src.slice(pos));
+  return html;
+}
+
 
 async function sendCard(id, name) {
   if (!id || !api || !api.sendRich) return;
@@ -676,7 +815,12 @@ function channelBody(media) { return CHAT_PREFIX + JSON.stringify(media); }
 
 function bubble(m) {
   const media = m.media || parseChat(m.body, m.typeUrl);
-  if (!media) return { cls: "", html: escapeHtml(m.text || m.body || "") };
+  if (!media) {
+    // 群 @ 提及：有元数据精确高亮；无元数据（老消息/旧客户端）按名单反查兜底；无 @ 纯文本。
+    const src = m.text || m.body || "";
+    const hasAt = m.group && src.indexOf("@") >= 0;
+    return { cls: "", html: hasAt ? mentionHtml(m) : escapeHtml(src) };
+  }
   if (media.kind === "image" || media.kind === "voice" || media.kind === "video") {
     const parts = (media.parts || []).join(",");
     return {
@@ -993,6 +1137,12 @@ function closeLight() {
 }
 
 document.addEventListener("click", (e) => {
+  // 消息气泡里的 @提及 → 打开对方资料卡（M2）。气泡不在 composer 内，先于 composer/media 分支。
+  const men = e.target.closest && e.target.closest(".im-msg .mention[data-id]");
+  if (men && typeof window.showEntityDetail === "function") {
+    window.showEntityDetail(men.getAttribute("data-id"));
+    return;
+  }
   if (e.target.closest && e.target.closest(".im-composer")) onComposerClick(e);
   else if (e.target.closest && (e.target.closest(".im-media") || e.target.closest(".im-file") || e.target.closest(".im-card") || e.target.closest(".im-location") || e.target.closest(".im-lightbox") || e.target.closest(".chn-md-img"))) onMediaClick(e);
 });

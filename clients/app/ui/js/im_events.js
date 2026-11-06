@@ -209,17 +209,48 @@ function handleAgentDelta(m) {
         return pushMsg(peer, retry).then((ok2) => {
           if (!ok2) return;
           UNREAD[peer] = (UNREAD[peer] || 0) + 1;
+          bumpUnreadAt(peer, retry);
           scheduleUnread();
           renderPanels();
           if (window.Tray) Tray.onMessage(peer, retry);
         });
       }
       UNREAD[peer] = (UNREAD[peer] || 0) + 1;
+      bumpUnreadAt(peer, full);
       scheduleUnread();
       renderPanels();
       if (window.Tray) Tray.onMessage(peer, full);
     });
   }
+}
+
+// 群 @ 提及判定（纯文本机制）：与 Delegate.mentionsMe 同款——匹配我的显示名集合（词边界防 @张三丰 误判），
+// 另识别 @所有人令牌。命中 → 计入 UNREAD_AT（金色 @N 徽标）。
+function isMentionTarget(m) {
+  if (!m || (typeof isMineMsg === "function" && isMineMsg(m))) return false;
+  const text = (m.text || m.body || "").toString();
+  if (!text || !m.group) return false;
+  const low = text.toLowerCase();
+  // @所有人令牌
+  if (/@(所有人|全部|everyone|all)(?![a-z0-9一-鿿])/i.test(low)) return true;
+  // @我的显示名集合
+  const names = [];
+  try { const p = window.Profile && Profile.get ? Profile.get(typeof MY_ID !== "undefined" ? MY_ID : "") : null; if (p && p.displayName) names.push(p.displayName); } catch (_) {}
+  try { const n = window.Identity && Identity.nameOf ? Identity.nameOf(typeof MY_ID !== "undefined" ? MY_ID : "") : ""; if (n) names.push(n); } catch (_) {}
+  for (const nm of [...new Set(names.map((x) => (x || "").trim()).filter(Boolean))]) {
+    const n = nm.toLowerCase();
+    let idx = low.indexOf("@" + n);
+    while (idx >= 0) {
+      const after = low[idx + 1 + n.length];
+      if (after === undefined || /[\s,:：，。!！?？、]/.test(after)) return true;
+      idx = low.indexOf("@" + n, idx + 1);
+    }
+  }
+  return false;
+}
+function bumpUnreadAt(key, m) {
+  if (!isMentionTarget(m)) return;
+  UNREAD_AT[key] = (UNREAD_AT[key] || 0) + 1;
 }
 
 // 送达回执：对方已收到本人消息 → 把对应本人气泡升为双勾✓✓(status=2)。
@@ -304,6 +335,7 @@ function onCoreEvent(ev) {
     } else if (fresh && !mine && m.ts > (READ_UPTO[key] || 0)) {
       // 未在看、他人新消息、且比已读位新（排除别设备已读过的）→ 计未读。
       UNREAD[key] = (UNREAD[key] || 0) + 1;
+      bumpUnreadAt(key, m);
       scheduleUnread();
     }
     renderPanels();
