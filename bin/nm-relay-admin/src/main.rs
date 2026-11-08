@@ -341,7 +341,7 @@ async fn overview(State(s): State<AppState>, headers: HeaderMap) -> Response {
         "peer_count": peers,
         "blacklist_count": banned,
         "pkarr_base": s.pkarr_base,
-        "uptimes": service_uptimes(&s.relay_unit, &s.dns_unit),
+        "uptimes": service_stats(&s.relay_unit, &s.dns_unit),
     }))
     .into_response()
 }
@@ -712,6 +712,58 @@ fn process_start_unix(pid: u32, btime: u64) -> Option<u64> {
     Some(btime + starttime / 100)
 }
 
+/// 进程常驻内存（RSS 字节）：读 /proc/<pid>/status 的 VmRSS（kB）。读不到返回 None。
+fn process_rss_bytes(pid: u32) -> Option<u64> {
+    let s = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    for line in s.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            let kb: u64 = rest.trim().trim_end_matches(" kB").trim().parse().ok()?;
+            return Some(kb * 1024);
+        }
+    }
+    None
+}
+
+/// 进程累计 CPU 时间（jiffies = utime+stime，/proc/<pid>/stat 第 14/15 字段）。
+/// 配合两次采样的时间差算实时 CPU 占用率。读不到返回 None。
+fn process_cpu_jiffies(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after = &stat[stat.rfind(')')? + 1..];
+    let fields: Vec<&str> = after.split_whitespace().collect();
+    // after 去掉 "pid (comm)" 后，第一个是 state；整体第 14/15 = after 第 12/13（0-based 11/12）。
+    let utime: u64 = fields.get(11)?.parse().ok()?;
+    let stime: u64 = fields.get(12)?.parse().ok()?;
+    Some(utime + stime)
+}
+
+/// CPU 采样缓存：pid → (上次累计 jiffies, 上次采样时刻)。用于算两次采样间的 CPU 占用率。
+/// 全机占用率 = (Δjiffies / CLK_TCK) / (Δ秒 × 核数) × 100%，与 top %Cpu 口径一致，不随核数误导。
+static CPU_SAMPLES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u32, (u64, std::time::Instant)>>> =
+    std::sync::OnceLock::new();
+
+/// 算某进程的全机 CPU 占用率（0~100%）。首次采样无基线返回 None（下次有值）。
+fn process_cpu_pct(pid: u32, ncpu: f64) -> Option<f64> {
+    let now_jiffies = process_cpu_jiffies(pid)?;
+    let now = std::time::Instant::now();
+    let cache = CPU_SAMPLES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut map = cache.lock().ok()?;
+    let result = match map.get(&pid) {
+        Some((prev_j, prev_t)) => {
+            let dj = now_jiffies.saturating_sub(*prev_j) as f64;
+            let dt = now.duration_since(*prev_t).as_secs_f64();
+            if dt > 0.0 && ncpu > 0.0 {
+                // jiffies/CLK_TCK(=100) 得 CPU 秒；/（墙钟秒×核数）得全机占比。
+                Some(((dj / 100.0) / (dt * ncpu) * 100.0).clamp(0.0, 100.0))
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
+    map.insert(pid, (now_jiffies, now));
+    result
+}
+
 /// systemd unit 的 MainPID（普通/ root 用户均可读）。失败返回 None。
 fn unit_main_pid(unit: &str) -> Option<u32> {
     let out = std::process::Command::new("systemctl")
@@ -723,24 +775,28 @@ fn unit_main_pid(unit: &str) -> Option<u32> {
     if pid == 0 { None } else { Some(pid) }
 }
 
-/// 三个服务（relay / dns / relay-admin 自身）的启动时刻与运行时长，供总览展示。
-/// relay/dns 经 systemd MainPID 定位进程；relay-admin 用自身 pid。全部以
-/// /proc 读取启动时刻，纯文件、无需 root、不依赖时钟字符串解析。
-fn service_uptimes(relay_unit: &str, dns_unit: &str) -> serde_json::Value {
+/// 三个服务（relay / dns+pkarr / relay-admin 自身）的运行时长 + CPU/内存占用，供总览展示。
+/// relay/dns 经 systemd MainPID 定位进程；relay-admin 用自身 pid。CPU 为全机占用率
+/// （0~100%，与 top %Cpu 口径一致），内存为 RSS 字节。首次采样 CPU 无基线（下次刷新即有值）。
+/// 注：iroh-dns-server 同进程提供 DNS 与 pkarr，故二者共享该进程的资源数值。
+fn service_stats(relay_unit: &str, dns_unit: &str) -> serde_json::Value {
     let btime = system_btime();
     let now = now_secs();
+    let ncpu = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).max(1) as f64;
     let one = |pid: Option<u32>| -> serde_json::Value {
-        match (pid, btime) {
-            (Some(p), Some(bt)) => match process_start_unix(p, bt) {
-                Some(start) => json!({
+        match pid {
+            Some(p) => {
+                let start = btime.and_then(|bt| process_start_unix(p, bt));
+                json!({
                     "pid": p,
-                    "start_unix": start,
-                    "uptime_secs": now.saturating_sub(start),
                     "up": true,
-                }),
-                None => json!({ "pid": p, "up": true }),
-            },
-            _ => json!({ "up": false }),
+                    "start_unix": start,
+                    "uptime_secs": start.map(|s| now.saturating_sub(s)),
+                    "cpu_pct": process_cpu_pct(p, ncpu),       // 全机占用率 0~100%，首次为 null
+                    "rss_bytes": process_rss_bytes(p),          // 常驻内存字节
+                })
+            }
+            None => json!({ "up": false }),
         }
     };
     json!({

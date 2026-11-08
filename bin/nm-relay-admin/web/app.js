@@ -73,8 +73,14 @@
   // 单个服务的「运行时长 · 启动时刻」展示串。
   function svcUptime(u) {
     if (!u || !u.up) return "不可达";
-    if (!u.start_unix) return "运行中";
-    return `${fmtDuration(u.uptime_secs)} · 自 ${fmtDateTime(u.start_unix)}`;
+    const parts = [];
+    if (u.uptime_secs != null) parts.push(fmtDuration(u.uptime_secs));
+    // CPU 全机占用率（首次采样为 null，显示 —）；内存 RSS。
+    const cpu = u.cpu_pct == null ? "—" : Number(u.cpu_pct).toFixed(1) + "%";
+    const mem = u.rss_bytes == null ? "—" : fmtBytes(u.rss_bytes);
+    parts.push(`CPU ${cpu} · 内存 ${mem}`);
+    if (u.start_unix) parts.push(`自 ${fmtDateTime(u.start_unix)}`);
+    return parts.join(" · ");
   }
   function shortId(id) {
     id = id || "";
