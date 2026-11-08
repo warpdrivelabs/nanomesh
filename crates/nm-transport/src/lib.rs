@@ -277,32 +277,52 @@ impl NodeEndpoint {
             // NM_BIND_ADDR（nmd 据 [bind_addr] 配置设置）限定监听到指定本机 IP：多网卡/docker 节点据此
             // 只广播可达地址，避免广播一堆不可达地址（如 docker 网桥/公网段 bip）致对端选错路、连不稳。
             //
-            // 支持**逗号分隔的多个 IP**：每个 IP 用 bind_addr_with_opts 单独绑定一个 UDP socket，
-            // iroh 会把每个显式绑定的地址都纳入直连候选并经 pkarr 发布。
-            // 这样一台多网卡节点可同时在多个子网内被直连（如 ens34 的 192.168.1.x + tun0 的
-            // 192.168.157.x——后者是点对点隧道，iroh 绑 0.0.0.0 时不会自动采集，必须显式绑定）。
-            // 第一个地址标记为默认路由（is_default_route），其余作为附加子网。
+            // 支持**逗号分隔的多个地址**，每个可带子网前缀：`IP[/prefix]`
+            // （如 `192.168.1.13/24,192.168.157.18/20`）。每个 IP 用 bind_addr_with_opts
+            // 单独绑定一个 UDP socket，iroh 按路由表语义（最长前缀匹配）选 socket 发包。
+            // iroh 约束：每个 IP family 最多一个「默认路由」socket，且 `/0` 前缀会被隐式当默认。
+            // 故：① 给每个地址设真实子网前缀（默认 /0 会导致多个默认→
+            // "Only a single default address can be set per IP family" 启动失败）；
+            // ② 只让第一个地址当默认路由，其余显式 set_is_default_route(false)。
+            // 这样一台多网卡节点可同时在多个子网内被直连（如 ens34 的 192.168.1.x +
+            // tun0 的 192.168.157.x——后者是点对点隧道，iroh 绑 0.0.0.0 时不会自动采集）。
             let raw = std::env::var("NM_BIND_ADDR").unwrap_or_default();
-            let ips: Vec<std::net::Ipv4Addr> = raw
+            // 解析为 (ip, prefix_len)；未写 /prefix 时 prefix=None（下面按序号决定默认路由）。
+            let specs: Vec<(std::net::Ipv4Addr, Option<u8>)> = raw
                 .split(',')
-                .filter_map(|s| s.trim().parse::<std::net::Ipv4Addr>().ok())
+                .filter_map(|s| {
+                    let s = s.trim();
+                    if s.is_empty() {
+                        return None;
+                    }
+                    let (ip_str, pfx) = match s.split_once('/') {
+                        Some((a, p)) => (a.trim(), p.trim().parse::<u8>().ok()),
+                        None => (s, None),
+                    };
+                    ip_str.parse::<std::net::Ipv4Addr>().ok().map(|ip| (ip, pfx))
+                })
                 .collect();
-            match ips.as_slice() {
+            match specs.as_slice() {
                 [] => {
                     // 未配或解析失败：绑全部接口（0.0.0.0），行为与改造前一致。
                     builder = builder.bind_addr((std::net::Ipv4Addr::UNSPECIFIED, port)).map_err(err)?;
                 }
-                [single] => {
+                [(single, _)] => {
+                    // 单地址：保持简单路径（iroh 隐式按 /0 默认路由，与改造前一致）。
                     builder = builder.bind_addr((*single, port)).map_err(err)?;
                 }
                 multi => {
                     use iroh::endpoint::BindOpts;
-                    for (i, ip) in multi.iter().enumerate() {
-                        // 第一个作默认路由，其余为附加地址；都标 is_required=false，
-                        // 避免某个地址（如隧道临时不在）绑定失败拖垮整个端点启动。
+                    for (i, (ip, pfx)) in multi.iter().enumerate() {
+                        // 只让第一个地址当默认路由（出口/公网侧），其余显式关闭，
+                        // 避免多个 /0 默认冲突。给定前缀则按真实子网路由；未给则：
+                        // 第一个留 /0（默认路由），其余给 /32（仅精确匹配自身子网，不争默认）。
+                        let is_default = i == 0;
+                        let prefix = pfx.unwrap_or(if is_default { 0 } else { 32 });
                         let opts = BindOpts::default()
                             .set_is_required(false)
-                            .set_is_default_route(i == 0);
+                            .set_is_default_route(is_default)
+                            .set_prefix_len(prefix);
                         builder = builder
                             .bind_addr_with_opts(std::net::SocketAddr::from((*ip, port)), opts)
                             .map_err(err)?;
