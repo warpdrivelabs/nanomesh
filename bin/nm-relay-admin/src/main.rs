@@ -537,6 +537,7 @@ async fn nodes_with_addrs(State(s): State<AppState>, headers: HeaderMap, Query(q
                 "banned": banned,
                 "relays": addrs.as_ref().map(|a| a.relays.clone()).unwrap_or_default(),
                 "ips": addrs.as_ref().map(|a| a.ips.clone()).unwrap_or_default(),
+                "hostname": addrs.as_ref().and_then(|a| a.hostname.clone()),
                 "pkarr_ok": addrs.as_ref().map(|a| a.ok),
                 "pkarr_error": addrs.as_ref().and_then(|a| a.error.clone()),
                 "pkarr_bytes": addrs.as_ref().map(|a| a.bytes).unwrap_or(0),

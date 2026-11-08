@@ -17,6 +17,25 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode};
 use iroh::address_lookup::memory::MemoryLookup;
 use prost::Message;
 
+/// 本机主机名，用于经 iroh `user_data` 随 pkarr 一起发布，便于 relay 监控台把 node id
+/// 对应到人类可读的机器名。优先 `NM_NODE_HOSTNAME`(部署可覆盖) → `HOSTNAME` 环境变量 →
+/// `/etc/hostname`。UserData 上限 245 字节，主机名远小于此，仍按字符边界截断到 60。
+/// 返回 None 表示拿不到主机名（不影响地址发布）。
+fn local_hostname_user_data() -> Option<iroh::address_lookup::UserData> {
+    let raw = std::env::var("NM_NODE_HOSTNAME")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok().filter(|s| !s.trim().is_empty()))
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })?;
+    let truncated: String = raw.trim().chars().take(60).collect();
+    truncated.parse::<iroh::address_lookup::UserData>().ok()
+}
+
 /// 本系统不应对外发布的网卡名前缀：docker 网桥/虚拟网卡。这些接口上的地址
 /// （172.17.0.1 之类）对其它节点不可达，发布出去会污染对端选路（实测：远端反复
 /// 尝试死地址 → gossip 连接半死 → home node 转发风暴）。
@@ -248,6 +267,11 @@ impl NodeEndpoint {
             .transport_config(cfg)
             .secret_key(secret_key)
             .alpns(alpns);
+        // 把本机主机名经 iroh user_data 随 pkarr 一起发布，供 relay 监控台把 node id
+        // 映射到可读机器名（selfhost 的 PkarrPublisher 会带上它；无 publisher 的基座无害）。
+        if let Some(hostname) = local_hostname_user_data() {
+            builder = builder.user_data_for_address_lookup(hostname);
+        }
         if port != 0 {
             // 固定 UDP 端口：让本节点地址稳定，便于 LAN 对等配置。
             // NM_BIND_ADDR（nmd 据 [bind_addr] 配置设置）限定监听到指定本机 IP：多网卡/docker 节点据此

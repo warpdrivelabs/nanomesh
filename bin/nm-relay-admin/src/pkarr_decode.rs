@@ -13,6 +13,9 @@ pub struct NodeAddrs {
     pub relays: Vec<String>,
     /// 直连 IP 地址。
     pub ips: Vec<String>,
+    /// 节点自报的主机名（经 iroh user_data 发布；无则 None）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
     /// 记录原始字节数（0=无记录）。
     pub bytes: usize,
     /// 解码是否成功。
@@ -59,8 +62,14 @@ pub fn decode_relay_payload(pubkey: &[u8; 32], bytes: &[u8]) -> NodeAddrs {
     relays.dedup();
     ips.sort();
     ips.dedup();
+    // 节点经 iroh user_data 自报的主机名（nmd 发布时写入）；无则 None。
+    let hostname = info
+        .data
+        .user_data()
+        .map(|u| u.to_string())
+        .filter(|s| !s.trim().is_empty());
 
-    NodeAddrs { relays, ips, bytes: bytes.len(), ok: true, error: None }
+    NodeAddrs { relays, ips, hostname, bytes: bytes.len(), ok: true, error: None }
 }
 
 /// 由 node id（z32 或 64-hex）推出 pkarr 查询用的 z-base-32 key。

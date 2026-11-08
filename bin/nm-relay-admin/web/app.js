@@ -1,6 +1,20 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   let peersCache = [];
+  // node id(规范化小写) → 主机名；由 /api/nodes 的 pkarr 解析结果填充，
+  // 供「对等节点」等只有 id 的视图也能显示机器名。
+  const hostnameById = new Map();
+  function normId(id) {
+    return String(id || "").trim().toLowerCase();
+  }
+  function rememberHostname(id, hostname) {
+    const k = normId(id);
+    if (!k) return;
+    if (hostname && hostname.trim()) hostnameById.set(k, hostname.trim());
+  }
+  function hostnameOf(id) {
+    return hostnameById.get(normId(id)) || "";
+  }
 
   async function api(path, opts = {}) {
     const res = await fetch(path, {
@@ -172,6 +186,13 @@
     const pr = await api("/api/peers");
     peersCache = pr.peers || [];
     renderPeers();
+    // 对等节点视图要显示主机名，但主机名来自 /api/nodes 的 pkarr 解析。
+    // 若映射尚空（用户还没进过「节点地址」页），后台预取一次填充，再重绘 peers。
+    if (hostnameById.size === 0 && peersCache.length > 0) {
+      loadNodes()
+        .then(() => renderPeers())
+        .catch(() => {});
+    }
 
     const bl = await api("/api/blacklist");
     $("bl-list").innerHTML = (bl.blacklist || [])
@@ -202,25 +223,28 @@
       card("过期删除", (pk.store_expired || 0).toLocaleString()),
     ].join("");
     // 记录列表：复用 /api/nodes 的 pkarr 解码结果（节点公钥即 pkarr key）。
-    $("pkarr-records-body").innerHTML = `<tr><td colspan="4" class="muted">加载中…</td></tr>`;
+    $("pkarr-records-body").innerHTML = `<tr><td colspan="5" class="muted">加载中…</td></tr>`;
     try {
       const r = await api("/api/nodes?resolve=1");
+      (r.nodes || []).forEach((n) => rememberHostname(n.id, n.hostname));
       const rows = (r.nodes || []).filter((n) => (n.relays || []).length || (n.ips || []).length);
       $("pkarr-records-body").innerHTML =
         rows
           .map((n) => {
+            const host = n.hostname ? `<span class="mono">${escapeHtml(n.hostname)}</span>` : '<span class="muted">—</span>';
             const relays = (n.relays || []).map((x) => `<div class="mono">${escapeHtml(x)}</div>`).join("") || '<span class="muted">—</span>';
             const ips = (n.ips || []).map((x) => `<div class="mono">${escapeHtml(x)}</div>`).join("") || '<span class="muted">—</span>';
             return `<tr>
               <td class="code" title="${escapeHtml(n.id)}">${escapeHtml(shortId(n.id))}</td>
+              <td>${host}</td>
               <td>${relays}</td>
               <td>${ips}</td>
               <td>${n.pkarr_bytes || 0}</td>
             </tr>`;
           })
-          .join("") || `<tr><td colspan="4" class="muted">暂无已发布地址的记录</td></tr>`;
+          .join("") || `<tr><td colspan="5" class="muted">暂无已发布地址的记录</td></tr>`;
     } catch (e) {
-      $("pkarr-records-body").innerHTML = `<tr><td colspan="4" class="err">记录加载失败: ${escapeHtml(String(e.message || e))}</td></tr>`;
+      $("pkarr-records-body").innerHTML = `<tr><td colspan="5" class="err">记录加载失败: ${escapeHtml(String(e.message || e))}</td></tr>`;
     }
   }
 
@@ -238,10 +262,13 @@
   }
   function renderNodes() {
     const q = ($("node-filter").value || "").trim().toLowerCase();
+    // 先把本批解析到的主机名并入全局映射，供对等节点等视图复用。
+    nodesCache.forEach((n) => rememberHostname(n.id, n.hostname));
     const rows = nodesCache.filter(
       (n) =>
         !q ||
         (n.id || "").toLowerCase().includes(q) ||
+        (n.hostname || "").toLowerCase().includes(q) ||
         (n.relays || []).join(" ").toLowerCase().includes(q) ||
         (n.ips || []).join(" ").toLowerCase().includes(q)
     );
@@ -250,30 +277,39 @@
       rows
         .map((n) => {
           const st = n.status || "stale";
+          const host = n.hostname
+            ? `<span class="mono">${escapeHtml(n.hostname)}</span>`
+            : '<span class="muted">—</span>';
           const relays = (n.relays || []).map((x) => `<div class="mono">${escapeHtml(x)}</div>`).join("") || '<span class="muted">—</span>';
           const ips =
             (n.ips || []).map((x) => `<div class="mono">${escapeHtml(x)}</div>`).join("") ||
             (n.pkarr_ok === false ? `<span class="muted" title="${escapeHtml(n.pkarr_error || "")}">无记录</span>` : '<span class="muted">—</span>');
           return `<tr>
             <td class="code" title="${escapeHtml(n.id)}">${escapeHtml(shortId(n.id))}</td>
+            <td>${host}</td>
             <td><span class="badge ${st}">${st}</span></td>
             <td>${relays}</td>
             <td>${ips}</td>
             <td>${ago(n.last_seen)}</td>
           </tr>`;
         })
-        .join("") || `<tr><td colspan="5" class="muted">暂无节点</td></tr>`;
+        .join("") || `<tr><td colspan="6" class="muted">暂无节点</td></tr>`;
   }
 
   function renderPeers() {
     const q = ($("peer-filter").value || "").trim().toLowerCase();
-    const rows = peersCache.filter((p) => !q || (p.id || "").toLowerCase().includes(q));
+    const rows = peersCache.filter(
+      (p) => !q || (p.id || "").toLowerCase().includes(q) || hostnameOf(p.id).toLowerCase().includes(q)
+    );
     $("peer-count").textContent = `${rows.length} / ${peersCache.length}`;
     $("peers-body").innerHTML = rows
       .map((p) => {
         const st = p.status || "stale";
+        const host = hostnameOf(p.id);
+        const hostCell = host ? `<span class="mono">${escapeHtml(host)}</span>` : '<span class="muted">—</span>';
         return `<tr>
           <td class="code" title="${escapeHtml(p.id)}">${escapeHtml(shortId(p.id))}</td>
+          <td>${hostCell}</td>
           <td><span class="badge ${st}">${st}</span></td>
           <td>${p.connects || 0}</td>
           <td>${ago(p.last_seen)}</td>
