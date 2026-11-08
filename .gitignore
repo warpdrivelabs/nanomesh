@@ -17,6 +17,9 @@ clients/app/src-tauri/target/
 *.pem
 *.der
 *.key
+# 例外：nm-admind 内置的 registry CA 证书 bundle（公开证书，非私钥），
+# 经 include_bytes! 编进二进制，必须入库否则异机构建失败。
+!bin/nm-admind/src/registry-ca.pem
 certs/
 # stray tool artifacts
 *claudeprojects*
