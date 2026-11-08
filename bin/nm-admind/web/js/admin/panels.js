@@ -57,16 +57,17 @@ export function renderPanel(tab, host, d, refresh) {
       const rate = sampleRate(c.id, c.bytes_rx, c.bytes_tx);
       const loss = fmtLoss(c.lost_packets, c.datagrams_tx);
       // 用户/设备命名（后端 join devices+directory 得来；未注册设备则留空）。
-      const nick = c.user_nickname || "";
+      // 当前 person 实体的 display_name 即邮箱(nanomesh.x@gmail.com)，作为用户显示名；再附账号公钥。
+      const userName = c.user_nickname || "";
       const acct = c.account_pubkey || "";
-      const devLabel = c.device_label || "";
-      const role = c.device_role || "";
-      const userCell = nick || acct
+      const userCell = userName || acct
         ? `<div class="stack">
-             <span>${nick ? esc(nick) : '<span class="muted">未命名用户</span>'}</span>
+             <span>${userName ? esc(userName) : '<span class="muted">未命名用户</span>'}</span>
              ${acct ? `<span class="copyline"><code class="mono small muted" title="用户公钥 / ID">${shortId(acct)}</code>${copyIconBtn(`data-copy="${esc(acct)}"`)}</span>` : ""}
            </div>`
         : '<span class="muted">未注册</span>';
+      const devLabel = c.device_label || "";
+      const role = c.device_role || "";
       const deviceCell = `<div class="stack">
           <span>${devLabel ? esc(devLabel) : '<span class="muted">未命名设备</span>'}${role ? ` <span class="badge badge--sm">${esc(role)}</span>` : ""}</span>
           <span class="copyline"><code class="mono small" title="设备连接公钥">${shortId(c.id)}</code>${copyIconBtn(`data-copy="${esc(c.id)}"`)}</span>
