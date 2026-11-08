@@ -56,21 +56,38 @@ export function renderPanel(tab, host, d, refresh) {
     const rows = (d.connections || []).map((c) => {
       const rate = sampleRate(c.id, c.bytes_rx, c.bytes_tx);
       const loss = fmtLoss(c.lost_packets, c.datagrams_tx);
+      // 用户/设备命名（后端 join devices+directory 得来；未注册设备则留空）。
+      const nick = c.user_nickname || "";
+      const acct = c.account_pubkey || "";
+      const devLabel = c.device_label || "";
+      const role = c.device_role || "";
+      const userCell = nick || acct
+        ? `<div class="stack">
+             <span>${nick ? esc(nick) : '<span class="muted">未命名用户</span>'}</span>
+             ${acct ? `<span class="copyline"><code class="mono small muted" title="用户公钥 / ID">${shortId(acct)}</code>${copyIconBtn(`data-copy="${esc(acct)}"`)}</span>` : ""}
+           </div>`
+        : '<span class="muted">未注册</span>';
+      const deviceCell = `<div class="stack">
+          <span>${devLabel ? esc(devLabel) : '<span class="muted">未命名设备</span>'}${role ? ` <span class="badge badge--sm">${esc(role)}</span>` : ""}</span>
+          <span class="copyline"><code class="mono small" title="设备连接公钥">${shortId(c.id)}</code>${copyIconBtn(`data-copy="${esc(c.id)}"`)}</span>
+        </div>`;
       return `<tr>
-      <td class="nowrap"><span class="copyline"><code class="mono">${shortId(c.id)}</code>${copyIconBtn(`data-copy="${esc(c.id)}"`)}</span></td>
+      <td>${userCell}</td>
+      <td>${deviceCell}</td>
       <td class="stack"><span>${fmtTime(c.since_unix_ms)}</span><span class="muted">${sinceMs(c.since_unix_ms)}</span></td>
       <td class="stack"><span>↓ ${fmtBytes(c.bytes_rx)}</span><span>↑ ${fmtBytes(c.bytes_tx)}</span>
         <span class="muted">${fmtRate(rate.down)} / ${fmtRate(rate.up)}</span></td>
       <td class="stack"><span>${fmtRtt(c.rtt_ms)}</span><span class="muted">丢包 ${loss}</span>
         <span class="muted">${pathKindLabel(c.path_kind)}${c.mtu ? ` · MTU ${c.mtu}` : ""}</span></td>
-      <td class="mono muted small" title="${esc(c.remote_addr || "")}">${esc(c.remote_addr) || "—"}</td>
+      <td class="mono muted small" title="设备（对端）地址">${esc(c.remote_addr) || "—"}</td>
+      <td class="mono muted small" title="连入本节点的本地地址">${esc(c.local_addr) || "—"}</td>
       <td><span class="badge">${esc(c.alpn)}</span></td>
       <td class="right"><button class="btn btn--sm btn--danger" data-kick="${c.id}">踢下线</button></td>
     </tr>`;
     }).join("");
     host.innerHTML = `<div class="card"><table class="tbl">
-      <thead><tr><th>公钥</th><th>上线 / 在线</th><th>流量 / 带宽</th><th>链路质量</th><th>远端地址</th><th>协议</th><th></th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="7" class="muted center">暂无活动连接</td></tr>'}</tbody></table></div>`;
+      <thead><tr><th>注册用户</th><th>设备</th><th>上线 / 在线</th><th>流量 / 带宽</th><th>链路质量</th><th>设备地址</th><th>接入本机地址</th><th>协议</th><th></th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="9" class="muted center">暂无活动连接</td></tr>'}</tbody></table></div>`;
     host.querySelectorAll("[data-copy]").forEach((b) => bindCopy(b, b.dataset.copy));
     host.querySelectorAll("[data-kick]").forEach((b) => (b.onclick = async () => {
       b.disabled = true;

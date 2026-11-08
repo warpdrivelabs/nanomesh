@@ -26,8 +26,10 @@ pub struct SessionRow {
     pub black_holes: u64,
     /// `"direct"` / `"relay"` / `""`（未知）。
     pub path_kind: String,
-    /// 选中路径远端传输地址（IP/中继 URL）。
+    /// 选中路径远端传输地址（IP/中继 URL）——对端（客户端设备）的地址。
     pub remote_addr: String,
+    /// 选中路径本地传输地址——客户端连到本节点的哪个本地 IP:端口。
+    pub local_addr: String,
 }
 
 /// 存储统计（后端管理台「存储管理」用）。
@@ -448,11 +450,25 @@ impl Node {
 }
 
 /// 从活动连接提取管理台用的链路质量快照（字节/RTT/丢包/路径类型等）。
+/// 把 iroh 的本地传输地址（本节点接收该连接的本地 IP / relay）转成可读字符串。
+/// Ip 变体只含本地 IP（本节点监听端口固定，不在此结构内）；Relay 变体为中继 URL。
+fn local_transport_addr_string(a: &iroh::endpoint::LocalTransportAddr) -> String {
+    use iroh::endpoint::LocalTransportAddr as L;
+    match a {
+        L::Ip(Some(ip)) => ip.to_string(),
+        L::Ip(None) => String::new(),
+        L::Relay(url) => url.to_string(),
+        L::Custom(Some(c)) => format!("{c:?}"),
+        L::Custom(None) => String::new(),
+        _ => String::new(),
+    }
+}
+
 fn session_row_from_conn(id: [u8; 32], since_unix_ms: u64, conn: &IrohConnection) -> SessionRow {
     let stats = conn.stats();
     let paths = conn.paths();
     let selected = paths.iter().find(|p| p.is_selected()).or_else(|| paths.iter().next());
-    let (rtt_ms, cwnd, mtu, congestion_events, black_holes, path_kind, remote_addr) =
+    let (rtt_ms, cwnd, mtu, congestion_events, black_holes, path_kind, remote_addr, local_addr) =
         if let Some(p) = selected {
             let ps = p.stats();
             let kind = if p.is_relay() {
@@ -470,9 +486,10 @@ fn session_row_from_conn(id: [u8; 32], since_unix_ms: u64, conn: &IrohConnection
                 ps.black_holes_detected,
                 kind.to_string(),
                 p.remote_addr().to_string(),
+                local_transport_addr_string(&p.local_addr()),
             )
         } else {
-            (None, None, None, 0, 0, String::new(), String::new())
+            (None, None, None, 0, 0, String::new(), String::new(), String::new())
         };
     SessionRow {
         id,
@@ -491,5 +508,6 @@ fn session_row_from_conn(id: [u8; 32], since_unix_ms: u64, conn: &IrohConnection
         black_holes,
         path_kind,
         remote_addr,
+        local_addr,
     }
 }

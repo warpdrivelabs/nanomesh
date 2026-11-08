@@ -78,6 +78,7 @@ fn session_json(r: &nm_node::SessionRow) -> Value {
         "black_holes": r.black_holes,
         "path_kind": r.path_kind,
         "remote_addr": r.remote_addr,
+        "local_addr": r.local_addr,
     })
 }
 
@@ -470,9 +471,50 @@ async fn connections(State(st): State<AppState>, Query(q): Query<PageQuery>) -> 
     let (offset, limit) = page_params(&q);
     let rows = st.node.sessions_snapshot();
     let total = rows.len();
-    let rows: Vec<Value> = page_slice(&rows, offset, limit)
+    let page = page_slice(&rows, offset, limit);
+
+    // 关联：连接的 id 是**设备连接公钥**。先建两张映射：
+    //  ① 设备公钥 → (账号公钥, 设备名/label, 角色)  ← devices_snapshot
+    //  ② 账号公钥 → 昵称(display_name)              ← directory
+    // 这样每条连接能展示：注册用户昵称/ID/公钥 + 设备名/公钥/角色。
+    let devices = st.node.devices_snapshot();
+    let mut dev_map: std::collections::HashMap<Vec<u8>, (Vec<u8>, String, String)> =
+        std::collections::HashMap::new();
+    for d in &devices {
+        if let Some(cert) = d.cert.as_ref() {
+            let label = if d.label.is_empty() { cert.label.clone() } else { d.label.clone() };
+            dev_map.insert(cert.device.clone(), (cert.account.clone(), label, cert.role.clone()));
+        }
+    }
+    // 账号公钥(hex) → 昵称。
+    let entities = st
+        .node
+        .directory()
+        .query(&DirectoryQuery::default())
+        .await
+        .unwrap_or_default();
+    let mut nick_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for e in &entities {
+        nick_map.insert(hex(&e.entity_id), e.display_name.clone());
+    }
+
+    let rows: Vec<Value> = page
         .iter()
-        .map(session_json)
+        .map(|r| {
+            let mut v = session_json(r);
+            // r.id = 设备连接公钥。补充用户/设备命名信息（查不到则留空，前端显示“未注册/匿名”）。
+            if let Some((account, label, role)) = dev_map.get(r.id.as_slice()) {
+                let account_hex = hex(account);
+                let nickname = nick_map.get(&account_hex).cloned().unwrap_or_default();
+                if let Value::Object(ref mut m) = v {
+                    m.insert("account_pubkey".into(), Value::from(account_hex)); // 注册用户公钥
+                    m.insert("user_nickname".into(), Value::from(nickname));     // 用户昵称
+                    m.insert("device_label".into(), Value::from(label.clone())); // 当前设备名称
+                    m.insert("device_role".into(), Value::from(role.clone()));   // 设备角色
+                }
+            }
+            v
+        })
         .collect();
     Json(json!({ "connections": rows, "page": page_meta(total, offset, limit) }))
 }
