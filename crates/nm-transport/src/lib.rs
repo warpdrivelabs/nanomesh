@@ -313,10 +313,14 @@ impl NodeEndpoint {
                 }
                 multi => {
                     use iroh::endpoint::BindOpts;
+                    // 关键：基座（presets）已预置一个 0.0.0.0 的默认 IPv4 transport。
+                    // 多地址绑定必须先 clear_ip_transports() 清掉它，否则加入自己的默认地址时
+                    // 与基座默认冲突，报 "Only a single default address can be set per IP family"
+                    // （官方多地址示例即如此，见 iroh endpoint.rs bind_addr_with_opts 文档）。
+                    builder = builder.clear_ip_transports();
                     for (i, (ip, pfx)) in multi.iter().enumerate() {
-                        // 只让第一个地址当默认路由（出口/公网侧），其余显式关闭，
-                        // 避免多个 /0 默认冲突。给定前缀则按真实子网路由；未给则：
-                        // 第一个留 /0（默认路由），其余给 /32（仅精确匹配自身子网，不争默认）。
+                        // 只第一个地址当默认路由（出口/公网侧），其余显式关闭，避免多个默认冲突。
+                        // 给定前缀按真实子网路由；未给则第一个 /0（默认路由）、其余 /32（仅精确匹配）。
                         let is_default = i == 0;
                         let prefix = pfx.unwrap_or(if is_default { 0 } else { 32 });
                         let opts = BindOpts::default()
