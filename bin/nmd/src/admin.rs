@@ -582,7 +582,10 @@ async fn system(State(st): State<AppState>) -> Json<Value> {
         // 换网/寻址可观测（P2 看板）：当前端点地址、relay、IP，及换网计数/最近换网时间。
         "node_addr": nm_transport::addr_to_string(&addr),
         "relays": addr.relay_urls().map(|u| u.to_string()).collect::<Vec<_>>(),
-        "ip_addrs": addr.ip_addrs().map(|a| a.to_string()).collect::<Vec<_>>(),
+        // 对外**实际发布**的直连 IP（已按排除规则过滤，剔除 docker 等），即对端真正能看到的绑定地址。
+        "ip_addrs": st.node.published_ip_addrs().iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+        // 被排除、不对外发布的直连 IP（docker 网桥 / NM_BIND_EXCLUDE 命中段…），供监控诊断。
+        "ip_addrs_excluded": st.node.excluded_ip_addrs().iter().map(|a| a.to_string()).collect::<Vec<_>>(),
         "roam_changes": roam_changes,
         "roam_last_ms": roam_last_ms,
         // P1 内存可观测：各热点表当前条目数（监控增长趋势，据此判断是否需淘汰）。

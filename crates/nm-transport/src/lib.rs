@@ -157,6 +157,42 @@ fn is_excluded(ip: std::net::Ipv4Addr, exact: &[std::net::Ipv4Addr], cidrs: &[(u
     cidrs.iter().any(|(net, mask)| (v & mask) == *net)
 }
 
+/// 判断某个 IP 是否应对外发布（排除模式的核心判据，供 pkarr 过滤器与 /system 展示复用）：
+/// - `allowed`：本机真实网卡地址白名单（publishable_local_ips，已剔 docker/veth 等虚拟网卡）；
+/// - `exc_ips`/`exc_cidrs`：NM_BIND_EXCLUDE 显式排除（命中即剔，优先级最高）。
+/// 规则：显式排除 > 本机真实网卡保留 > 公网保留 > 其余剔除。
+fn should_publish_ip(
+    ip: std::net::IpAddr,
+    allowed: &[std::net::IpAddr],
+    exc_ips: &[std::net::Ipv4Addr],
+    exc_cidrs: &[(u32, u32)],
+) -> bool {
+    // 显式排除列表优先（NM_BIND_EXCLUDE 命中则一律剔除，即便是本机网卡）。
+    if let std::net::IpAddr::V4(v4) = ip {
+        if is_excluded(v4, exc_ips, exc_cidrs) {
+            return false;
+        }
+    }
+    // 本机真实网卡地址（含私有段）→ 保留，供同内网直连。
+    if allowed.contains(&ip) {
+        return true;
+    }
+    // 公网地址（非私有/回环/link-local）→ 保留，供跨网直连。
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            !v4.is_private()
+                && !v4.is_loopback()
+                && !v4.is_link_local()
+                && !v4.is_unspecified()
+                && !v4.is_broadcast()
+                && !v4.is_documentation()
+        }
+        std::net::IpAddr::V6(v6) => {
+            !v6.is_loopback() && !v6.is_unspecified() && (v6.segments()[0] & 0xffc0) != 0xfe80
+        }
+    }
+}
+
 fn pkarr_addr_filter() -> iroh::address_lookup::AddrFilter {
     let allowed = publishable_local_ips();
     // 排除模式：绑 0.0.0.0 时 iroh 采集到所有网卡（含 docker/VPN），这里按配置额外剔除
@@ -167,35 +203,7 @@ fn pkarr_addr_filter() -> iroh::address_lookup::AddrFilter {
             .iter()
             .filter(|a| match a {
                 iroh::TransportAddr::Relay(_) => true,
-                iroh::TransportAddr::Ip(sa) => {
-                    let ip = sa.ip();
-                    // 显式排除列表优先（NM_BIND_EXCLUDE 命中则一律剔除，即便是本机网卡）。
-                    if let std::net::IpAddr::V4(v4) = ip {
-                        if is_excluded(v4, &exc_ips, &exc_cidrs) {
-                            return false;
-                        }
-                    }
-                    // 本机真实网卡地址（含私有段）→ 保留，供同内网直连。
-                    if allowed.contains(&ip) {
-                        return true;
-                    }
-                    // 公网地址（非私有/回环/link-local）→ 保留，供跨网直连。
-                    match ip {
-                        std::net::IpAddr::V4(v4) => {
-                            !v4.is_private()
-                                && !v4.is_loopback()
-                                && !v4.is_link_local()
-                                && !v4.is_unspecified()
-                                && !v4.is_broadcast()
-                                && !v4.is_documentation()
-                        }
-                        std::net::IpAddr::V6(v6) => {
-                            !v6.is_loopback()
-                                && !v6.is_unspecified()
-                                && (v6.segments()[0] & 0xffc0) != 0xfe80
-                        }
-                    }
-                }
+                iroh::TransportAddr::Ip(sa) => should_publish_ip(sa.ip(), &allowed, &exc_ips, &exc_cidrs),
                 _ => false,
             })
             .cloned()
@@ -461,6 +469,31 @@ impl NodeEndpoint {
     /// 本节点当前地址（含直连地址；用于本地直接拨号 / 分享）。
     pub fn addr(&self) -> EndpointAddr {
         self.endpoint.addr()
+    }
+
+    /// 对外**实际发布**的直连 IP 地址（应用了与 pkarr 发布相同的排除过滤）。
+    /// iroh 原始 `addr().ip_addrs()` 含采集到的全部网卡（docker/VPN…），此方法返回经
+    /// 白名单 + NM_BIND_EXCLUDE 过滤后、对端真正能看到的那组地址，供监控台如实展示「绑定地址」。
+    pub fn published_ip_addrs(&self) -> Vec<std::net::SocketAddr> {
+        let allowed = publishable_local_ips();
+        let (exc_ips, exc_cidrs) = parse_bind_excludes();
+        let addr = self.endpoint.addr();
+        addr.ip_addrs()
+            .filter(|sa| should_publish_ip(sa.ip(), &allowed, &exc_ips, &exc_cidrs))
+            .copied()
+            .collect()
+    }
+
+    /// iroh 采集到但**被排除、不对外发布**的直连 IP 地址（docker 网桥、NM_BIND_EXCLUDE 命中的段…）。
+    /// 与 published_ip_addrs() 互补，供监控台展示「哪些地址被过滤掉了」以便运维诊断。
+    pub fn excluded_ip_addrs(&self) -> Vec<std::net::SocketAddr> {
+        let allowed = publishable_local_ips();
+        let (exc_ips, exc_cidrs) = parse_bind_excludes();
+        let addr = self.endpoint.addr();
+        addr.ip_addrs()
+            .filter(|sa| !should_publish_ip(sa.ip(), &allowed, &exc_ips, &exc_cidrs))
+            .copied()
+            .collect()
     }
 
     /// 向本端点地址簿播种一个对端地址（供「按公钥拨号」，如 gossip 引导；LAN/无发现时必需）。
@@ -734,5 +767,46 @@ mod addr_filter_tests {
         assert!(out.contains(&ip("61.149.241.222:9600")), "公网地址必须保留");
         assert!(!out.contains(&ip("172.17.0.1:9600")), "docker 段必须剔除");
         assert!(!out.contains(&ip("127.0.0.1:9600")), "回环必须剔除");
+    }
+
+    #[test]
+    fn parse_excludes_handles_ip_and_cidr() {
+        // 直接构造解析输入（不依赖 env），验证 is_excluded 的 IP/CIDR 匹配。
+        let exact: Vec<std::net::Ipv4Addr> = vec!["10.8.0.1".parse().unwrap()];
+        // 172.16.0.0/12 覆盖 172.16~172.31
+        let mask: u32 = u32::MAX << (32 - 12);
+        let net = u32::from("172.16.0.0".parse::<std::net::Ipv4Addr>().unwrap()) & mask;
+        let cidrs = vec![(net, mask)];
+
+        assert!(is_excluded("10.8.0.1".parse().unwrap(), &exact, &cidrs), "精确 IP 命中");
+        assert!(is_excluded("172.17.0.1".parse().unwrap(), &exact, &cidrs), "172.17 在 /12 内");
+        assert!(is_excluded("172.31.0.1".parse().unwrap(), &exact, &cidrs), "172.31 在 /12 内");
+        assert!(!is_excluded("192.168.1.13".parse().unwrap(), &exact, &cidrs), "正常内网不命中");
+        assert!(!is_excluded("172.15.0.1".parse().unwrap(), &exact, &cidrs), "172.15 在 /12 外");
+    }
+
+    #[test]
+    fn should_publish_respects_allowlist_and_excludes() {
+        let allowed: Vec<std::net::IpAddr> =
+            vec!["192.168.1.13".parse().unwrap(), "192.168.157.18".parse().unwrap()];
+        // 排除 157 段用于验证「显式排除 > 白名单」：即便 157.18 在白名单，命中排除也剔除。
+        let mask: u32 = u32::MAX << (32 - 20);
+        let net = u32::from("192.168.157.0".parse::<std::net::Ipv4Addr>().unwrap()) & mask;
+        let exc_cidrs = vec![(net, mask)];
+        let no_exc: Vec<(u32, u32)> = vec![];
+        let no_ip: Vec<std::net::Ipv4Addr> = vec![];
+
+        let pub_ip = |s: &str, cidrs: &[(u32, u32)]| {
+            should_publish_ip(s.parse().unwrap(), &allowed, &no_ip, cidrs)
+        };
+        // 无排除时：白名单内网 + 公网保留，docker/回环剔除。
+        assert!(pub_ip("192.168.1.13", &no_exc), "白名单内网发布");
+        assert!(pub_ip("192.168.157.18", &no_exc), "白名单 VPN 发布");
+        assert!(pub_ip("61.149.241.222", &no_exc), "公网发布");
+        assert!(!pub_ip("172.17.0.1", &no_exc), "docker 不在白名单且非公网→剔除");
+        assert!(!pub_ip("127.0.0.1", &no_exc), "回环剔除");
+        // 显式排除优先：157 段被排除后，即便在白名单也不发布。
+        assert!(!pub_ip("192.168.157.18", &exc_cidrs), "显式排除优先于白名单");
+        assert!(pub_ip("192.168.1.13", &exc_cidrs), "未被排除的白名单仍发布");
     }
 }

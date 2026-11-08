@@ -134,6 +134,7 @@ export function renderPanel(tab, host, d, refresh) {
   } else if (tab === "system") {
     const relays = Array.isArray(d.relays) ? d.relays : [];
     const ips = Array.isArray(d.ip_addrs) ? d.ip_addrs : [];
+    const ipsExcluded = Array.isArray(d.ip_addrs_excluded) ? d.ip_addrs_excluded : [];
     const roamN = Number(d.roam_changes) || 0;
     host.innerHTML = `<div class="grid">
       ${metric("进程 PID", d.pid)}
@@ -144,10 +145,12 @@ export function renderPanel(tab, host, d, refresh) {
       ${metric("换网次数", roamN)}
       ${metric("最近换网", roamN ? sinceMs(Number(d.roam_last_ms)) + " 前" : "—")}
     </div>
-    <div class="card"><div class="card__title">网络地址（换网自愈可观测）</div>
-      <p class="muted">本节点当前对外地址：换网后由发现服务自动重发布，对端按公钥 id 仍可寻址。</p>
+    <div class="card"><div class="card__title">网络地址（本节点对外绑定 / 发布地址）</div>
+      <p class="muted">对端按这些地址直连本节点；换网后由发现服务自动重发布，对端按公钥 id 仍可寻址。</p>
       <div class="kv"><span>中继 relay</span><b>${relays.length ? relays.map(esc).join("<br>") : "—"}</b></div>
-      <div class="kv"><span>直连 IP</span><b>${ips.length ? ips.map(esc).join("<br>") : "—"}</b></div></div>
+      <div class="kv"><span>直连 IP（已发布）</span><b>${ips.length ? ips.map(esc).join("<br>") : "—"}</b></div>
+      <div class="kv"><span>已排除地址</span><b class="muted">${ipsExcluded.length ? ipsExcluded.map(esc).join("<br>") : "—"}</b></div>
+      <p class="muted small">「已排除」是采集到但按规则（docker 网桥 / NM_BIND_EXCLUDE）不对外发布的地址——不可达或不欲公开，不会污染对端选路。</p></div>
     <div class="card"><p class="muted">CPU / 内存为进程实时监控。真正的 CPU / 内存<strong>硬配额</strong>属部署级（systemd / cgroup），此处仅展示用量，不做强制限制。</p></div>`;
   } else if (tab === "identity") {
     host.innerHTML = `

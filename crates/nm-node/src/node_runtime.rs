@@ -381,6 +381,17 @@ impl Node {
         self.ep.addr()
     }
 
+    /// 对外实际发布的直连 IP 地址（已按排除规则过滤，剔除 docker 等不发布的段）。
+    /// 供监控台如实展示「本节点绑定/发布的地址」，而非 iroh 采集到的全部网卡。
+    pub fn published_ip_addrs(&self) -> Vec<std::net::SocketAddr> {
+        self.ep.published_ip_addrs()
+    }
+
+    /// iroh 采集到但被排除、不对外发布的直连 IP（docker 网桥、NM_BIND_EXCLUDE 命中段…），供监控台展示。
+    pub fn excluded_ip_addrs(&self) -> Vec<std::net::SocketAddr> {
+        self.ep.excluded_ip_addrs()
+    }
+
     /// 服务：用 iroh `Router` 统一分流 accept —— `nmspace/0` 走单播/命令/联邦处理，
     /// `/iroh-gossip/1` 走 gossip 频道；二者共用同一 endpoint。阻塞至进程结束。
     pub async fn serve(&self) -> Result<(), NodeError> {
