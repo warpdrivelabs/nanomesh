@@ -193,11 +193,36 @@ fn should_publish_ip(
     }
 }
 
+/// 某 IP 是否是**公网可达**地址（非私有/回环/link-local/未指定等）。供过滤器判断
+/// QAD 是否已探到公网反射地址。
+fn is_public_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            !v4.is_private()
+                && !v4.is_loopback()
+                && !v4.is_link_local()
+                && !v4.is_unspecified()
+                && !v4.is_broadcast()
+                && !v4.is_documentation()
+        }
+        std::net::IpAddr::V6(v6) => {
+            !v6.is_loopback() && !v6.is_unspecified() && (v6.segments()[0] & 0xffc0) != 0xfe80
+        }
+    }
+}
+
 fn pkarr_addr_filter() -> iroh::address_lookup::AddrFilter {
     let allowed = publishable_local_ips();
     // 排除模式：绑 0.0.0.0 时 iroh 采集到所有网卡（含 docker/VPN），这里按配置额外剔除
     // 指定地址/网段（docker 段等不可达毒地址默认已被白名单挡住，此处供运维进一步精确排除）。
     let (exc_ips, exc_cidrs) = parse_bind_excludes();
+    // QAD 未就绪宽限期：NAT 后节点（如腾讯云 relay）的公网地址靠 iroh QAD 反射获得，
+    // 重启后需几十秒才探到。这段窗口若只发布内网私有地址（如 10.2.0.17，对跨网对端不可达），
+    // 远端会选中这个死地址 → gossip 连接半死 → 每秒数百次 failed-to-send 风暴（实测 robot↔relay）。
+    // 故：宽限期内若候选地址尚无任何公网 IP，暂时只发 relay（对端走中继，不选死地址）；
+    // 一旦 QAD 探到公网即发布全部；超过宽限期仍无公网，视为纯内网节点，正常发布内网直连。
+    let start = std::time::Instant::now();
+    const QAD_GRACE: std::time::Duration = std::time::Duration::from_secs(90);
     iroh::address_lookup::AddrFilter::new(move |addrs: &Vec<iroh::TransportAddr>| {
         let kept: Vec<_> = addrs
             .iter()
@@ -208,6 +233,15 @@ fn pkarr_addr_filter() -> iroh::address_lookup::AddrFilter {
             })
             .cloned()
             .collect();
+        // 宽限期内且尚无公网地址 → 只发 relay，避免发布仅内网的误导记录。
+        let has_public = kept.iter().any(|a| matches!(a, iroh::TransportAddr::Ip(sa) if is_public_ip(sa.ip())));
+        if !has_public && start.elapsed() < QAD_GRACE {
+            let relay_only: Vec<_> = kept
+                .into_iter()
+                .filter(|a| matches!(a, iroh::TransportAddr::Relay(_)))
+                .collect();
+            return std::borrow::Cow::Owned(relay_only);
+        }
         std::borrow::Cow::Owned(kept)
     })
 }
@@ -767,6 +801,19 @@ mod addr_filter_tests {
         assert!(out.contains(&ip("61.149.241.222:9600")), "公网地址必须保留");
         assert!(!out.contains(&ip("172.17.0.1:9600")), "docker 段必须剔除");
         assert!(!out.contains(&ip("127.0.0.1:9600")), "回环必须剔除");
+    }
+
+    #[test]
+    fn is_public_ip_classifies_correctly() {
+        let pub_ip = |s: &str| is_public_ip(s.parse::<std::net::IpAddr>().unwrap());
+        assert!(pub_ip("61.149.241.222"), "公网 IPv4");
+        assert!(pub_ip("140.143.235.157"), "公网 IPv4(腾讯云)");
+        assert!(pub_ip("8.152.101.120"), "公网 IPv4");
+        assert!(!pub_ip("10.2.0.17"), "10.x 私有(腾讯云内网)");
+        assert!(!pub_ip("192.168.1.13"), "192.168 私有");
+        assert!(!pub_ip("172.16.2.136"), "172.16 私有");
+        assert!(!pub_ip("127.0.0.1"), "回环");
+        assert!(!pub_ip("169.254.1.1"), "link-local");
     }
 
     #[test]
