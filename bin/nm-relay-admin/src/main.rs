@@ -505,6 +505,9 @@ async fn nodes_with_addrs(State(s): State<AppState>, headers: HeaderMap, Query(q
     }
     let bl = s.store.blacklist();
     let resolve = q.resolve.as_deref().map(|v| v != "0" && v != "false").unwrap_or(true);
+    // 默认只列 nmd 节点服务主机（带 hostname）；仅在解析 pkarr 时可判，故 resolve 关则不过滤。
+    let only_nodes = resolve
+        && q.only_nodes.as_deref().map(|v| v != "0" && v != "false").unwrap_or(true);
     let snap = s.store.peers_snapshot();
     let now = now_secs();
     // 预先取出闭包需要的东西（join_all 的闭包是 FnMut，不能移动 s）。
@@ -546,6 +549,20 @@ async fn nodes_with_addrs(State(s): State<AppState>, headers: HeaderMap, Query(q
     }))
     .await;
 
+    // only_nodes：仅保留解析出 hostname 的条目（nmd 节点服务主机），滤掉客户端/模型 node id。
+    let rows: Vec<_> = if only_nodes {
+        rows.into_iter()
+            .filter(|r| {
+                r.get("hostname")
+                    .and_then(|h| h.as_str())
+                    .map(|h| !h.is_empty())
+                    .unwrap_or(false)
+            })
+            .collect()
+    } else {
+        rows
+    };
+
     Json(json!({ "count": rows.len(), "nodes": rows })).into_response()
 }
 
@@ -553,6 +570,11 @@ async fn nodes_with_addrs(State(s): State<AppState>, headers: HeaderMap, Query(q
 struct NodesQuery {
     /// 是否解析 pkarr 地址（默认 true）；传 "0"/"false" 跳过。字符串以兼容 ?resolve=1。
     resolve: Option<String>,
+    /// 只列 nmd 节点服务主机（默认 true）：仅保留 pkarr 带 hostname(user_data)的条目。
+    /// relay 的 access 回调对**任何**连 relay 的 endpoint 触发（含 NAT 后的客户端/模型穿透），
+    /// 故 store 里混有大量客户端 node id；nmd 节点发布 pkarr 时带主机名，客户端不带，据此区分。
+    /// 传 "0"/"false" 则列全部（含客户端，用于排障）。需 resolve 开启才有 hostname 可判。
+    only_nodes: Option<String>,
 }
 
 /// `/api/dns/records` — DNS 侧明细：查询量、命中/未命中、pkarr 写入、存储统计。

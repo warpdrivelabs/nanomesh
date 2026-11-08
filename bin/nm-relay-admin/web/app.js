@@ -251,9 +251,11 @@
   let nodesCache = [];
   async function loadNodes() {
     const resolve = $("node-resolve").checked ? "1" : "0";
+    // 默认只列 nmd 节点服务主机；勾选"含客户端"才带上客户端/模型 node id。
+    const onlyNodes = $("node-clients") && $("node-clients").checked ? "0" : "1";
     $("node-count").textContent = "加载中…";
     try {
-      const r = await api("/api/nodes?resolve=" + resolve);
+      const r = await api("/api/nodes?resolve=" + resolve + "&only_nodes=" + onlyNodes);
       nodesCache = r.nodes || [];
       renderNodes();
     } catch (e) {
@@ -339,6 +341,7 @@
   $("node-filter").oninput = renderNodes;
   $("btn-nodes-refresh").onclick = () => loadNodes();
   $("node-resolve").onchange = () => loadNodes();
+  if ($("node-clients")) $("node-clients").onchange = () => loadNodes();
   $("btn-ban").onclick = async () => {
     const id = $("ban-id").value.trim();
     if (!id) return;
