@@ -37,6 +37,31 @@
     if (d < 86400) return Math.floor(d / 3600) + "h 前";
     return Math.floor(d / 86400) + "d 前";
   }
+  // 运行时长（秒 → 天/时/分，最多两段）。
+  function fmtDuration(sec) {
+    sec = Math.max(0, Math.floor(Number(sec) || 0));
+    if (sec < 60) return sec + "秒";
+    const d = Math.floor(sec / 86400);
+    const h = Math.floor((sec % 86400) / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    if (d > 0) return `${d}天${h}小时`;
+    if (h > 0) return `${h}小时${m}分`;
+    return `${m}分`;
+  }
+  // unix 秒 → 本地日期时间（启动时刻）。
+  function fmtDateTime(sec) {
+    sec = Number(sec) || 0;
+    if (!sec) return "—";
+    const dt = new Date(sec * 1000);
+    const p = (n) => String(n).padStart(2, "0");
+    return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())} ${p(dt.getHours())}:${p(dt.getMinutes())}:${p(dt.getSeconds())}`;
+  }
+  // 单个服务的「运行时长 · 启动时刻」展示串。
+  function svcUptime(u) {
+    if (!u || !u.up) return "不可达";
+    if (!u.start_unix) return "运行中";
+    return `${fmtDuration(u.uptime_secs)} · 自 ${fmtDateTime(u.start_unix)}`;
+  }
   function shortId(id) {
     id = id || "";
     return id.length <= 20 ? id : id.slice(0, 10) + "…" + id.slice(-8);
@@ -124,11 +149,15 @@
     const m = ov.metrics || {};
     const r = m.relay || {};
     const rates = m.rates || {};
+    const up = ov.uptimes || {};
     $("health-line").textContent =
       `relay ${m.relay_up ? "●" : "○"} · dns/pkarr ${m.dns_up ? "●" : "○"} · 观测节点 ${ov.peer_count} · 黑名单 ${ov.blacklist_count}`;
     $("overview-cards").innerHTML = [
       card("Relay", m.relay_up ? "在线" : "不可达"),
       card("DNS/Pkarr", m.dns_up ? "在线" : "不可达"),
+      card("Relay 运行", svcUptime(up.relay)),
+      card("DNS/Pkarr 运行", svcUptime(up.dns)),
+      card("监控台运行", svcUptime(up.admin)),
       card("发送流量", fmtBytes(r.relayserver_bytes_sent_total)),
       card("接收流量", fmtBytes(r.relayserver_bytes_recv_total)),
       card("发送速率", fmtRate(rates.bytes_tx_per_s)),

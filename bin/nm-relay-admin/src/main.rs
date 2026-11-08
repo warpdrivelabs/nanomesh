@@ -69,6 +69,12 @@ struct Args {
     /// iroh-relay access.http 回调共享 Bearer（空=不校验，仅本机建议）。
     #[arg(long, default_value = "")]
     relay_auth_token: String,
+    /// iroh-relay 的 systemd unit 名（用于读取启动时间/运行时长）。
+    #[arg(long, default_value = "iroh-relay")]
+    relay_unit: String,
+    /// iroh-dns-server 的 systemd unit 名（用于读取启动时间/运行时长）。
+    #[arg(long, default_value = "iroh-dns")]
+    dns_unit: String,
 }
 
 #[derive(Clone)]
@@ -81,6 +87,9 @@ struct AppState {
     relay_auth_token: String,
     /// 启用了公网 HTTPS 时 cookie 加 Secure。
     cookie_secure: bool,
+    /// relay / dns 的 systemd unit 名（读取启动时间/运行时长）。
+    relay_unit: String,
+    dns_unit: String,
 }
 
 const INDEX: &str = include_str!("../web/index.html");
@@ -127,6 +136,8 @@ async fn main() -> anyhow::Result<()> {
         pkarr_base: args.pkarr_base.trim_end_matches('/').to_string(),
         relay_auth_token: args.relay_auth_token,
         cookie_secure: https_enabled,
+        relay_unit: args.relay_unit,
+        dns_unit: args.dns_unit,
     };
 
     let app = Router::new()
@@ -330,6 +341,7 @@ async fn overview(State(s): State<AppState>, headers: HeaderMap) -> Response {
         "peer_count": peers,
         "blacklist_count": banned,
         "pkarr_base": s.pkarr_base,
+        "uptimes": service_uptimes(&s.relay_unit, &s.dns_unit),
     }))
     .into_response()
 }
@@ -652,3 +664,66 @@ fn now_secs() -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
+
+/// 系统 boot 时刻（unix 秒）——读 /proc/stat 的 `btime`。用于把进程 starttime
+/// （相对 boot 的 jiffies）换算成绝对 unix 时刻。读不到返回 None（如非 Linux）。
+fn system_btime() -> Option<u64> {
+    let s = std::fs::read_to_string("/proc/stat").ok()?;
+    for line in s.lines() {
+        if let Some(rest) = line.strip_prefix("btime ") {
+            return rest.trim().parse::<u64>().ok();
+        }
+    }
+    None
+}
+
+/// 某进程的启动 unix 时刻（秒）：读 /proc/<pid>/stat 第 22 字段 starttime（jiffies，
+/// 相对 boot），除以 CLK_TCK(Linux 恒为 100) 加上 btime。读不到返回 None。
+/// 注意 comm 字段(第2列)可能含空格并裹在括号里，故从最后一个 ')' 之后再按空格切。
+fn process_start_unix(pid: u32, btime: u64) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after = &stat[stat.rfind(')')? + 1..];
+    // after 以 " S ..." 开头；starttime 是整个 stat 的第 22 字段 = after 里第 20 个。
+    let fields: Vec<&str> = after.split_whitespace().collect();
+    let starttime: u64 = fields.get(19)?.parse().ok()?; // 0-based: 第20个
+    Some(btime + starttime / 100)
+}
+
+/// systemd unit 的 MainPID（普通/ root 用户均可读）。失败返回 None。
+fn unit_main_pid(unit: &str) -> Option<u32> {
+    let out = std::process::Command::new("systemctl")
+        .args(["show", unit, "-p", "MainPID", "--value"])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let pid: u32 = s.trim().parse().ok()?;
+    if pid == 0 { None } else { Some(pid) }
+}
+
+/// 三个服务（relay / dns / relay-admin 自身）的启动时刻与运行时长，供总览展示。
+/// relay/dns 经 systemd MainPID 定位进程；relay-admin 用自身 pid。全部以
+/// /proc 读取启动时刻，纯文件、无需 root、不依赖时钟字符串解析。
+fn service_uptimes(relay_unit: &str, dns_unit: &str) -> serde_json::Value {
+    let btime = system_btime();
+    let now = now_secs();
+    let one = |pid: Option<u32>| -> serde_json::Value {
+        match (pid, btime) {
+            (Some(p), Some(bt)) => match process_start_unix(p, bt) {
+                Some(start) => json!({
+                    "pid": p,
+                    "start_unix": start,
+                    "uptime_secs": now.saturating_sub(start),
+                    "up": true,
+                }),
+                None => json!({ "pid": p, "up": true }),
+            },
+            _ => json!({ "up": false }),
+        }
+    };
+    json!({
+        "relay": one(unit_main_pid(relay_unit)),
+        "dns": one(unit_main_pid(dns_unit)),
+        "admin": one(Some(std::process::id())),
+    })
+}
+
