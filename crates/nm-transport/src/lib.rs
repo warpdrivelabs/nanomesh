@@ -313,19 +313,18 @@ impl NodeEndpoint {
                 }
                 multi => {
                     use iroh::endpoint::BindOpts;
-                    // 关键：基座（presets）已预置一个 0.0.0.0 的默认 IPv4 transport。
-                    // 多地址绑定必须先 clear_ip_transports() 清掉它，否则加入自己的默认地址时
-                    // 与基座默认冲突，报 "Only a single default address can be set per IP family"
-                    // （官方多地址示例即如此，见 iroh endpoint.rs bind_addr_with_opts 文档）。
+                    // 多地址绑定（实测于 iroh 1.4.1，见官方 bind_addr_with_opts 文档示例）：
+                    // ① 必须先 clear_ip_transports() 清掉基座预置的 0.0.0.0 默认 transport，
+                    //    否则会连带发布通配地址 0.0.0.0/[::]；
+                    // ② 每个地址**只设 prefix_len**，不要调 set_is_default_route——iroh 按路由表
+                    //    最长前缀匹配自动选 socket。一旦给某个非 /0 地址显式标 default_route=true，
+                    //    就与"每 family 至多一个默认"冲突，报 "Only a single default address..."。
                     builder = builder.clear_ip_transports();
                     for (i, (ip, pfx)) in multi.iter().enumerate() {
-                        // 只第一个地址当默认路由（出口/公网侧），其余显式关闭，避免多个默认冲突。
-                        // 给定前缀按真实子网路由；未给则第一个 /0（默认路由）、其余 /32（仅精确匹配）。
-                        let is_default = i == 0;
-                        let prefix = pfx.unwrap_or(if is_default { 0 } else { 32 });
+                        // 给定前缀按真实子网路由；未给则第一个 /0（兜底默认路由）、其余 /32（仅精确匹配）。
+                        let prefix = pfx.unwrap_or(if i == 0 { 0 } else { 32 });
                         let opts = BindOpts::default()
                             .set_is_required(false)
-                            .set_is_default_route(is_default)
                             .set_prefix_len(prefix);
                         builder = builder
                             .bind_addr_with_opts(std::net::SocketAddr::from((*ip, port)), opts)
