@@ -494,15 +494,25 @@ async fn connections(State(st): State<AppState>, Query(q): Query<PageQuery>) -> 
         .await
         .unwrap_or_default();
     let mut nick_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // 实体 id(hex) → kind（person / model.llm / agent.* …）：供直连实体（模型/agent）连接
+    // 在监控里以类型作“设备角色”展示。
+    let mut kind_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for e in &entities {
-        nick_map.insert(hex(&e.entity_id), e.display_name.clone());
+        let id_hex = hex(&e.entity_id);
+        nick_map.insert(id_hex.clone(), e.display_name.clone());
+        kind_map.insert(id_hex, e.kind.clone());
     }
 
     let rows: Vec<Value> = page
         .iter()
         .map(|r| {
             let mut v = session_json(r);
-            // r.id = 设备连接公钥。补充用户/设备命名信息（查不到则留空，前端显示“未注册/匿名”）。
+            // r.id = 连接公钥。两种命名来源：
+            //  ① 普通用户设备：连接公钥是**设备公钥**，经 DeviceCert 找到账号，再查账号昵称；
+            //  ② 直连实体（模型 model.llm / agent 等 gatewayd/agentd）：它们用自身实体身份直连，
+            //     **连接公钥本身就是 directory 的 entity_id**，没有设备证书——此时直接用 r.id
+            //     查 directory 显示其 display_name（否则这类连接在监控里始终是“未注册/匿名”）。
+            let id_hex = hex(r.id.as_slice());
             if let Some((account, label, role)) = dev_map.get(r.id.as_slice()) {
                 let account_hex = hex(account);
                 let nickname = nick_map.get(&account_hex).cloned().unwrap_or_default();
@@ -511,6 +521,16 @@ async fn connections(State(st): State<AppState>, Query(q): Query<PageQuery>) -> 
                     m.insert("user_nickname".into(), Value::from(nickname));     // 用户昵称
                     m.insert("device_label".into(), Value::from(label.clone())); // 当前设备名称
                     m.insert("device_role".into(), Value::from(role.clone()));   // 设备角色
+                }
+            } else if let Some(name) = nick_map.get(&id_hex) {
+                // 直连实体（模型/agent）：连接公钥即实体 id。用户名=实体名，设备=该实体自身。
+                let kind = kind_map.get(&id_hex).cloned().unwrap_or_default();
+                if let Value::Object(ref mut m) = v {
+                    m.insert("account_pubkey".into(), Value::from(id_hex.clone())); // 实体公钥
+                    m.insert("user_nickname".into(), Value::from(name.clone()));    // 实体名（模型名等）
+                    m.insert("device_label".into(), Value::from(name.clone()));     // 设备名同实体名
+                    // 设备角色用实体类型（model.llm / agent.assistant…），便于前端区分。
+                    m.insert("device_role".into(), Value::from(kind));
                 }
             }
             v
