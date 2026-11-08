@@ -1,3 +1,8 @@
 # 仅注册 xtask 别名（cargo xtask dist）；不覆盖全局 target 目录等其他配置
 [alias]
 xtask = "run -p xtask --"
+
+# Fedora 缺 perl-FindBin 时 openssl-sys 默认 vendor 源码编不过；本机已装 openssl-devel，走系统库。
+# 否则 `cargo tauri dev` / 共享 target 下重建 openssl-sys 会报：Can't locate FindBin.pm
+[env]
+OPENSSL_NO_VENDOR = "1"
