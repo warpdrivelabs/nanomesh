@@ -1192,13 +1192,18 @@ fn spawn_proc_sampler(slot: Arc<Mutex<ProcMetrics>>) {
         use sysinfo::{Pid, ProcessesToUpdate, System};
         let mut sys = System::new();
         let pid = Pid::from_u32(std::process::id());
+        // CPU 核数：sysinfo 的 process.cpu_usage() 是**单核累加**百分比（用满 N 核=N×100%），
+        // 在多核机器上会严重误导（如 80 核机上 nmd 显示 39% 实际只占全机 0.5%）。
+        // 除以核数换算成**全机实际占用率**（0~100%，与 top 的 %Cpu 口径一致），不误导。
+        let ncpu = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).max(1) as f32;
         loop {
             sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
             if let Some(p) = sys.process(pid)
                 && let Ok(mut m) = slot.lock()
             {
                 m.rss_bytes = p.memory();
-                m.cpu_pct = p.cpu_usage();
+                // 全机实际占用率 = 单核累加值 / 核数。
+                m.cpu_pct = p.cpu_usage() / ncpu;
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
