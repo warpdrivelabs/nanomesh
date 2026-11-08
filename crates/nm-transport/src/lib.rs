@@ -118,8 +118,50 @@ fn publishable_local_ips() -> Vec<std::net::IpAddr> {
 /// - `Ip(私有/回环/link-local)` → 仅当它是**本机真实网卡**地址时保留（robot.link 的
 ///   172.16.2.136、cmxdev18 的 192.168.1.13 属此类，供同内网直连）；docker 网桥
 ///   （172.17.0.1 等）不在白名单 → 剔除。
+/// 解析 `NM_BIND_EXCLUDE`：逗号分隔的「排除规则」，每条是
+///   - 单个 IPv4，如 `172.17.0.1`（精确排除该地址），或
+///   - CIDR 网段，如 `172.16.0.0/12`（排除整段）。
+/// 返回 (精确IP集, CIDR列表)。解析失败的条目忽略。空/未配时返回空，不排除任何东西。
+fn parse_bind_excludes() -> (Vec<std::net::Ipv4Addr>, Vec<(u32, u32)>) {
+    let raw = std::env::var("NM_BIND_EXCLUDE").unwrap_or_default();
+    let mut ips = Vec::new();
+    let mut cidrs = Vec::new(); // (network_u32, mask_u32)
+    for item in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        match item.split_once('/') {
+            Some((net, bits)) => {
+                if let (Ok(ip), Ok(prefix)) =
+                    (net.trim().parse::<std::net::Ipv4Addr>(), bits.trim().parse::<u8>())
+                {
+                    if prefix <= 32 {
+                        let mask: u32 = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+                        cidrs.push((u32::from(ip) & mask, mask));
+                    }
+                }
+            }
+            None => {
+                if let Ok(ip) = item.parse::<std::net::Ipv4Addr>() {
+                    ips.push(ip);
+                }
+            }
+        }
+    }
+    (ips, cidrs)
+}
+
+/// 某 IPv4 是否命中排除列表（精确 IP 或 CIDR）。
+fn is_excluded(ip: std::net::Ipv4Addr, exact: &[std::net::Ipv4Addr], cidrs: &[(u32, u32)]) -> bool {
+    if exact.contains(&ip) {
+        return true;
+    }
+    let v = u32::from(ip);
+    cidrs.iter().any(|(net, mask)| (v & mask) == *net)
+}
+
 fn pkarr_addr_filter() -> iroh::address_lookup::AddrFilter {
     let allowed = publishable_local_ips();
+    // 排除模式：绑 0.0.0.0 时 iroh 采集到所有网卡（含 docker/VPN），这里按配置额外剔除
+    // 指定地址/网段（docker 段等不可达毒地址默认已被白名单挡住，此处供运维进一步精确排除）。
+    let (exc_ips, exc_cidrs) = parse_bind_excludes();
     iroh::address_lookup::AddrFilter::new(move |addrs: &Vec<iroh::TransportAddr>| {
         let kept: Vec<_> = addrs
             .iter()
@@ -127,6 +169,12 @@ fn pkarr_addr_filter() -> iroh::address_lookup::AddrFilter {
                 iroh::TransportAddr::Relay(_) => true,
                 iroh::TransportAddr::Ip(sa) => {
                     let ip = sa.ip();
+                    // 显式排除列表优先（NM_BIND_EXCLUDE 命中则一律剔除，即便是本机网卡）。
+                    if let std::net::IpAddr::V4(v4) = ip {
+                        if is_excluded(v4, &exc_ips, &exc_cidrs) {
+                            return false;
+                        }
+                    }
                     // 本机真实网卡地址（含私有段）→ 保留，供同内网直连。
                     if allowed.contains(&ip) {
                         return true;
@@ -274,62 +322,31 @@ impl NodeEndpoint {
         }
         if port != 0 {
             // 固定 UDP 端口：让本节点地址稳定，便于 LAN 对等配置。
-            // NM_BIND_ADDR（nmd 据 [bind_addr] 配置设置）限定监听到指定本机 IP：多网卡/docker 节点据此
-            // 只广播可达地址，避免广播一堆不可达地址（如 docker 网桥/公网段 bip）致对端选错路、连不稳。
             //
-            // 支持**逗号分隔的多个地址**，每个可带子网前缀：`IP[/prefix]`
-            // （如 `192.168.1.13/24,192.168.157.18/20`）。每个 IP 用 bind_addr_with_opts
-            // 单独绑定一个 UDP socket，iroh 按路由表语义（最长前缀匹配）选 socket 发包。
-            // iroh 约束：每个 IP family 最多一个「默认路由」socket，且 `/0` 前缀会被隐式当默认。
-            // 故：① 给每个地址设真实子网前缀（默认 /0 会导致多个默认→
-            // "Only a single default address can be set per IP family" 启动失败）；
-            // ② 只让第一个地址当默认路由，其余显式 set_is_default_route(false)。
-            // 这样一台多网卡节点可同时在多个子网内被直连（如 ens34 的 192.168.1.x +
-            // tun0 的 192.168.157.x——后者是点对点隧道，iroh 绑 0.0.0.0 时不会自动采集）。
+            // 绑定策略（排除模式）：
+            //   - 默认绑 0.0.0.0：iroh 自动采集**所有网卡**地址（ens34 内网、tun0 VPN 隧道、
+            //     docker 网桥…）并经 QAD 探到公网反射地址，各段均可被直连。
+            //   - `NM_BIND_ADDR`（单个具体 IP，无逗号）：仍支持绑单一网卡（老行为，需要时用）。
+            //   - 发布哪些地址由 pkarr_addr_filter 决定：默认剔除 docker/veth 等虚拟网卡段，
+            //     并可经 `NM_BIND_EXCLUDE`（逗号分隔的 IP 或 CIDR，如 "172.17.0.0/16,10.8.0.1"）
+            //     额外排除指定地址/网段。这样「绑 0.0.0.0 收全部 + 排除不想公开的段」，
+            //     既保公网(QAD)与多内网段(1.x/157.x)直连，又不泄漏 docker 等不可达毒地址。
             let raw = std::env::var("NM_BIND_ADDR").unwrap_or_default();
-            // 解析为 (ip, prefix_len)；未写 /prefix 时 prefix=None（下面按序号决定默认路由）。
-            let specs: Vec<(std::net::Ipv4Addr, Option<u8>)> = raw
-                .split(',')
-                .filter_map(|s| {
-                    let s = s.trim();
-                    if s.is_empty() {
-                        return None;
-                    }
-                    let (ip_str, pfx) = match s.split_once('/') {
-                        Some((a, p)) => (a.trim(), p.trim().parse::<u8>().ok()),
-                        None => (s, None),
-                    };
-                    ip_str.parse::<std::net::Ipv4Addr>().ok().map(|ip| (ip, pfx))
-                })
-                .collect();
-            match specs.as_slice() {
-                [] => {
-                    // 未配或解析失败：绑全部接口（0.0.0.0），行为与改造前一致。
+            let raw = raw.trim();
+            // 仅当配置为**单个具体 IPv4**时绑该 IP；否则（空/0.0.0.0/多值）一律绑 0.0.0.0，
+            // 发布过滤交给 pkarr_addr_filter（排除模式）。
+            let single: Option<std::net::Ipv4Addr> = (!raw.is_empty() && !raw.contains(','))
+                .then(|| raw.split('/').next().unwrap_or(raw).trim().parse().ok())
+                .flatten()
+                .filter(|ip: &std::net::Ipv4Addr| !ip.is_unspecified());
+            match single {
+                Some(ip) => {
+                    // 显式绑单一网卡（QAD 经它探公网）。
+                    builder = builder.bind_addr((ip, port)).map_err(err)?;
+                }
+                None => {
+                    // 绑 0.0.0.0：采集所有网卡 + QAD 公网，发布时由过滤器按排除列表剔除。
                     builder = builder.bind_addr((std::net::Ipv4Addr::UNSPECIFIED, port)).map_err(err)?;
-                }
-                [(single, _)] => {
-                    // 单地址：保持简单路径（iroh 隐式按 /0 默认路由，与改造前一致）。
-                    builder = builder.bind_addr((*single, port)).map_err(err)?;
-                }
-                multi => {
-                    use iroh::endpoint::BindOpts;
-                    // 多地址绑定（实测于 iroh 1.4.1，见官方 bind_addr_with_opts 文档示例）：
-                    // ① 必须先 clear_ip_transports() 清掉基座预置的 0.0.0.0 默认 transport，
-                    //    否则会连带发布通配地址 0.0.0.0/[::]；
-                    // ② 每个地址**只设 prefix_len**，不要调 set_is_default_route——iroh 按路由表
-                    //    最长前缀匹配自动选 socket。一旦给某个非 /0 地址显式标 default_route=true，
-                    //    就与"每 family 至多一个默认"冲突，报 "Only a single default address..."。
-                    builder = builder.clear_ip_transports();
-                    for (i, (ip, pfx)) in multi.iter().enumerate() {
-                        // 给定前缀按真实子网路由；未给则第一个 /0（兜底默认路由）、其余 /32（仅精确匹配）。
-                        let prefix = pfx.unwrap_or(if i == 0 { 0 } else { 32 });
-                        let opts = BindOpts::default()
-                            .set_is_required(false)
-                            .set_prefix_len(prefix);
-                        builder = builder
-                            .bind_addr_with_opts(std::net::SocketAddr::from((*ip, port)), opts)
-                            .map_err(err)?;
-                    }
                 }
             }
         }

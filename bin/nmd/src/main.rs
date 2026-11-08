@@ -71,6 +71,11 @@ struct Config {
     /// 可选：把监听限定到某个本机 IP（多网卡/docker 节点避免广播一堆不可达地址致连接不稳）。空=0.0.0.0 全部接口。
     #[serde(default)]
     bind_addr: Option<String>,
+    /// 可选：发布地址排除列表（排除模式）——逗号分隔的 IP 或 CIDR（如 "172.17.0.0/16,10.8.0.1"）。
+    /// 绑 0.0.0.0 时 iroh 采集所有网卡，这里剔除不想对外发布的段（docker 网桥等）。
+    /// 空=使用 docker 网桥默认排除段（见 main 中注入）。
+    #[serde(default)]
+    bind_exclude: Option<String>,
     #[serde(default)]
     peers: Vec<PeerCfg>,
     /// 自建中继（仅 selfhost）。
@@ -384,6 +389,9 @@ fn load_or_create_identity(path: &str) -> anyhow::Result<[u8; 32]> {
 ///     应使用的源地址」，即默认出口网卡 IP；读 `local_addr()` 得之。
 ///  3) 校验非 loopback/unspecified/link-local 才采用。
 /// 无 `/proc/net/route`（非 Linux，如 mac 开发机）或无默认路由时返回 None → 调用方回退绑 0.0.0.0。
+/// 注：2026-11 起默认改用「绑 0.0.0.0 + 发布排除过滤」策略，此自动探测不再被默认路径调用，
+/// 保留以备将来需要「绑单一出口网卡」的部署场景。
+#[allow(dead_code)]
 fn detect_default_egress_ipv4() -> Option<std::net::Ipv4Addr> {
     use std::net::{Ipv4Addr, UdpSocket};
     // ① 从 /proc/net/route 找默认路由网关（Destination 全 0 的那行，Gateway 列小端 hex）。
@@ -482,32 +490,40 @@ async fn async_main() -> anyhow::Result<()> {
     let raw = std::fs::read_to_string(&args.config).unwrap_or_default();
     let cfg: Config = toml::from_str(&raw)?;
 
-    // P2-13 修复：把监听限定到可达地址（多网卡/docker 节点去地址污染，只广播可达地址）。
-    // 经 NM_BIND_ADDR 内传给 nm-transport::bind_infra；在启动早期、建节点前设置，彼时无并发 env 访问。
+    // 绑定策略（2026-11 改为「绑 0.0.0.0 + 排除模式」）：
+    //   - iroh 绑 0.0.0.0 时枚举所有网卡（ens34 内网、tun0 VPN、docker 网桥…）并经 QAD 探公网，
+    //     各段都能被直连；发布哪些由 nm-transport 的 pkarr_addr_filter 决定（白名单剔虚拟网卡
+    //     + NM_BIND_EXCLUDE 精确排除）。这样多网卡节点无需人工指定单地址即可同时在多个子网
+    //     （如 192.168.1.x + 192.168.157.x VPN）被直连，又不泄漏 docker 等不可达毒地址。
+    //   - 旧问题（docker 毒地址致 home node 转发风暴）由过滤器在**发布层**解决，不再靠绑单网卡。
     //
-    // 2026-11-05 实战根因：docker 多的节点绑 0.0.0.0 时，iroh 枚举**所有**网卡 IP（含 docker0/br-* 私有段）
-    // 并经 pkarr 发布，远端选路反复试这些不可达死地址→gossip 连接半死、failed-to-send 风暴→home node
-    // accept 争用致客户端登录 timed out。绑具体地址则 iroh 只发布该地址（见 iroh socket.rs collect_local_addresses
-    // 的 is_unspecified 分支）。故：
-    //  ① 显式 [bind_addr] 优先（手动指定，覆盖自动探测）；
-    //  ② 未配则**自动探测默认路由出口网卡 IP** 作绑定地址——免每台人工配、根除 docker 毒地址。
-    //     判据用「默认路由出口」而非 IP 私有段前缀：robot.link 的 172.16.x / relay 的 10.x 等私有段其实是
-    //     真实可达主网卡，按前缀过滤会误杀；默认出口才是「能通外网的那块网卡」的权威信号。
+    // 配置：
+    //  ① 显式 [bind_addr]=单个 IP → 仍绑该网卡（需要时用，覆盖默认）；
+    //  ② 未配 → 绑 0.0.0.0（采集全部网卡 + 排除模式过滤）；
+    //  ③ [bind_exclude]（或 NM_BIND_EXCLUDE 环境变量）= 逗号分隔的 IP/CIDR，额外排除发布。
+    //     未显式配置时注入一组 docker/虚拟网桥默认段，保证开箱即不泄漏毒地址。
     match cfg.bind_addr.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(a) => {
             unsafe { std::env::set_var("NM_BIND_ADDR", a) };
-            tracing::info!(bind_addr = %a, "绑定到配置的 bind_addr（逗号分隔可绑多个地址，只广播这些）");
+            tracing::info!(bind_addr = %a, "绑定到配置的 bind_addr（单网卡）");
         }
-        None => match detect_default_egress_ipv4() {
-            Some(ip) => {
-                unsafe { std::env::set_var("NM_BIND_ADDR", ip.to_string()) };
-                tracing::info!(egress = %ip, "未配 bind_addr → 自动绑定默认路由出口网卡（去 docker/多网卡地址污染）");
-            }
-            None => {
-                // 探不到（无 /proc/net/route、无默认路由、或无合法出口）：回退不设 = 绑 0.0.0.0（行为中性）。
-                tracing::debug!("未配 bind_addr 且无法探测默认出口 → 绑全部接口（0.0.0.0）");
-            }
-        },
+        None => {
+            // 排除模式：绑 0.0.0.0，发布过滤交给 pkarr_addr_filter。
+            tracing::info!("未配 bind_addr → 绑全部接口（0.0.0.0），发布地址由排除过滤器处理");
+        }
+    }
+    // 排除列表：显式 [bind_exclude] 优先；未配则给一组 docker/虚拟网桥默认段，开箱即安全。
+    match cfg.bind_exclude.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(ex) => {
+            unsafe { std::env::set_var("NM_BIND_EXCLUDE", ex) };
+            tracing::info!(bind_exclude = %ex, "发布排除列表（NM_BIND_EXCLUDE）");
+        }
+        None => {
+            // docker 默认网桥段 + 常见容器网段；真实主网卡（robot.link 172.16.x、relay 10.x）不在此列。
+            let default_exclude = "172.17.0.0/16,172.18.0.0/16,172.19.0.0/16,172.20.0.0/16,172.21.0.0/16,172.22.0.0/16,172.23.0.0/16";
+            unsafe { std::env::set_var("NM_BIND_EXCLUDE", default_exclude) };
+            tracing::debug!(bind_exclude = %default_exclude, "未配 bind_exclude → 使用 docker 网桥默认排除段");
+        }
     }
 
     // P0-2 离线恢复：--restore <备份> → 覆盖 cfg.db 后退出（覆盖前把现有 db 另存一份，可回滚）。须在 nmd 停止时执行。
