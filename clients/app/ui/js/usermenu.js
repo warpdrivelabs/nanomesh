@@ -188,9 +188,20 @@ async function setMyStatus(st) {
 window.setMyStatus = setMyStatus;
 
 async function switchUser(pk) {
-  // Bug 3: 优先用目标账号自己记住的节点服务；没有才回退当前节点（首次切到该账号时）。
-  const svc = Identity.svcOf(pk) || window.CURRENT_SVC;
-  if (!svc) { if (window.toast) toast("无当前节点服务，请回启动页重连"); return; }
+  // 切换到目标账号：必须连到**该账号自己的 home node**，而不是沿用当前账号的节点。
+  // 每个账号的数据/会话绑定在各自 home node；若回退连当前节点（CURRENT_SVC），
+  // 会导致该账号连错节点（presence/消息落在错误节点）且被 connectAs 成功后固化记住。
+  // 故：仅当目标账号本地已记住过自己的 svc 时才直接切；否则回登录页让用户为它选节点，
+  // 不盲连当前节点。
+  const svc = Identity.svcOf(pk);
+  if (!svc) {
+    if (window.toast) toast("请为 " + Identity.label(pk) + " 选择其所属节点后登录");
+    // 预选目标账号，回登录页选节点（避免连错到当前账号的节点）。
+    try { if (window.Identity && Identity.setCurrent) Identity.setCurrent(pk); } catch (_) {}
+    try { await NM.inv("disconnect"); } catch (_) {}
+    if (typeof showLoginView === "function") showLoginView();
+    return;
+  }
   if (window.toast) toast("切换到 " + Identity.label(pk) + "…");
   try { await NM.inv("disconnect"); } catch (_) {}
   try { await connectAs(pk, svc, Identity.nameOf(pk)); }
