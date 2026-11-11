@@ -1,10 +1,14 @@
 //! 启动 banner：渐变字符画打印（思路抽取自 cmx-web-chassis，泛化为库内可复用组件）。
 //!
 //! 各守护进程可提供**自己的字符画 + 标语 + 渐变配色 + 右下角签名**（[`BannerSpec`]）；目前仅
-//! `nmd` 接入（NANO MESH），其余 bin 日后一行即可接入。**非终端**（stdout 重定向到文件/日志管道，
-//! 如 `nohup`）自动降级为纯文本，避免 ANSI 转义码污染日志。
+//! `nmd` 接入（NANO MESH），其余 bin 日后一行即可接入。
+//!
+//! 输出策略：
+//! - stdout 是终端 → 直接打渐变色；
+//! - stdout 被重定向（`nohup` / 管道 / 日志文件）→ **stdout 写纯文本**（避免 ANSI 污染日志），
+//!   同时若 `/dev/tty` 可写（交互式 `./start-all.sh`），再往控制终端打一份渐变色，启动时看得见颜色。
 
-use std::io::IsTerminal;
+use std::io::{self, IsTerminal, Write};
 
 /// 一个 RGB 颜色停靠点。
 pub type Rgb = (u8, u8, u8);
@@ -57,20 +61,29 @@ impl BannerSpec {
     }
 }
 
-/// 打印一个 banner（带纵向渐变；非终端降级纯文本）。
+/// 打印一个 banner（带纵向渐变；非终端时日志纯文本 + 控制终端彩色）。
 pub fn print(spec: &BannerSpec) {
-    // 非终端：纯文本，避免 ANSI 码污染日志（nohup / 管道 / 重定向到文件）。
-    if !std::io::stdout().is_terminal() {
-        println!("{}", spec.art);
-        if !spec.tagline.is_empty() {
-            println!("{}", spec.tagline);
-        }
-        if !spec.signature.is_empty() {
-            println!("{}", spec.signature);
-        }
+    if std::io::stdout().is_terminal() {
+        let _ = write_colored(spec, &mut io::stdout());
         return;
     }
 
+    // 日志通道：纯文本，避免 ANSI 污染。
+    println!("{}", spec.art);
+    if !spec.tagline.is_empty() {
+        println!("{}", spec.tagline);
+    }
+    if !spec.signature.is_empty() {
+        println!("{}", spec.signature);
+    }
+
+    // 交互式 start-all / nohup 场景：控制终端仍在，补打一份彩色横幅。
+    if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+        let _ = write_colored(spec, &mut tty);
+    }
+}
+
+fn write_colored(spec: &BannerSpec, out: &mut impl Write) -> io::Result<()> {
     let stops = if spec.stops.is_empty() {
         &DEFAULT_STOPS[..]
     } else {
@@ -80,32 +93,30 @@ pub fn print(spec: &BannerSpec) {
     let lines: Vec<&str> = spec.art.lines().collect();
     let total = lines.iter().filter(|l| !l.trim().is_empty()).count();
     let denom = total.saturating_sub(1).max(1) as f32;
-
-    // 字符画显示宽度（用于右下角签名右对齐）：取最宽内容行的显示列数。
     let art_width = lines.iter().map(|l| display_width(l)).max().unwrap_or(0);
 
     let mut content_idx = 0usize;
     for line in &lines {
         if line.trim().is_empty() {
-            println!();
+            writeln!(out)?;
             continue;
         }
         let t = content_idx as f32 / denom;
         let (r, g, b) = gradient_color(stops, t);
-        println!("\x1b[1;38;2;{r};{g};{b}m{line}\x1b[0m");
+        writeln!(out, "\x1b[1;38;2;{r};{g};{b}m{line}\x1b[0m")?;
         content_idx += 1;
     }
 
     if !spec.tagline.is_empty() {
         let (r, g, b) = *stops.last().unwrap_or(&(255, 255, 255));
-        println!("\n\x1b[1;38;2;{r};{g};{b}m{}\x1b[0m", spec.tagline);
+        writeln!(out, "\n\x1b[1;38;2;{r};{g};{b}m{}\x1b[0m", spec.tagline)?;
     }
 
-    // 右下角签名小字：右对齐到字符画宽度 + 暗淡（\x1b[2m）显得更小/次要。
     if !spec.signature.is_empty() {
         let pad = art_width.saturating_sub(display_width(&spec.signature));
-        println!("\x1b[2m{}{}\x1b[0m", " ".repeat(pad), spec.signature);
+        writeln!(out, "\x1b[2m{}{}\x1b[0m", " ".repeat(pad), spec.signature)?;
     }
+    out.flush()
 }
 
 /// 估算字符串的终端显示宽度（东亚全角计 2 列，其余 1 列）。

@@ -43,10 +43,12 @@ start_one() { # $1=name $2=pidfile $3=logfile ; 其余=命令与参数
         return 0
     fi
     echo "[$name] 启动中…"
+    # 日志仍落盘；不在此 tee——脚本退出后 process-substitution 会断管，长驻进程可能被 SIGPIPE 打死。
     nohup "$@" >"$logfile" 2>&1 &
     echo $! >"$pidfile"
     sleep 2
     if is_running "$pidfile"; then
+        # nmd 横幅彩色由进程写到 /dev/tty；此处不再 head 日志，避免纯文本重复刷屏。
         echo "[$name] 启动成功 (PID: $(cat "$pidfile"))  日志: $logfile"
     else
         echo "[$name] 启动失败，请查看日志: $logfile"
