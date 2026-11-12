@@ -56,8 +56,10 @@
       const tok = (wbUrl.split("t=")[1] || "").split("&")[0];
       if (tok) el.setAttribute("token", tok);
       el.setAttribute("theme", document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark");
-      // 应用级分区裁剪:账户(身份由 nanomesh 承担)/外观(随宿主主题)/关于(版本属宿主)/IM(nanomesh 自有 IM)。
-      el.setAttribute("setting-hide", "account,appearance,about,im");
+      // 应用级分区裁剪:账户(身份由 nanomesh 承担)/外观(随宿主主题)/关于(版本属宿主)。
+      // IM 遥控保留:cmx_host 实现了 im_config / im_wechat_login / im_qq_login 三条契约命令
+      // (飞书/QQ/微信通道桥 + 扫码登录,保存即热重载),面板可直接配置。
+      el.setAttribute("setting-hide", "account,appearance,about");
       el.style.cssText = "display:block;width:100%;height:100%";
       st.appendChild(el);
     }
@@ -155,7 +157,7 @@
             <select class="ns-inp" id="cx-shim"><option value="auto" ${cfg.shim === "auto" || !cfg.shim ? "selected" : ""}>自动(随登录模式)</option><option value="on" ${cfg.shim === "on" ? "selected" : ""}>强制注入</option><option value="off" ${cfg.shim === "off" ? "selected" : ""}>不注入</option></select>
           </span></div>
           <div class="detail-row"><span class="k">UI 目录</span><span class="v"><input class="ns-inp" id="cx-uidir" style="width:100%" placeholder="空=自动(dev 源码路径)" value="${esc(cfg.uiDir || "")}"/></span></div>
-          <div class="detail-row"><span class="k">数据目录</span><span class="v"><input class="ns-inp" id="cx-datadir" style="width:100%" placeholder="空=随 NanoMesh 隔离;~/.cmx-agent=共享原 TrueMate 数据(勿与独立版同时运行)" value="${esc(cfg.dataDir || "")}"/></span></div>
+          <div class="detail-row"><span class="k">数据目录</span><span class="v"><input class="ns-inp" id="cx-datadir" style="width:100%" placeholder="空=与独立版 TrueMate 共享(~/.cmx-agent);填其它路径=隔离" value="${esc(cfg.dataDir || "")}"/></span></div>
           <div class="detail-row"><span class="k">工作目录</span><span class="v"><input class="ns-inp" id="cx-workdir" style="width:100%" placeholder="空=$HOME" value="${esc(cfg.workdir || "")}"/></span></div>
           <div class="detail-row"><span class="k">端口</span><span class="v"><input class="ns-inp" id="cx-port" type="number" min="0" max="65535" value="${Number(cfg.port) || 0}"/> <small style="color:var(--muted)">0=随机</small></span></div>
           <div class="detail-row"><span class="k">访问令牌</span><span class="v"><input class="ns-inp" id="cx-token" style="width:100%" value="${esc(cfg.token || "auto")}"/> <small style="color:var(--muted)">auto=每次随机;off=关闭(仅本机回环,慎用)</small></span></div>
@@ -170,7 +172,8 @@
           <button class="ns-btn ns-primary" id="cx-save">保存</button>
           <button class="ns-btn" id="cx-save-restart">保存并重启工作台</button>
         </div>
-        <p style="font-size:12px;color:var(--muted)">恢复原版组合:登录=门户登录 + 数据目录=~/.cmx-agent + 模型来源=cmx 原配置链。配置改动需重启工作台生效。组件化嵌入后「隐藏边栏」由组件自身处理(嵌入态默认隐藏其活动栏)。</p>
+        <p style="font-size:12px;color:var(--muted)">默认数据目录=~/.cmx-agent,与独立版 TrueMate 共享同一份模型配置/会话/workspaces(模型列表为空或发送提示未配置 = 没读到 providers.json,检查 dataDir 下 config/providers.json)。恢复原版组合=登录改门户登录 + 模型来源保持 cmx 原配置链。配置改动需重启工作台生效。组件化嵌入后「隐藏边栏」由组件自身处理(嵌入态默认隐藏其活动栏)。<br/>
+        IM 遥控在工作台「设置 → IM 遥控」内配置(飞书/QQ/微信,扫码登录),保存即热重载。与独立版 TrueMate 共用 ~/.cmx-agent 时,请勿两边同时开启 IM——通道会双在线竞争消费消息。</p>
       </div></div>`;
     const collect = () => ({
       enabled: !!document.getElementById("cx-enabled").checked,
@@ -190,7 +193,6 @@
         apiKey: document.getElementById("cx-mkey").value.trim(),
         name: document.getElementById("cx-mname").value.trim(),
       },
-      im: !!cfg.im,
     });
     const save = async (restart) => {
       try {

@@ -1,8 +1,9 @@
 //! 智能体工作台(cmx-agent 库内嵌)宿主:零复制、cmx-agent 仓库零改动、**全参数化适配**。
 //!
 //! 配置 `<nanomesh-data>/cmx-workbench.json`(serde 全默认,缺失=默认;改动经 cmx_restart 生效):
-//! 每个适配点都可配、都可切回原版行为——`login:"portal"` 恢复原门户登录、`dataDir:"~/.cmx-agent"`
-//! 共享原 TrueMate 数据、`model.mode:"cmx"` 走原模型配置链、`shim` 控制登录垫片注入。
+//! 每个适配点都可配、都可切回原版行为——`login:"portal"` 恢复原门户登录、`dataDir` 默认
+//! `~/.cmx-agent`(与独立版 TrueMate 共享同一份数据,填其它路径才隔离)、`model.mode:"cmx"`
+//! 走原模型配置链、`shim` 控制登录垫片注入。
 //!
 //! - **构造**:`DesktopAppBuilder::new(workdir, dataDir, model)`;login=off 不调 `.auth()`(免登录,
 //!   其 CLI serve 同形态);login=portal 调 `.auth(AuthConfig{base_url})`(原版登录完整回归)。
@@ -12,10 +13,13 @@
 //!   GET /api/attachment、POST /api/att/upload)+ 同源静态服务其 ui/(路径引用原仓库,不拷贝);
 //!   index.html 按 shim 配置追加 ~20 行登录垫片、按 hideRail 配置追加边栏隐藏样式
 //!   (均为 nanomesh 适配层,serve 时内存追加,cmx-agent 零改动)。
+//! - **IM 遥控**:cmx-agent-im 通道桥(飞书/QQ/微信)接线;组件「设置 → IM 遥控」的三条契约命令
+//!   `im_config` / `im_wechat_login` / `im_qq_login` 由本宿主实现(HTTP 与 invoke 双面同语义),
+//!   配置落数据根 `config/im.json`,保存/扫码即热重载,工作台启动时自动起已启用通道。
 //! - **安全**:绑 127.0.0.1 + loopback Host 校验 + token 闸(默认每次启动随机;?t= 首访种 cookie)。
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::body::Body;
 use axum::extract::State;
@@ -65,7 +69,8 @@ pub(crate) struct CmxCfg {
     pub hide_rail: bool,
     /// 空=自动(dev 源码路径);可指任意 cmx-agent ui/ 目录。
     pub ui_dir: String,
-    /// 空=<nanomesh-data>/cmx-agent(隔离);"~/.cmx-agent"=共享原 TrueMate 数据。
+    /// 空=~/.cmx-agent(默认与独立版 TrueMate / Web 壳共享同一份数据:模型配置/会话/workspaces);
+    /// 填其它路径=隔离(多实例/测试)。
     pub data_dir: String,
     /// agent 工作目录;空=$HOME。
     pub workdir: String,
@@ -74,8 +79,6 @@ pub(crate) struct CmxCfg {
     /// "auto"=每次启动随机 | 固定串 | "off"=关 token 闸(仅剩 loopback,不建议)。
     pub token: String,
     pub model: CmxModelCfg,
-    /// cmx-agent-im 遥控(默认关;开启要求 login=portal)。P1 接线。
-    pub im: bool,
 }
 impl Default for CmxCfg {
     fn default() -> Self {
@@ -92,7 +95,6 @@ impl Default for CmxCfg {
             port: 0,
             token: "auto".into(),
             model: CmxModelCfg::default(),
-            im: false,
         }
     }
 }
@@ -121,10 +123,18 @@ fn save_cfg(app: &AppHandle, cfg: &CmxCfg) -> Result<(), String> {
     Ok(())
 }
 
-fn expand_home(s: &str) -> PathBuf {
-    if let Some(rest) = s.strip_prefix("~/") {
-        if let Some(h) = std::env::var_os("HOME") {
-            return PathBuf::from(h).join(rest);
+/// `~` / `~/x` 展开。必须走 tauri 的 home_dir，**不能只看环境变量 HOME**：Windows 上
+/// 从资源管理器/IDE 启动的 GUI 进程没有 HOME（只有 Git Bash 会设），此时 `~/.cmx-agent`
+/// 会被当成相对路径，落到进程 cwd 下的字面 `~` 目录 —— 数据根与 TrueMate 错开，
+/// 表现为模型列表空、会话/workspaces 全空（且不会报错）。
+fn expand_home(app: &AppHandle, s: &str) -> PathBuf {
+    if s == "~" {
+        if let Ok(h) = app.path().home_dir() {
+            return h;
+        }
+    } else if let Some(rest) = s.strip_prefix("~/").or_else(|| s.strip_prefix("~\\")) {
+        if let Ok(h) = app.path().home_dir() {
+            return h.join(rest);
         }
     }
     PathBuf::from(s)
@@ -173,13 +183,389 @@ async fn dispatch_on_net(app: Arc<AgentApp>, payload: String) -> String {
         .unwrap_or_else(|e| json!({"ok":false,"error":format!("task failed: {e}")}).to_string())
 }
 
+// ── IM 遥控（cmx-agent-im 通道桥）────────────────────────────────────────────
+// 组件「设置 → IM 遥控」面板经命令总线调用三条契约命令（Tauri 壳同名命令的命令总线版）：
+// im_config / im_wechat_login / im_qq_login。配置存数据根 `config/im.json`（脱敏回显、
+// 保存即热重载、扫码凭证落盘即上线），工作台启动时按数据根自动起已启用通道。
+// 全部在 net_rt 上执行——飞书 Stream 长连接 / 微信长轮询是常驻网络任务，不能跑 Tauri 运行时。
+// ⚠ 数据目录设成 `~/.cmx-agent`（与独立版 TrueMate 共享）时，勿两边同时开 IM：通道会双在线
+//    竞争消费同一条消息。
+
+/// IM 桥句柄（热重载停旧用：发 stop 信号 + provider 断长连接）。
+type ImBridgeSlot = (tokio::sync::watch::Sender<bool>, Arc<dyn cmx_agent_im::ImProvider>);
+static IM_BRIDGES: OnceLock<Mutex<Vec<ImBridgeSlot>>> = OnceLock::new();
+/// 微信扫码登录会话槽（start 取码入槽 → 前端 ~2s 一次 poll；confirmed 落盘后出槽）。
+static WECHAT_QR: Mutex<Option<cmx_agent_im::WechatQrSession>> = Mutex::new(None);
+/// QQ 机器人扫码绑定会话槽（官方 q.qq.com/lite 绑定任务）。
+static QQ_BIND: Mutex<Option<cmx_agent_im::QqBindSession>> = Mutex::new(None);
+
+fn im_err(code: &str, msg: &str) -> String {
+    json!({ "ok": false, "error": { "code": code, "message": msg } }).to_string()
+}
+
+fn im_slots() -> &'static Mutex<Vec<ImBridgeSlot>> {
+    IM_BRIDGES.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// 停掉全部 IM 桥（热重载 / 工作台重启；幂等）。
+fn stop_im_bridges() {
+    if let Ok(mut slots) = im_slots().lock() {
+        let had = !slots.is_empty(); // drain 前记录（drain 后再判空恒 false）
+        for (stop_tx, provider) in slots.drain(..) {
+            let _ = stop_tx.send(true);
+            provider.stop();
+        }
+        if had {
+            tracing::info!("[cmx][im] 旧桥已停（热重载/重启）");
+        }
+    }
+}
+
+/// 启动 IM 遥控桥（配置了才起）。**必须在 net_rt 上下文内调用**——内部 `tokio::spawn`
+/// 的常驻任务要落在该运行时上。
+fn start_im_bridges(app: &Arc<AgentApp>) {
+    stop_im_bridges();
+    let data_dir = cmx_agent_app::shared_data_dir();
+    let resolved = match cmx_agent_im::resolve(Some(&data_dir)) {
+        Ok(r) => r,
+        Err(e) => {
+            // 常见原因：env/im.json 均未配置 = 未启用 IM，静默不打扰。
+            tracing::info!("[cmx][im] 未启用 IM 遥控（{e}）");
+            return;
+        }
+    };
+    let allow = resolved.allow.clone();
+    let (personal, full_access) = (resolved.personal, resolved.full_access);
+    let labels: Vec<&str> = resolved.channels.iter().map(|c| c.kind.label()).collect();
+    tracing::info!(
+        "[cmx][im] 启动 IM 遥控（provider={}，配置来源={}）",
+        labels.join("+"),
+        resolved.source
+    );
+    for ch in resolved.channels {
+        let kind_label = ch.kind.label();
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let provider = Arc::clone(&ch.provider);
+        let app = Arc::clone(app);
+        let allow = allow.clone();
+        tokio::spawn(async move {
+            // 飞书 Stream：起常驻后台 task；微信长轮询：trait 默认 no-op。
+            if let Err(e) = provider.start().await {
+                tracing::warn!("[cmx][im] provider[{kind_label}].start 失败：{e}");
+                return;
+            }
+            let bridge = cmx_agent_im::ImBridge::new(app, provider, kind_label, allow)
+                .with_personal(personal)
+                .with_full_access(full_access);
+            bridge.run(stop_rx).await;
+        });
+        im_slots()
+            .lock()
+            .expect("im slots")
+            .push((stop_tx, ch.provider));
+    }
+}
+
+/// 三条 IM 契约命令统一入口（从命令总线体取 action / payload / reveal）。
+async fn im_command(app: Arc<AgentApp>, body: String) -> String {
+    let req: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+    let cmd = req.get("cmd").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let action = req.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let payload = req.get("payload").and_then(|v| v.as_str()).map(str::to_owned);
+    let reveal = req.get("reveal").and_then(|v| v.as_bool());
+    let out: Result<String, String> = match cmd.as_str() {
+        "im_config" => im_config_command(&app, &action, payload, reveal).await,
+        "im_wechat_login" => im_wechat_login_command(&app, &action).await,
+        "im_qq_login" => im_qq_login_command(&app, &action).await,
+        _ => Ok(im_err("bad_request", &format!("未知命令：{cmd}"))),
+    };
+    out.unwrap_or_else(|e| im_err("command_failed", &e))
+}
+
+fn im_portal_base() -> String {
+    cmx_agent_app::AuthConfig::default().base_url
+}
+
+async fn im_config_command(
+    app: &Arc<AgentApp>,
+    action: &str,
+    payload: Option<String>,
+    reveal: Option<bool>,
+) -> Result<String, String> {
+    let data_dir = cmx_agent_app::shared_data_dir();
+    match action {
+        "get" => {
+            let mut data = cmx_agent_im::load_im_config(&data_dir)
+                .map(|c| c.view(reveal.unwrap_or(false)))
+                .unwrap_or_else(|| {
+                    json!({
+                        "configured": false, "enabled": true, "kind": "feishu",
+                        "personal": true, "full_access": true,
+                        "app_id": "", "app_secret_masked": "", "base": "",
+                        "qq_app_id": "", "qq_secret_masked": "", "qq_base": "",
+                        "wechat_bot_id": "", "wechat_token_masked": "", "wechat_base": "",
+                    })
+                });
+            data["portal_base"] = json!(im_portal_base()); // 只读回显（运行期不可改）
+            data["env_active"] = json!(cmx_agent_im::env_active());
+            Ok(json!({ "ok": true, "data": data }).to_string())
+        }
+        "set" => {
+            let v: serde_json::Value = payload
+                .and_then(|p| serde_json::from_str(&p).ok())
+                .ok_or_else(|| "invalid payload".to_string())?;
+            let get_str =
+                |k: &str| v.get(k).and_then(|x| x.as_str()).map(|s| s.trim().to_string());
+            // 读旧配置（keep 语义沿用已存 secret；首次保存则从面板取 set 值）。
+            let mut cfg = cmx_agent_im::load_im_config(&data_dir).unwrap_or_default();
+            cfg.enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
+            cfg.personal = true; // 身份模式固定个人：消息以接入身份跑回合
+            cfg.full_access = v.get("full_access").and_then(|x| x.as_bool()).unwrap_or(true);
+            // 多通道：面板多选 → active 列表；kind 同步为首个启用项（兼容旧读档语义）。
+            if let Some(active) = v.get("active").and_then(|x| x.as_array()) {
+                cfg.active = active
+                    .iter()
+                    .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                cfg.kind = cfg.active.first().cloned().unwrap_or_default();
+            } else if let Some(kind) = get_str("kind").filter(|s| !s.is_empty()) {
+                cfg.kind = kind;
+                cfg.active = vec![cfg.kind.clone()];
+            }
+            if let Some(app_id) = get_str("app_id") {
+                cfg.feishu.app_id = app_id;
+            }
+            if let Some(base) = get_str("base") {
+                cfg.feishu.base = base;
+            }
+            if get_str("app_secret_action").as_deref() == Some("set") {
+                cfg.feishu.app_secret = get_str("app_secret_value").unwrap_or_default();
+            }
+            if let Some(qq_app_id) = get_str("qq_app_id") {
+                cfg.qq.app_id = qq_app_id;
+            }
+            if get_str("qq_secret_action").as_deref() == Some("set") {
+                cfg.qq.app_secret = get_str("qq_secret_value").unwrap_or_default();
+            }
+            // 白名单 / 微信凭证 / 各通道 base 不进 GUI：set 不触碰（im.json 手工维护，已有值保留）。
+            // 启用态下逐通道校验凭证齐备（任一勾选通道缺凭证即拒）。
+            if cfg.enabled {
+                let missing = cfg.active().into_iter().find_map(|k| match k.as_str() {
+                    "feishu" if cfg.feishu.app_id.is_empty() => Some("飞书 App ID"),
+                    "feishu" if cfg.feishu.app_secret.is_empty() => Some("飞书 App Secret"),
+                    "qq" if cfg.qq.app_id.is_empty() => Some("QQ AppID"),
+                    "qq" if cfg.qq.app_secret.is_empty() => Some("QQ AppSecret"),
+                    "wechat" if cfg.wechat.bot_token.is_empty() => {
+                        Some("微信 bot_token（先扫码登录）")
+                    }
+                    _ => None,
+                });
+                if let Some(field) = missing {
+                    return Ok(im_err("bad_request", &format!("{field} 不能为空")));
+                }
+            }
+            cmx_agent_im::save_im_config(&data_dir, &cfg)?;
+            // 热重载：保存即生效（env 激活时不重载——env 优先且不可热换）。
+            let note = if cmx_agent_im::env_active() {
+                "已保存。⚠ 检测到环境变量 CMX_AGENT_IM_*（开发模式）优先生效，im.json 暂不生效。".to_string()
+            } else {
+                start_im_bridges(app);
+                "已保存，IM 遥控已按新配置重载（立即生效）".to_string()
+            };
+            Ok(json!({ "ok": true, "data": { "note": note } }).to_string())
+        }
+        other => Ok(im_err("bad_request", &format!("未知 action：{other}"))),
+    }
+}
+
+async fn im_wechat_login_command(app: &Arc<AgentApp>, action: &str) -> Result<String, String> {
+    let data_dir = cmx_agent_app::shared_data_dir();
+    let app = Arc::clone(app);
+    match action {
+        "start" => {
+            let base = cmx_agent_im::load_im_config(&data_dir)
+                .map(|c| c.wechat.base)
+                .filter(|b| !b.trim().is_empty());
+            let provider = cmx_agent_im::WechatProvider::new("", base);
+            let sess = provider.qr_begin().await.map_err(|e| {
+                tracing::warn!("[cmx][im] 微信扫码 start 失败：{e}");
+                im_err("login_failed", &e)
+            })?;
+            let qr = sess.qr_content().to_string();
+            if let Ok(mut slot) = WECHAT_QR.lock() {
+                *slot = Some(sess);
+            }
+            Ok(json!({ "ok": true, "data": { "status": "qr", "qr": qr } }).to_string())
+        }
+        "poll" => {
+            // 锁不跨 await：先 take 出会话，按结果放回（继续轮询）或作废。
+            let sess = WECHAT_QR.lock().ok().and_then(|mut s| s.take());
+            let Some(mut sess) = sess else {
+                return Ok(json!({ "ok": true, "data": { "status": "idle" } }).to_string());
+            };
+            match sess.poll_once().await {
+                Ok(cmx_agent_im::QrEvent::Confirmed(login)) => {
+                    // 凭证落盘 im.json + wechat 追加进 active（与 CLI im-login 同款）。
+                    let mut cfg = cmx_agent_im::load_im_config(&data_dir).unwrap_or_default();
+                    cfg.wechat = cmx_agent_im::WechatCreds {
+                        bot_token: login.bot_token,
+                        bot_id: login.bot_id.clone(),
+                        user_id: login.user_id,
+                        base: login.base,
+                    };
+                    if !cfg.active.iter().any(|k| k == "wechat") {
+                        cfg.active.push("wechat".into());
+                    }
+                    if cfg.kind.trim().is_empty() {
+                        cfg.kind = "wechat".into();
+                    }
+                    cmx_agent_im::save_im_config(&data_dir, &cfg)
+                        .map_err(|e| im_err("login_failed", &e))?;
+                    // 启用态且 env 未接管 → 立即热重载（扫码即上线，无需再点保存）。
+                    let note = if !cfg.enabled {
+                        "已保存；遥控总开关当前关闭，开启后生效".to_string()
+                    } else if cmx_agent_im::env_active() {
+                        "已保存。⚠ 检测到环境变量 CMX_AGENT_IM_* 优先生效，im.json 暂不生效。".to_string()
+                    } else {
+                        start_im_bridges(&app);
+                        "已保存，微信通道已上线".to_string()
+                    };
+                    Ok(json!({
+                        "ok": true,
+                        "data": { "status": "confirmed", "bot_id": login.bot_id, "note": note }
+                    })
+                    .to_string())
+                }
+                Ok(ev) => {
+                    // Refreshed 后会话里是新码：先取内容再放回槽。
+                    let qr = if let cmx_agent_im::QrEvent::Refreshed = ev {
+                        Some(sess.qr_content().to_string())
+                    } else {
+                        None
+                    };
+                    if let Ok(mut slot) = WECHAT_QR.lock() {
+                        *slot = Some(sess);
+                    }
+                    let status = match ev {
+                        cmx_agent_im::QrEvent::Scaned => "scaned",
+                        cmx_agent_im::QrEvent::Refreshed => "refreshed",
+                        _ => "waiting",
+                    };
+                    let mut data = json!({ "status": status });
+                    if let Some(qr) = qr {
+                        data["qr"] = json!(qr);
+                    }
+                    Ok(json!({ "ok": true, "data": data }).to_string())
+                }
+                // 终态错误（超时/多次过期/未知状态）：会话已作废，前端停止轮询。
+                Err(e) => {
+                    tracing::warn!("[cmx][im] 微信扫码轮询失败：{e}");
+                    Ok(im_err("login_failed", &e))
+                }
+            }
+        }
+        other => Ok(im_err("bad_request", &format!("未知 action：{other}"))),
+    }
+}
+
+async fn im_qq_login_command(app: &Arc<AgentApp>, action: &str) -> Result<String, String> {
+    let data_dir = cmx_agent_app::shared_data_dir();
+    let app = Arc::clone(app);
+    match action {
+        "start" => {
+            let sess = cmx_agent_im::create_bind_task(None).await.map_err(|e| {
+                tracing::warn!("[cmx][im] QQ 扫码 start 失败：{e}");
+                im_err("login_failed", &e)
+            })?;
+            let qr = cmx_agent_im::connect_url(&sess.task_id, None);
+            if let Ok(mut slot) = QQ_BIND.lock() {
+                *slot = Some(sess);
+            }
+            Ok(json!({ "ok": true, "data": { "status": "qr", "qr": qr } }).to_string())
+        }
+        "poll" => {
+            let sess = QQ_BIND.lock().ok().and_then(|mut s| s.take());
+            let Some(sess) = sess else {
+                return Ok(json!({ "ok": true, "data": { "status": "idle" } }).to_string());
+            };
+            match cmx_agent_im::poll_bind_result(&sess, None).await {
+                Ok(cmx_agent_im::QqBindEvent::Pending) => {
+                    if let Ok(mut slot) = QQ_BIND.lock() {
+                        *slot = Some(sess);
+                    }
+                    Ok(json!({ "ok": true, "data": { "status": "waiting" } }).to_string())
+                }
+                Ok(cmx_agent_im::QqBindEvent::Expired) => {
+                    // 任务过期：会话作废（终态），前端停轮询，可重按「扫码登录」。
+                    Ok(im_err("login_failed", "二维码已过期，请重新扫码"))
+                }
+                Ok(cmx_agent_im::QqBindEvent::Completed { app_id, secret }) => {
+                    // 凭证落盘 im.json + qq 追加进 active（官方 WS 接入协议不变）。
+                    let mut cfg = cmx_agent_im::load_im_config(&data_dir).unwrap_or_default();
+                    cfg.qq.app_id = app_id.clone();
+                    cfg.qq.app_secret = secret;
+                    if !cfg.active.iter().any(|k| k == "qq") {
+                        cfg.active.push("qq".into());
+                    }
+                    if cfg.kind.trim().is_empty() {
+                        cfg.kind = "qq".into();
+                    }
+                    cmx_agent_im::save_im_config(&data_dir, &cfg)
+                        .map_err(|e| im_err("login_failed", &e))?;
+                    let note = if !cfg.enabled {
+                        "已保存；遥控总开关当前关闭，开启后生效".to_string()
+                    } else if cmx_agent_im::env_active() {
+                        "已保存。⚠ 检测到环境变量 CMX_AGENT_IM_* 优先生效，im.json 暂不生效。".to_string()
+                    } else {
+                        start_im_bridges(&app);
+                        "已保存，QQ 通道已上线".to_string()
+                    };
+                    Ok(json!({
+                        "ok": true,
+                        "data": { "status": "confirmed", "app_id": app_id, "note": note }
+                    })
+                    .to_string())
+                }
+                Err(e) => {
+                    // 轮询单次失败（网络抖动）：会话放回 + 返回 waiting 让前端继续轮。
+                    if let Ok(mut slot) = QQ_BIND.lock() {
+                        *slot = Some(sess);
+                    }
+                    tracing::warn!("[cmx][im] QQ 扫码轮询失败（下轮重试）：{e}");
+                    Ok(json!({ "ok": true, "data": { "status": "waiting" } }).to_string())
+                }
+            }
+        }
+        other => Ok(im_err("bad_request", &format!("未知 action：{other}"))),
+    }
+}
+
+/// IM 命令走 net_rt（扫码轮询 / 热重载起桥都是网络面）。
+async fn dispatch_im_on_net(app: Arc<AgentApp>, body: String) -> String {
+    tauri::async_runtime::spawn_blocking(move || net_rt().block_on(im_command(app, body)))
+        .await
+        .unwrap_or_else(|e| im_err("command_failed", &format!("task failed: {e}")))
+}
+
+fn command_name(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("cmd").and_then(|c| c.as_str()).map(str::to_owned))
+        .unwrap_or_default()
+}
+
+fn is_im_cmd(cmd: &str) -> bool {
+    matches!(cmd, "im_config" | "im_wechat_login" | "im_qq_login")
+}
+
 /// ui 目录解析:配置显式 > Tauri 资源目录 > build.rs 从 git/path 依赖定位 > 常见本地 checkout。
 /// 组件化嵌入后,合格 ui 目录须含 `embed/truemate-app.js`——旧本地 checkout(无 embed/)
 /// 会导致组件脚本 404「组件脚本加载失败」(cmxlinux 实测踩中),故逐候选校验,不合格跳过。
 fn resolve_ui_dir(app: &AppHandle, cfg: &CmxCfg) -> Option<PathBuf> {
     let ok = |p: &Path| p.join("index.html").is_file() && p.join("embed/truemate-app.js").is_file();
     if !cfg.ui_dir.trim().is_empty() {
-        let p = expand_home(cfg.ui_dir.trim());
+        let p = expand_home(app, cfg.ui_dir.trim());
         // 显式配置:只要 index 在就尊重(用户自担);缺 embed 打警告便于排障。
         if p.join("index.html").is_file() {
             if !p.join("embed/truemate-app.js").is_file() {
@@ -355,20 +741,80 @@ fn loopback_ok(headers: &HeaderMap) -> bool {
     headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
-        .map(|h| h.starts_with("127.0.0.1") || h.starts_with("localhost"))
+        .map(hostport_is_loopback)
+        .unwrap_or(false)
+}
+
+/// 敏感面（/api*）守卫 = 回环 Host + Origin 白名单。
+/// Origin 只放行回环与 Tauri webview 源（组件在 tauri://localhost / http://tauri.localhost
+/// 文档里跨源请求本机 axum）；任意网页（https://evil.com）一律拒绝——防 DNS rebinding /
+/// 跨站驱动本机内核（token 闸仍是主防线，这是纵深第二层）。
+fn guard_ok(headers: &HeaderMap) -> bool {
+    loopback_ok(headers) && origin_ok(headers)
+}
+
+fn origin_ok(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(origin_allowed)
+        .unwrap_or(true) // 无 Origin（curl / 同源导航）由 Host+token 守
+}
+
+fn origin_allowed(raw: &str) -> bool {
+    let s = raw.trim();
+    // Tauri v2 webview 自定义协议源：Windows/Linux 走 http(s)://tauri.localhost，
+    // macOS 走 tauri://localhost。组件装配与附件请求的 Origin 即这些。
+    if s.eq_ignore_ascii_case("tauri://localhost")
+        || s.eq_ignore_ascii_case("http://tauri.localhost")
+        || s.eq_ignore_ascii_case("https://tauri.localhost")
+    {
+        return true;
+    }
+    hostport_is_loopback(s)
+}
+
+/// 判定 `host[:port]` / `scheme://host[:port]` 是否精确回环（对齐 cmx-agent demo：
+/// 仅 localhost / IPv4 127/8 / ::1；解析失败一律拒绝，禁前缀匹配防 `127.0.0.1.evil.com`）。
+fn hostport_is_loopback(raw: &str) -> bool {
+    let s = raw.trim();
+    let s = match s.find("://") {
+        Some(i) => &s[i + 3..],
+        None => s,
+    };
+    let s = s.split(['/', '?', '#']).next().unwrap_or("");
+    let host = if let Some(rest) = s.strip_prefix('[') {
+        match rest.find(']') {
+            Some(j) => &rest[..j],
+            None => return false,
+        }
+    } else {
+        match s.rfind(':') {
+            Some(i) if !s[i + 1..].is_empty() && s[i + 1..].bytes().all(|b| b.is_ascii_digit()) => &s[..i],
+            _ => s,
+        }
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
         .unwrap_or(false)
 }
 
 fn mime_of(path: &str) -> &'static str {
-    match path.rsplit('.').next().unwrap_or("") {
+    match path.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
         "html" => "text/html; charset=utf-8",
-        "js" => "application/javascript; charset=utf-8",
+        "js" | "mjs" => "application/javascript; charset=utf-8",
         "css" => "text/css; charset=utf-8",
+        "json" | "map" => "application/json",
+        "wasm" => "application/wasm",
         "png" => "image/png",
         "svg" => "image/svg+xml",
         "ico" => "image/x-icon",
+        "ttf" => "font/ttf",
+        "woff" => "font/woff",
         "woff2" => "font/woff2",
-        "json" => "application/json",
         _ => "application/octet-stream",
     }
 }
@@ -423,16 +869,21 @@ async fn h_asset(State(st): State<HttpState>, headers: HeaderMap, uri: axum::htt
 }
 
 async fn h_api(State(st): State<HttpState>, headers: HeaderMap, body: String) -> axum::response::Response {
-    if !loopback_ok(&headers) || !token_ok(&st, &headers, None) {
+    if !guard_ok(&headers) || !token_ok(&st, &headers, None) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let resp = dispatch_on_net(st.app.clone(), body).await;
+    // IM 契约命令：HTTP 面与 invoke 面同语义（浏览器直开形态走这里）。
+    let resp = if is_im_cmd(&command_name(&body)) {
+        dispatch_im_on_net(st.app.clone(), body).await
+    } else {
+        dispatch_on_net(st.app.clone(), body).await
+    };
     ([(header::CONTENT_TYPE, "application/json")], resp).into_response()
 }
 
 /// 流式回合(协议对齐 cmx-agent-web /api/stream:逐事件 SSE,尾帧 stream_done/stream_error)。
 async fn h_stream(State(st): State<HttpState>, headers: HeaderMap, body: String) -> axum::response::Response {
-    if !loopback_ok(&headers) || !token_ok(&st, &headers, None) {
+    if !guard_ok(&headers) || !token_ok(&st, &headers, None) {
         return StatusCode::FORBIDDEN.into_response();
     }
     use axum::response::sse::{Event, KeepAlive, Sse};
@@ -479,7 +930,7 @@ async fn h_stream(State(st): State<HttpState>, headers: HeaderMap, body: String)
 
 /// 事件总线订阅(协议对齐 /api/subscribe):broadcast → SSE 帧转发。
 async fn h_subscribe(State(st): State<HttpState>, headers: HeaderMap) -> axum::response::Response {
-    if !loopback_ok(&headers) || !token_ok(&st, &headers, None) {
+    if !guard_ok(&headers) || !token_ok(&st, &headers, None) {
         return StatusCode::FORBIDDEN.into_response();
     }
     use axum::response::sse::{Event, KeepAlive, Sse};
@@ -513,7 +964,7 @@ async fn h_attachment(
     headers: HeaderMap,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> axum::response::Response {
-    if !loopback_ok(&headers) || !token_ok(&st, &headers, None) {
+    if !guard_ok(&headers) || !token_ok(&st, &headers, None) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let (Some(sid), Some(rel)) = (q.get("session_id"), q.get("path")) else {
@@ -543,7 +994,7 @@ async fn h_upload(
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
-    if !loopback_ok(&headers) || !token_ok(&st, &headers, None) {
+    if !guard_ok(&headers) || !token_ok(&st, &headers, None) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let Some(name) = q.get("name").map(|s| s.trim()).filter(|s| !s.is_empty()) else {
@@ -566,6 +1017,9 @@ async fn start_inner(app: &AppHandle, state: &TState<'_, AppState>) -> Result<se
                 "url": format!("http://127.0.0.1:{}/?t={}", r.port, r.token) }));
         }
     }
+    // 走到这里 = 在真正重建内核：先停旧 IM 桥（cmx_restart 已把旧实例 take 走，
+    // 但桥持有旧 AgentApp 的 Arc，不停会与新实例并行消费消息）。
+    stop_im_bridges();
     let cfg = load_cfg(app);
     if !cfg.enabled {
         return Err("工作台已在配置中停用(enabled=false)".into());
@@ -576,19 +1030,38 @@ async fn start_inner(app: &AppHandle, state: &TState<'_, AppState>) -> Result<se
                 .into(),
         );
     };
-    // 数据目录:配置显式(可 ~/.cmx-agent 共享原 TrueMate) > nanomesh 隔离目录。
+    // 数据目录:默认与独立版 TrueMate / Web 壳同根(~/.cmx-agent) —— 模型配置(providers.json)、
+    // 会话历史、workspaces、IM 配置全部共享;显式填其它路径才隔离(多实例/测试)。
+    // 不用 cmx_agent_app::shared_data_dir():它读 CMX_AGENT_DATA_DIR,而本函数下面会设该 env,
+    // 工作台重启时会把上一次解析出的路径误当默认值。
     let data_dir = if cfg.data_dir.trim().is_empty() {
-        crate::data_dir(app)?.join("cmx-agent")
+        app.path().home_dir().map_err(|e| e.to_string())?.join(".cmx-agent")
     } else {
-        expand_home(cfg.data_dir.trim())
+        expand_home(app, cfg.data_dir.trim())
     };
     std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+    tracing::info!(dir = %data_dir.display(), "cmx-agent 数据根");
+    // 共享根里没有 providers.json = 指向了空目录（典型：隔离目录 / `~` 没展开成家目录），
+    // 模型列表与会话都会是空的。显式告警，省得只看到"没数据"无从排查。
+    if !data_dir.join("config/providers.json").is_file() {
+        tracing::warn!(
+            dir = %data_dir.display(),
+            "cmx-agent 数据根下没有 config/providers.json：模型列表将为空；若期望复用 TrueMate 数据，把「数据目录」留空"
+        );
+    }
     // belt-and-suspenders:部分 cmx helper 读全局 data_dir(env)。SAFETY: 启动期单次设置。
     unsafe { std::env::set_var("CMX_AGENT_DATA_DIR", &data_dir) };
+    // 旧扁平布局 → 新分层布局迁移（与双壳同款启动序）。默认根就是 ~/.cmx-agent,迁移语义与
+    // 独立版一致(旧 ProjectDirs 数据搬进共享根);marker 存在或 data/ 已存在即跳过,幂等。
+    let migrated = cmx_agent_app::migrate_if_needed(&data_dir);
+    if migrated {
+        tracing::info!(dir = %data_dir.display(), "cmx-agent 数据根已迁移到分层布局");
+    }
     let workdir = if cfg.workdir.trim().is_empty() {
-        std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
+        // 同 expand_home：Windows GUI 进程没有 HOME，退回 tauri 的家目录解析（与 TrueMate 一致）。
+        app.path().home_dir().map_err(|e| e.to_string())?
     } else {
-        expand_home(cfg.workdir.trim())
+        expand_home(app, cfg.workdir.trim())
     };
     // 模型:mode=openai → 显式 env 注入后仍走 select_model(其 env 链优先级最高,等效显式指定);
     //        mode=cmx → 原配置链;mode=nanomesh → P1(当前回落 cmx 链并警告)。
@@ -615,7 +1088,12 @@ async fn start_inner(app: &AppHandle, state: &TState<'_, AppState>) -> Result<se
         let data_dir = data_dir.clone();
         move || -> Result<Arc<AgentApp>, String> {
             net_rt().block_on(async move {
-                let mut b = DesktopAppBuilder::new(workdir, data_dir, model).interactive_approval();
+                let mut b = DesktopAppBuilder::new(workdir, data_dir, model)
+                    .interactive_approval()
+                    // per-user 模型配置：与 TrueMate Web 壳 / 嵌入 demo 同款——
+                    // <root>/data/users/<username>/model.json（首登从全局 config/providers.json 播种）。
+                    // 免登录(login=off)无 current_user，内核自动回落全局 config 目录，行为不变。
+                    .user_config_base(cmx_agent_app::data_dir().join("users"));
                 if login_portal {
                     b = b.auth(AuthConfig { base_url: portal_base });
                 }
@@ -683,7 +1161,10 @@ async fn start_inner(app: &AppHandle, state: &TState<'_, AppState>) -> Result<se
     *state.cmx.inner.lock().await =
         Some(CmxRunning { app: agent.clone(), port, token: token.clone(), shim_user: inject_shim, shutdown: Some(sd_tx) });
     // 组件化嵌入:会话事件总线 → Tauri session_event(组件 main.js __TAURI__ 分支实时渲染)。
-    spawn_session_event_forwarder(app.clone(), agent);
+    spawn_session_event_forwarder(app.clone(), agent.clone());
+    // IM 遥控：数据根配置了 im.json / CMX_AGENT_IM_* 即自动起通道桥（组件面板保存后热重载）。
+    // 必须在 net_rt 上起：常驻长连接/长轮询不能跑 Tauri 运行时。
+    net_rt().spawn(async move { start_im_bridges(&agent) });
     tracing::info!(port, login = %cfg.login, shim = inject_shim, "cmx-agent workbench started");
     Ok(json!({ "running": true, "port": port,
         "url": format!("http://127.0.0.1:{port}/?t={token}") }))
@@ -749,23 +1230,24 @@ async fn running_app(state: &TState<'_, AppState>) -> Result<(Arc<AgentApp>, boo
 #[tauri::command]
 pub(crate) async fn agent(state: TState<'_, AppState>, payload: String) -> Result<String, String> {
     let (app, shim_user) = running_app(&state).await?;
-    if shim_user {
-        let cmd = serde_json::from_str::<serde_json::Value>(&payload)
-            .ok()
-            .and_then(|v| v.get("cmd").and_then(|c| c.as_str()).map(str::to_owned))
-            .unwrap_or_default();
-        // auth_token/auth_user:组件认证契约命令(我们给组件传了 token 属性,它会先发 auth_token)。
-        // 免登录态直接认通过并返回合成用户,随后 current_user 探测同样命中,组件进入已认证态。
-        if matches!(cmd.as_str(), "current_user" | "login" | "logout" | "auth_token" | "auth_user") {
-            return Ok(json!({
-                "ok": true,
-                "data": { "user": {
-                    "user_id": "local", "username": "local", "nickname": "NanoMesh",
-                    "roles": [], "must_change_password": false
-                } }
-            })
-            .to_string());
-        }
+    let cmd = command_name(&payload);
+    // auth_token/auth_user:组件认证契约命令(我们给组件传了 token 属性,它会先发 auth_token)。
+    // 免登录态直接认通过并返回合成用户,随后 current_user 探测同样命中,组件进入已认证态。
+    if shim_user
+        && matches!(cmd.as_str(), "current_user" | "login" | "logout" | "auth_token" | "auth_user")
+    {
+        return Ok(json!({
+            "ok": true,
+            "data": { "user": {
+                "user_id": "local", "username": "local", "nickname": "NanoMesh",
+                "roles": [], "must_change_password": false
+            } }
+        })
+        .to_string());
+    }
+    // IM 契约命令在宿主面实现（组件「设置 → IM 遥控」面板），其余命令透传真实内核。
+    if is_im_cmd(&cmd) {
+        return Ok(dispatch_im_on_net(app, payload).await);
     }
     Ok(dispatch_on_net(app, payload).await)
 }

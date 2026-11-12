@@ -29,14 +29,22 @@ nm-crypto = { path = "../../../crates/nm-crypto" }
 nm-compute = { path = "../../../bin/nm-compute" }
 # 智能体工作台(cmx-agent 库内嵌,零复制零改动,全参数化适配):git 依赖其 app façade。
 # login=off 时构造不调 .auth()(其 CLI serve 同形态);=portal 时调 .auth() 恢复原版登录。
-# 跟踪 main 最新(不锁 rev)。注意 cargo 仍会在 Cargo.lock 记住当前 commit——
-# 要拉上游新提交:cargo update -p cmx-agent-app(或删 lock 对应段重建)。
-# 本地有 checkout 时可用 path 覆盖(免拉网):
-#   cmx-agent-app = { path = "../../../../../../cmx-workspace/backend/cmx-agent/crates/cmx-agent-app" }
-cmx-agent-app = { git = "https://gitee.com/warpdrivelabs/cmx-agent.git", branch = "main" }
-# zip 2.6 破坏 ZipFile API(semver 违规);cmx-agent-office 的 calamine 0.26 需 ≤2.5。
-# 上游 calamine≥0.27 后可删本钉。勿 `cargo update -p zip` 升到 2.6+。
-zip = { version = "=2.5.0", default-features = false, features = ["deflate"] }
+# **钉 rev**（不跟 main 浮动,保证可复现）：21602b2 = 2026-11-12 release 0.1.16
+# （含 20261104 DemoModel 清退——未配置模型时不再有离线演示兜底；以及 1112 前的
+#  会话归档、思考链路优化、插件手动激活、浏览器面板下沉等一批改动）。
+# 注意：上游各 crate 启用 reqwest 的 `webpki-roots` feature——它只是
+# reqwest 0.13.1 中可选依赖 webpki-roots 的隐式特性，0.13.4 起已移除；作为 git 依赖
+# 消费时 cargo 会选最新 0.13.5，解析阶段即报 "feature `webpki-roots` does not exist"。
+# 故下方用重命名直接依赖把 reqwest 0.13 线钉到 0.13.1（与上游自身 Cargo.lock 一致）。
+# 升级：上游去掉该 feature 后可删本钉，并把两条 cmx 依赖的 rev 一起换新
+# （必须同源同 rev，混合 source 会整树重复）。
+cmx-agent-app = { git = "https://gitee.com/warpdrivelabs/cmx-agent.git", rev = "21602b2cce223a00e4ae3e002e3caf361217370d" }
+# IM 遥控通道桥（飞书/QQ/微信入站 + 扫码登录）：组件「设置 → IM 遥控」面板的三条契约命令
+# （im_config / im_wechat_login / im_qq_login）在 cmx_host 实现，须直接引用其 crate。
+cmx-agent-im = { git = "https://gitee.com/warpdrivelabs/cmx-agent.git", rev = "21602b2cce223a00e4ae3e002e3caf361217370d" }
+# 约束 cmx 依赖所需的 reqwest 0.13 线（见上）：不动本包自用的 reqwest 0.12 更新链。
+# 0.13.1 与 iroh / tauri-plugin-updater 的 ^0.13 要求统一，不会出现双版本。
+reqwest013 = { package = "reqwest", version = "=0.13.1", default-features = false }
 tokio-stream = "0.1"  # cmx 工作台 SSE(/api/stream /api/subscribe)
 prost = "0.14"
 tracing = "0.1"
