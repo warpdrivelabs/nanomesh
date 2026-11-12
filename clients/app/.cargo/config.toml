@@ -1,0 +1,16 @@
+# 客户端固定走 vendored OpenSSL：src-tauri/Cargo.toml 里 openssl 声明了 features=["vendored"]
+# （macOS 分发的 hardened runtime 不能依赖 Homebrew/系统 libssl，见该文件注释）。
+#
+# 仓库根 .cargo/config.toml 为 Fedora 设了 OPENSSL_NO_VENDOR=1（走系统 openssl）。cargo 的配置
+# 按目录层级合并、深的赢；这里在客户端子树内把该键压回 "0"，否则 Windows 上直接
+# `cargo run` / `cargo tauri dev`（不经过 build-signed-windows.ps1）会去找系统 OpenSSL，
+# 报 "Could not find directory of OpenSSL installation"。
+#
+# 不用 force：进程环境变量仍优先于非 force 的 [env]——build-signed-linux.sh 据此显式
+# export OPENSSL_NO_VENDOR=1 保持 Linux 打包走系统库（与改动前行为一致）。
+#
+# Windows 跑 vendored 构建还需合格 perl（含 Locale::Maketext::Simple；Git 自带的 MSYS perl
+# 5.41+ 已移除该核心模块，Configure 会 exit 2）：用 OPENSSL_SRC_PERL 指向 Strawberry Perl
+# （如 C:\Strawberry\perl\bin\perl.exe），或让打包脚本自检后注入 PATH。
+[env]
+OPENSSL_NO_VENDOR = "0"

@@ -4,5 +4,7 @@ xtask = "run -p xtask --"
 
 # Fedora 缺 perl-FindBin 时 openssl-sys 默认 vendor 源码编不过；本机已装 openssl-devel，走系统库。
 # 否则 `cargo tauri dev` / 共享 target 下重建 openssl-sys 会报：Can't locate FindBin.pm
+# 例外：客户端子树（clients/app）在自己的 .cargo/config.toml 里压回 "0" 强制 vendor
+# （Windows/macOS 没有可用的系统 OpenSSL）；build-signed-linux.sh 再显式 export =1，Linux 仍走系统库。
 [env]
 OPENSSL_NO_VENDOR = "1"
