@@ -537,7 +537,8 @@ async fn crop_rgba_to_jpeg(
 pub(crate) async fn screen_capture_status() -> Result<Value, String> {
     let granted = tokio::task::spawn_blocking(|| {
         let (preflight, _) = mac_capture_fns();
-        preflight()
+        // FFI 函数指针（CGPreflightScreenCaptureAccess）调用需 unsafe。
+        unsafe { preflight() }
     })
     .await
     .unwrap_or(false);
@@ -736,7 +737,8 @@ async fn capture_window_xcap(id: u32) -> Result<String, String> {
 async fn capture_screen_mac(app: AppHandle, hide: bool) -> Result<Value, String> {
     // 预检在先：未授权时不进截屏流程，前端直接弹引导卡。
     let (preflight, _) = mac_capture_fns();
-    if !preflight() {
+    // FFI 函数指针调用需 unsafe。
+    if !unsafe { preflight() } {
         return Ok(json!({ "needPermission": true }));
     }
     let win = app.get_webview_window("main");
