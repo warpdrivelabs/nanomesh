@@ -73,6 +73,20 @@ const NM_ICON_PATHS = {
   crown: '<path d="M4 16h16l-1.2-8-3.8 3L12 6l-3 5-3.8-3z"/><path d="M5 18h14"/>',
   play: '<path d="M8 6v12l10-6z"/>',
   stop: '<rect x="6" y="6" width="12" height="12" rx="1.5"/>',
+  // ── 截图标注工具（shot.js 工具条）────────────────────────────
+  "shot-rect": '<rect x="4" y="6" width="16" height="12" rx="1"/>',
+  "shot-ellipse": '<ellipse cx="12" cy="12" rx="8.5" ry="6.5"/>',
+  "shot-arrow": '<path d="M5 19 19 5M19 5h-7M19 5v7"/>',
+  "shot-pen": '<path d="m4 20 1-4L16.5 4.5a2.1 2.1 0 0 1 3 3L8 19z"/>',
+  "shot-marker": '<path d="m12 4 8 8-7 7-8-8z"/><path d="M5 21h6"/>',
+  "shot-step": '<circle cx="12" cy="12" r="8"/><path d="M9.5 12h5M12 9.5v5"/>',
+  "shot-text": '<path d="M5 6V4.5h14V6M12 4.5V19M9 19h6"/>',
+  "shot-mosaic": '<rect x="4" y="4" width="7" height="7"/><rect x="13" y="4" width="7" height="7"/><rect x="4" y="13" width="7" height="7"/><rect x="13" y="13" width="7" height="7"/>',
+  "shot-undo": '<path d="M8 5 4 9l4 4"/><path d="M4 9h10a6 6 0 0 1 0 12h-2"/>',
+  "shot-redo": '<path d="m16 5 4 4-4 4"/><path d="M20 9H10a6 6 0 0 0 0 12h2"/>',
+  "shot-save": '<path d="M12 3v11M7.5 9.5 12 14l4.5-4.5"/><path d="M4 17v2.5A1.5 1.5 0 0 0 5.5 21h13a1.5 1.5 0 0 0 1.5-1.5V17"/>',
+  "shot-check": '<path d="M20 6 9 17l-5-5"/>',
+  move: '<path d="M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3"/>',
 };
 
 function nmIcon(name) {

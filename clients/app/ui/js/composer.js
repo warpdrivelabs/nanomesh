@@ -120,6 +120,7 @@ function paintPending() {
 function attach(next) {
   api = next || null;
   install();
+  bindShotEvent();
   const input = document.getElementById("conv-input");
   if (!input) return;
   input.addEventListener("keydown", (e) => {
@@ -232,8 +233,9 @@ function onComposerClick(e) {
     closePop();
     return;
   }
-  if (act === "shot") { closePop(); capture(false); return; }
-  if (act === "shot-hide") { closePop(); capture(true); return; }
+  if (act === "shot") { closePop(); captureSelect(); return; }
+  if (act === "shot-hide") { closePop(); captureSelectHide(); return; }
+  if (act === "shot-full") { closePop(); captureFull(); return; }
   if (act === "win-pick") { closePop(); captureWindow(Number(btn.getAttribute("data-wid"))); return; }
   if (act === "image") { const el = document.getElementById("conv-pick-image"); if (el) el.click(); return; }
   if (act === "video") { const el = document.getElementById("conv-pick-video"); if (el) el.click(); return; }
@@ -251,7 +253,7 @@ function onComposerClick(e) {
 function toggleShotMenu(anchor) {
   if (popKind === "shot") { closePop(); return; }
   popKind = "shot";
-  openPop(`<button type="button" data-act="shot">截取整个屏幕</button><button type="button" data-act="shot-hide">隐藏窗口后截图</button>`, anchor);
+  openPop(`<button type="button" data-act="shot">选区截图</button><button type="button" data-act="shot-hide">隐藏本窗口后选区截图</button><button type="button" data-act="shot-full">截取整个屏幕</button>`, anchor);
 }
 
 function toggleEmoji(anchor) {
@@ -297,16 +299,96 @@ function insertAt(text) {
   input.focus();
 }
 
-async function capture(hide) {
-  if (!window.NM || !NM.hasTauri || !NM.hasTauri()) { toast("截图只能在桌面端使用"); return; }
+// ── 截图：整屏 RGBA → 全屏遮罩选区 → 后端裁剪；支持直接整屏/窗口/隐藏后截 ──
+// mac 未授权录制屏幕时后端返回 {needPermission:true}，这里弹引导卡（直达系统设置）。
+
+function shotPermGate() {
+  // 非 tauri 壳直接判不支持；mac 每次点截图先问一次授权状态（用户可能刚在设置里开了）。
+  return (async () => {
+    if (!window.NM || !NM.hasTauri || !NM.hasTauri()) { toast("截图只能在桌面端使用"); return false; }
+    try {
+      const st = await NM.inv("screen_capture_status");
+      if (st && st.granted === false) { shotPermGuide(); return false; }
+    } catch (_) {}
+    return true;
+  })();
+}
+
+function shotPermGuide() {
+  const isMac = window.__NM_OS__ === "macos" || (navigator.platform || navigator.userAgent || "").toLowerCase().includes("mac");
+  closePop();
+  const pop = document.createElement("div");
+  pop.className = "shot-perm";
+  pop.innerHTML = `<div class="shot-perm-card">
+    <b>还没有屏幕录制权限</b>
+    <p>需要允许 NANO MESH 录制屏幕才能截图。<br>${isMac ? "在「隐私与安全性 → 屏幕录制」中勾选本应用后，重新点一次截图。" : "请在系统设置中允许本应用访问屏幕。"}</p>
+    <div class="shot-perm-btns">
+      ${isMac ? `<button type="button" class="shot-perm-open">打开系统设置</button>` : ""}
+      <button type="button" class="shot-perm-cancel">取消</button>
+    </div>
+  </div>`;
+  pop.querySelector(".shot-perm-cancel").addEventListener("click", () => pop.remove());
+  const open = pop.querySelector(".shot-perm-open");
+  if (open) open.addEventListener("click", async () => {
+    try { await NM.inv("mac_open_screen_settings"); } catch (_) {}
+    pop.remove();
+  });
+  document.body.appendChild(pop);
+}
+
+// ── 选区截图（微信式，Rust 侧独立全屏 shot-overlay 窗口）────────────────
+// 主窗口只负责发起 capture_screen 和收 shot://done 事件；遮罩/选区/标注都在
+// overlay 窗口的 ui/shot.html + js/shot.js 里（全屏窗口，几何 1:1，无缩放）。
+
+/** 抓整屏 → 打开全屏选区窗口（默认路径）。不隐藏本窗口——遮罩独立盖在一切之上。 */
+async function captureSelect() {
+  if (!(await shotPermGate())) return;
   try {
-    const b64 = await NM.inv("capture_screen", { hide: !!hide });
-    const bytes = b64ToBytes(b64);
-    const url = URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
-    const dim = await imageSize(url);
-    pushPending({ kind: "image", name: "截图.jpg", mime: "image/jpeg", bytes, size: bytes.length, w: dim.w, h: dim.h, previewUrl: url });
+    const r = await NM.inv("capture_screen", { hide: false });
+    if (r && r.needPermission) shotPermGuide();
   } catch (e) { toast("截图失败：" + errText(e)); }
 }
+
+/** 隐藏主窗口后选区截图（截屏里不要自己时用）。 */
+async function captureSelectHide() {
+  if (!(await shotPermGate())) return;
+  try {
+    const cur = window.__TAURI__ && __TAURI__.window ? __TAURI__.window.getCurrentWindow() : null;
+    if (cur) await cur.hide();
+    await new Promise((r) => setTimeout(r, 350));
+    const r = await NM.inv("capture_screen", { hide: false });
+    if (r && r.needPermission) shotPermGuide();
+  } catch (e) { toast("截图失败：" + errText(e)); }
+}
+
+/** 整屏直取（不弹选区）：进待发区。 */
+async function captureFull() {
+  if (!(await shotPermGate())) return;
+  try {
+    const shot = await NM.inv("capture_screen", { hide: false });
+    if (!shot || shot.needPermission) { shotPermGuide(); return; }
+    await cropShot(shot.w, shot.h, 0, 0, shot.w, shot.h);
+  } catch (e) { toast("截图失败：" + errText(e)); }
+}
+
+/** 无标注轻量裁剪：Rust 侧按 SHOT_SNAP 裁剪（x/y/cw/ch 为物理像素）。 */
+async function cropShot(w, h, x, y, cw, ch) {
+  try {
+    await NM.inv("shot_finish", { x, y, cw, ch });
+  } catch (e) { toast("截图失败：" + errText(e)); }
+}
+
+/** 事件接线：shot://done → 进待发区。 */
+let shotEventBound = false;
+function bindShotEvent() {
+  if (shotEventBound || !window.NM || !NM.onEvent) return;
+  shotEventBound = true;
+  NM.onEvent("shot://done", (p) => {
+    if (!p || p.cancelled) return;
+    if (p.jpeg) acceptShot(p.jpeg, p.name || "截图.jpg");
+  }).catch(() => { shotEventBound = false; });
+}
+
 
 async function toggleWindows(anchor) {
   if (popKind === "windows") { closePop(); return; }

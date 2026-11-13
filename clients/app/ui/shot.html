@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>shot</title>
+<link rel="stylesheet" href="css/im.css">
+<style>
+  /* shot 页面专用：全屏遮罩是页面本体 */
+  html, body { margin: 0; padding: 0; overflow: hidden; background: transparent; }
+  .shot-mask { position: fixed; inset: 0; z-index: 10; cursor: crosshair;
+    background-color: #000; background-size: 100% 100%; background-position: center;
+    user-select: none; }
+  .shot-mask::before { content: ""; position: absolute; inset: 0; background: rgba(0,0,0,.45); pointer-events: none; }
+  /* 快照铺好前的过渡：纯黑底 + 提示，避免闪白 */
+  .shot-mask:not(.shot-mask--ready)::after { content: "正在加载快照…"; position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%,-50%); color: #8b949e; font-size: 14px; }
+  .shot-sel { position: fixed; z-index: 20; border: 1.5px solid #58a6ff;
+    background-size: 100% 100%; cursor: move; display: none; }
+  .shot-ink { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .shot-sel--live { cursor: crosshair; }
+  /* 选区锁定后(已有标注)隐藏把手,只保留移动 */
+  .shot-sel--locked .shot-handle { display: none; }
+  .shot-handle { position: absolute; width: 9px; height: 9px; background: #fff;
+    border: 1.5px solid #58a6ff; border-radius: 2px; z-index: 5; }
+  .shot-handle[data-h="nw"] { left: -5px; top: -5px; cursor: nwse-resize; }
+  .shot-handle[data-h="n"]  { left: calc(50% - 5px); top: -5px; cursor: ns-resize; }
+  .shot-handle[data-h="ne"] { right: -5px; top: -5px; cursor: nesw-resize; }
+  .shot-handle[data-h="e"]  { right: -5px; top: calc(50% - 5px); cursor: ew-resize; }
+  .shot-handle[data-h="se"] { right: -5px; bottom: -5px; cursor: nwse-resize; }
+  .shot-handle[data-h="s"]  { left: calc(50% - 5px); bottom: -5px; cursor: ns-resize; }
+  .shot-handle[data-h="sw"] { left: -5px; bottom: -5px; cursor: nesw-resize; }
+  .shot-handle[data-h="w"]  { left: -5px; top: calc(50% - 5px); cursor: ew-resize; }
+  .shot-textbox { position: absolute; display: none; min-width: 80px; min-height: 28px;
+    background: transparent; border: 1px dashed #58a6ff; outline: none; color: inherit;
+    font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; resize: none; }
+  .shot-bar { position: fixed; z-index: 30; display: flex; align-items: center; gap: 6px; visibility: hidden;
+    background: var(--panel2, #161b22); border: 1px solid var(--border2, #30363d); border-radius: 8px;
+    padding: 6px 8px; box-shadow: 0 6px 20px rgba(0,0,0,.45); }
+  .shot-bar button { border: 1px solid var(--border2, #30363d); background: var(--panel, #21262d);
+    color: var(--ink2, #e6edf3); border-radius: 6px; padding: 4px; width: 28px; height: 26px;
+    display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+  .shot-bar button:hover { border-color: #58a6ff; }
+  .shot-bar .nm-ico { width: 16px; height: 16px; }
+  .shot-bar .shot-ok { background: #1f6feb; border-color: #1f6feb; color: #fff; width: 32px; }
+  .shot-split { display: inline-flex; }
+  .shot-caret { width: 14px !important; padding: 0 !important; }
+  .shot-caret .nm-ico { width: 10px; height: 10px; }
+  .shot-tool.is-on { border-color: #58a6ff !important; }
+  .shot-vline { width: 1px; height: 18px; background: var(--border2, #30363d); margin: 0 4px; }
+  .shot-hint { position: fixed; z-index: 30; visibility: hidden; pointer-events: none;
+    color: #fff; font-size: 12.5px; text-shadow: 0 1px 3px rgba(0,0,0,.9);
+    background: rgba(0,0,0,.55); border-radius: 6px; padding: 4px 10px; }
+  .shot-dimtip { position: fixed; z-index: 30; visibility: hidden; pointer-events: none;
+    color: #fff; font-size: 12px; background: rgba(0,0,0,.65); border-radius: 4px; padding: 1px 8px;
+    font-variant-numeric: tabular-nums; }
+  .shot-stylebar { position: fixed; z-index: 31; visibility: hidden;
+    background: var(--panel2, #161b22); border: 1px solid var(--border2, #30363d); border-radius: 8px;
+    padding: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.45); }
+  .shot-toast { position: fixed; z-index: 40; left: 50%; bottom: 64px; transform: translateX(-50%);
+    background: rgba(0,0,0,.78); color: #fff; font-size: 13px; padding: 7px 16px; border-radius: 8px;
+    visibility: hidden; pointer-events: none; transition: visibility 0s linear .18s, opacity .18s; opacity: 0; }
+  .shot-toast.is-on { visibility: visible; opacity: 1; transition: none; }
+  .shot-style-row { display: flex; gap: 6px; margin: 4px 0; align-items: center; }
+  .shot-c { width: 18px; height: 18px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; }
+  .shot-c.is-on { border-color: #fff; }
+  .shot-s { width: 22px; height: 22px; border-radius: 6px; border: 1px solid var(--border2, #30363d);
+    background: var(--panel, #21262d); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+  .shot-s.is-on { border-color: #58a6ff; }
+  .shot-s i { background: #e6edf3; border-radius: 50%; display: block; }
+</style>
+</head>
+<body>
+<div class="shot-mask" id="shot-mask"></div>
+<div class="shot-sel" id="shot-sel"></div>
+<div class="shot-toast" id="shot-toast"></div>
+<div class="shot-bar" id="shot-bar"></div>
+<div class="shot-hint" id="shot-hint"></div>
+<div class="shot-dimtip" id="shot-dimtip"></div>
+<div class="shot-stylebar" id="shot-stylebar"></div>
+<script src="js/icons.js" defer></script>
+<script src="js/shot.js" defer></script>
+</body>
+</html>

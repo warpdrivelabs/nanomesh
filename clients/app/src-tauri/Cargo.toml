@@ -14,7 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.7.1", features = [] }
 
 [dependencies]
-tauri = { version = "2.12.1", features = ["image-png", "macos-private-api", "tray-icon"] }
+tauri = { version = "2.12.1", features = ["image-png", "macos-private-api", "tray-icon", "protocol-asset"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -69,6 +69,11 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 hkdf = "0.12"
 sha2 = "0.10"
 tauri-plugin-notification = "2.5.1"
+# wgc: Windows 用 Graphics Capture(WGC) 抓屏,输出物理像素;默认 GDI 路径在
+# 非 PerMonitorV2 场景会抓到 DPI 虚拟化后的逻辑尺寸,高 DPI(175%)下截图被缩放。
+xcap = { version = "0.9.10", default-features = false, features = ["wgc"] }
+# 截图管线直用（xcap 间接带入，锁同版本）：选区裁剪 + JPEG 编码。
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 # 托盘配套：单实例唤起、开机自启、全局快捷键（仅桌面端）。
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

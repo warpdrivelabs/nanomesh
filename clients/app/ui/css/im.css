@@ -1028,3 +1028,91 @@ html[data-theme="light"] .home-feats li { background: color-mix(in srgb, var(--p
 .im-tick--sent { color: var(--muted, #8b949e); }
 .im-tick--read { color: var(--aqua, #58a6ff); font-weight: 600; }
 .im-tick--fail { color: var(--danger, #f85149); font-weight: 700; }
+
+/* ── 选区截图（微信式）：全屏遮罩 + 拖选框 + 选区角工具条 ──────────── */
+/* mask/sel/bar/hint 都是 body 直接子节点：bar 独立挂载,点击不会被拖选吞掉 */
+.shot-mask { position: fixed; inset: 0; z-index: 9999; cursor: crosshair;
+  background-color: #000; background-size: 100% 100%; background-position: center;
+  user-select: none; }
+/* 遮罩整体压暗 45%;选区(sel)用同一张图原亮度平移,形成"框内亮、框外暗" */
+.shot-mask::before { content: ""; position: absolute; inset: 0; background: rgba(0,0,0,.45); pointer-events: none; }
+.shot-sel { position: fixed; z-index: 10000; border: 1.5px solid #58a6ff;
+  background-size: 100% 100%; cursor: move; display: none; }
+.shot-bar { position: fixed; z-index: 10002; display: flex; gap: 6px; visibility: hidden;
+  background: var(--panel2, #161b22); border: 1px solid var(--border2, #30363d); border-radius: 8px;
+  padding: 6px 8px; box-shadow: 0 6px 20px rgba(0,0,0,.45); }
+.shot-bar button { border: 1px solid var(--border2, #30363d); background: var(--panel, #21262d);
+  color: var(--ink2, #e6edf3); border-radius: 6px; padding: 3px 14px; font-size: 12.5px; cursor: pointer; }
+.shot-bar button:hover { border-color: #58a6ff; }
+.shot-bar .shot-ok { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+.shot-dimtip { position: fixed; z-index: 10001; visibility: hidden; pointer-events: none;
+  color: #fff; font-size: 11.5px; background: rgba(0,0,0,.6); border-radius: 4px;
+  padding: 1px 7px; font-variant-numeric: tabular-nums; }
+/* 标注层:canvas 覆盖选区内部 */
+.shot-sel--live { cursor: crosshair; } /* 未锁定:可绘制;锁定后 move 光标由默认 .shot-sel 提供 */
+.shot-sel:not(.shot-sel--live) { cursor: default; }
+.shot-ink { position: absolute; inset: 0; width: 100%; height: 100%; }
+.shot-textbox { position: absolute; display: none; min-width: 60px; min-height: 1.35em;
+  background: transparent; border: 1px dashed rgba(88,166,255,.8); outline: none; resize: none;
+  font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; line-height: 1.35;
+  padding: 0 2px; overflow: hidden; white-space: pre; }
+/* 标注工具条按钮(与 .shot-bar button 基础样式叠加) */
+.shot-bar .shot-tool { padding: 3px 8px; display: inline-flex; align-items: center; gap: 3px; }
+.shot-bar .shot-tool.is-on { border-color: #58a6ff; color: #58a6ff; }
+.shot-bar .shot-caret { border: 1px solid transparent; background: transparent; color: var(--muted, #8b949e);
+  border-radius: 5px; padding: 3px 2px; font-size: 10px; cursor: pointer; }
+.shot-bar .shot-caret:hover { border-color: #58a6ff; color: #58a6ff; }
+.shot-split { display: inline-flex; align-items: center; gap: 1px; }
+.shot-vline { width: 1px; height: 16px; background: var(--border2, #30363d); margin: 0 3px; }
+/* 工具条上的几何小图标(纯 CSS 画,免增图标集) */
+.shot-tool i, .shot-tool em { display: inline-block; }
+.shot-rect i { width: 12px; height: 10px; border: 1.5px solid currentColor; border-radius: 2px; }
+.shot-ellipse i { width: 13px; height: 10px; border: 1.5px solid currentColor; border-radius: 50%; }
+.shot-arrow i { width: 13px; height: 10px; position: relative; }
+.shot-arrow i::before { content: ""; position: absolute; left: 0; top: 4px; width: 9px; height: 1.6px; background: currentColor; }
+.shot-arrow i::after { content: ""; position: absolute; right: 0; top: 0.5px;
+  border-left: 6px solid currentColor; border-top: 4.5px solid transparent; border-bottom: 4.5px solid transparent; }
+.shot-pen i { width: 12px; height: 12px; position: relative; }
+.shot-pen i::before { content: ""; position: absolute; inset: 0;
+  background: linear-gradient(135deg, transparent 42%, currentColor 42%, currentColor 56%, transparent 56%); }
+.shot-marker i { width: 12px; height: 11px; border-radius: 3px 3px 1px 1px;
+  background: linear-gradient(to top, currentColor 62%, transparent 62%);
+  box-shadow: inset 0 -3px 0 rgba(0,0,0,.35); }
+.shot-step i { width: 12px; height: 12px; border-radius: 50%; background: currentColor; }
+.shot-step i::after { content: "n"; color: #fff; font-size: 8.5px; font-style: normal;
+  font-weight: 700; display: block; text-align: center; line-height: 12px; }
+.shot-text i { width: 12px; height: 11px; border-bottom: 1.5px solid currentColor; position: relative; }
+.shot-text i::before { content: "A"; font-size: 10px; font-style: normal; line-height: 10px; display: block; text-align: center; }
+.shot-mosaic i { width: 12px; height: 12px; border-radius: 2px;
+  background: conic-gradient(currentColor 25%, transparent 0 50%, currentColor 0 75%, transparent 0);
+  background-size: 6px 6px; opacity: .85; }
+/* 样式浮条(颜色/粗细) */
+.shot-stylebar { position: fixed; z-index: 10003; visibility: hidden; display: flex;
+  flex-direction: column; gap: 7px; background: var(--panel2, #161b22);
+  border: 1px solid var(--border2, #30363d); border-radius: 8px; padding: 8px 10px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.45); }
+.shot-style-row { display: flex; gap: 6px; align-items: center; }
+.shot-stylebar .shot-c { width: 17px; height: 17px; border-radius: 50%; cursor: pointer;
+  border: 2px solid transparent; outline: 1px solid rgba(128,128,128,.4); padding: 0; }
+.shot-stylebar .shot-c.is-on { border-color: #fff; outline-color: #58a6ff; }
+.shot-stylebar .shot-s { width: 22px; height: 18px; border-radius: 5px; cursor: pointer;
+  border: 1px solid transparent; background: var(--panel, #21262d);
+  display: inline-flex; align-items: center; justify-content: center; padding: 0; }
+.shot-stylebar .shot-s i { display: inline-block; border-radius: 50%; background: var(--ink2, #e6edf3); }
+.shot-stylebar .shot-s.is-on { border-color: #58a6ff; }
+.shot-hint { position: fixed; z-index: 10000; visibility: hidden; pointer-events: none;
+  color: #fff; font-size: 12.5px; text-shadow: 0 1px 3px rgba(0,0,0,.9);
+  background: rgba(0,0,0,.55); border-radius: 6px; padding: 4px 10px; }
+
+/* ── 截图授权引导卡 ───────────────────────────────────────────────── */
+.shot-perm { position: fixed; inset: 0; z-index: 10001; display: flex; align-items: center;
+  justify-content: center; background: rgba(0,0,0,.5); }
+.shot-perm-card { background: var(--panel2, #161b22); border: 1px solid var(--border2, #30363d);
+  border-radius: 12px; padding: 22px 26px; max-width: 380px; text-align: center;
+  box-shadow: 0 12px 40px rgba(0,0,0,.5); }
+.shot-perm-card b { font-size: 15px; color: var(--ink, #f0f6fc); }
+.shot-perm-card p { margin: 10px 0 16px; font-size: 13px; line-height: 1.6; color: var(--muted, #8b949e); }
+.shot-perm-btns { display: flex; gap: 8px; justify-content: center; }
+.shot-perm-btns button { border-radius: 7px; padding: 6px 16px; font-size: 13px; cursor: pointer;
+  border: 1px solid var(--border2, #30363d); background: var(--panel, #21262d); color: var(--ink2, #e6edf3); }
+.shot-perm-btns .shot-perm-open { background: #1f6feb; border-color: #1f6feb; color: #fff; }

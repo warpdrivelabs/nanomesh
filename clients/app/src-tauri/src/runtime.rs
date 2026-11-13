@@ -63,6 +63,9 @@ pub(crate) fn run() {
         // 自动更新（与 cmx-agent 同款）：updater 插件（check/minisign 验签/安装）。
         // 前端统一走 update_common.rs 的命令入口，不直接调插件 JS API。
         .plugin(tauri_plugin_updater::Builder::new().build());
+    let builder = builder.register_uri_scheme_protocol("shotoverlay", |_ctx, req| {
+        media::shot_overlay_protocol(req)
+    });
     builder
         .plugin(tauri_plugin_notification::init())
         .manage(AppState::default())
@@ -129,6 +132,10 @@ pub(crate) fn run() {
             media::open_path,
             media::send_rich,
             media::capture_screen,
+            media::shot_finish,
+            media::shot_save,
+            media::screen_capture_status,
+            media::mac_open_screen_settings,
             media::list_windows,
             media::capture_window,
             social::presence_set,

@@ -1,5 +1,5 @@
 use serde_json::{Value, json};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::{AppState, data_dir, hex, parse_id, send_with_retry, session_of};
 
@@ -350,17 +350,313 @@ pub(crate) async fn send_rich(
     .await
 }
 
+// ── 截图（xcap 三平台：整屏 / 窗口）+ 选区裁剪 + mac 授权预检 ──
+// macOS：CGPreflightScreenCaptureAccess 预检；未授权返回 {needPermission:true}，前端弹引导卡。
+// Windows/Linux：xcap(WGC) 抓物理像素整屏。
+// 选区流程（微信式）：capture_screen 抓全屏 → 独立全屏透明窗口(shot-overlay)盖在一切之上
+// 展示快照 + 拖选 → shot_finish 回传物理像素选区 → 裁剪 JPEG → 事件发给主窗口进待发区。
+// 快照 RGBA 存 SHOT_SNAP（一次一份），overlay 页面经 shotoverlay:// 协议拉取 PNG。
+
+/// 当前选区会话的整屏快照（RGBA base64 + 尺寸）。同一时刻只有一场。
+static SHOT_SNAP: std::sync::Mutex<Option<(u32, u32, String)>> = std::sync::Mutex::new(None);
+/// 本场快照落盘 PNG 的路径（overlay 经 asset 协议加载）。
+static SHOT_PNG_PATH: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// 选区截图：抓全屏 → 开遮罩窗口。返回 {w,h}（触发选区 UI）；结果经事件 `shot://done` 推送。
 #[tauri::command]
-pub(crate) async fn capture_screen(app: AppHandle, hide: bool) -> Result<String, String> {
+pub(crate) async fn capture_screen(app: AppHandle, hide: bool) -> Result<Value, String> {
     #[cfg(target_os = "macos")]
     {
-        capture_screen_mac(app, hide).await
+        return capture_screen_mac(app, hide).await;
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (app, hide);
-        Err("当前系统还不能截图".into())
+        let _ = hide;
+        // 已有选区窗口在跑则先关掉（重复点截图 = 重开）。
+        if let Some(old) = app.get_webview_window("shot-overlay") {
+            let _ = old.close();
+        }
+        let (w, h, rgba) = capture_screen_xcap(false)?;
+        // 快照一次性编码 PNG 落临时文件，overlay 用 convertFileSrc 直接当图片加载
+        //（比 base64 fetch 快得多）；马赛克取像素由前端 drawImage 反推。
+        let png_path = shot_snap_png_file(&w, &h, &rgba)?;
+        *SHOT_SNAP.lock().unwrap() = Some((w, h, rgba));
+        *SHOT_PNG_PATH.lock().unwrap() = Some(png_path.to_string_lossy().into_owned());
+        // overlay 加载主 UI 同源的独立页面 ui/shot.html（标注编辑器代码都在那），
+        // 经 shotoverlay:// 协议拿快照 PNG（20MB+ 的 RGBA 不过 invoke/URL）。
+        let win = tauri::webview::WebviewWindowBuilder::new(
+            &app,
+            "shot-overlay",
+            tauri::WebviewUrl::App("shot.html".into()),
+        )
+        .title("shot")
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .focused(true)
+        // Windows 无边框窗口默认带 shadow = 7px 隐形边框，outer 尺寸会比设定大
+        //（实测 2880x1800 → 2904x1814），快照铺底随之错位（左/上露边）。必须关。
+        .shadow(false)
+        .build()
+        .map_err(|e| format!("打不开截图窗口: {e}"))?;
+        // 铺满主显示器：直接用物理坐标，避免 逻辑=物理/缩放 反算的四舍五入差 1px。
+        let mon = xcap::Monitor::all()
+            .ok()
+            .and_then(|ms| ms.into_iter().next())
+            .ok_or("没有可用的显示器")?;
+        let (mx, my) = (mon.x().unwrap_or(0), mon.y().unwrap_or(0));
+        let (mw, mh) = (mon.width().unwrap_or(w), mon.height().unwrap_or(h));
+        let _ = win.set_position(tauri::PhysicalPosition::new(mx, my));
+        let _ = win.set_size(tauri::PhysicalSize::new(mw, mh));
+        Ok(json!({ "w": w, "h": h, "png": png_path.to_string_lossy().into_owned() }))
     }
+}
+
+/// 选区完成（overlay 页面 invoke）。
+/// jpegB64 有值 = overlay 前端已合成（含标注），直接采用；
+/// 无值且 cw/ch 有效 = 无标注轻量路径，Rust 按 SHOT_SNAP 裁剪；
+/// cw/ch 全 0 = 取消/复制/保存后关窗。
+/// 结果经事件 `shot://done` 推给主窗口（cancelled 或 {jpeg,name}）。
+#[tauri::command]
+pub(crate) async fn shot_finish(
+    app: AppHandle,
+    window: tauri::Window,
+    x: u32,
+    y: u32,
+    cw: u32,
+    ch: u32,
+    jpeg_b64: Option<String>,
+) -> Result<(), String> {
+    let _ = window;
+    let snap = SHOT_SNAP.lock().unwrap().take();
+    *SHOT_PNG_PATH.lock().unwrap() = None;
+    let _ = app.get_webview_window("shot-overlay").map(|w| w.close());
+    if let Some(jpeg) = jpeg_b64.filter(|s| !s.is_empty()) {
+        let _ = app.emit("shot://done", json!({ "jpeg": jpeg, "name": "截图.jpg" }));
+        return Ok(());
+    }
+    let Some((w, h, rgba)) = snap else {
+        return Err("没有进行中的截图".into());
+    };
+    if cw == 0 || ch == 0 {
+        let _ = app.emit("shot://done", json!({ "cancelled": true }));
+        return Ok(());
+    }
+    let b64 = crop_rgba_to_jpeg(w, h, &rgba, x, y, cw, ch).await?;
+    let _ = app.emit("shot://done", json!({ "jpeg": b64, "name": "截图.jpg" }));
+    Ok(())
+}
+
+/// overlay「保存到本地」：JPEG 字节落下载目录，返回路径。
+#[tauri::command]
+pub(crate) async fn shot_save(data_b64: String) -> Result<String, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_b64.trim())
+        .map_err(|e| format!("非法数据: {e}"))?;
+    let name = format!(
+        "截图 {}",
+        chrono_now_stamp()
+    );
+    let path = unique_path(&downloads_dir(), &format!("{name}.jpg"));
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+fn chrono_now_stamp() -> String {
+    // 无 chrono 依赖：秒级 Unix 时间戳即可保唯一（unique_path 会再兜底加序号）。
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        .to_string()
+}
+
+/// 把 SHOT_SNAP 的 RGBA 编码 PNG 写进临时文件，返回路径（给 overlay 铺底图）。
+fn shot_snap_png_file(w: &u32, h: &u32, rgba: &str) -> Result<std::path::PathBuf, String> {
+    use base64::Engine;
+    use image::ImageEncoder as _;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(rgba.as_bytes())
+        .map_err(|e| format!("非法像素数据: {e}"))?;
+    let path = std::env::temp_dir().join(format!("nm-shot-snap-{}.png", std::process::id()));
+    let img: image::RgbaImage =
+        image::ImageBuffer::from_raw(*w, *h, raw).ok_or("像素数据与尺寸不符")?;
+    let mut out = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut out)
+        .write_image(img.as_raw(), *w, *h, image::ExtendedColorType::Rgba8)
+        .map_err(|e| format!("PNG 编码失败: {e}"))?;
+    std::fs::write(&path, out).map_err(|e| format!("快照落盘失败: {e}"))?;
+    Ok(path)
+}
+
+/// 把选区 RGBA 裁剪并编码为 JPEG（base64）。共享实现（shot_finish / 旧 shot_crop）。
+async fn crop_rgba_to_jpeg(
+    w: u32,
+    h: u32,
+    rgba: &str,
+    x: u32,
+    y: u32,
+    cw: u32,
+    ch: u32,
+) -> Result<String, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(rgba.as_bytes())
+        .map_err(|e| format!("非法像素数据: {e}"))?;
+    if (w as usize) * (h as usize) * 4 != bytes.len() {
+        return Err("像素数据与尺寸不符".into());
+    }
+    let (x, y) = (x.min(w.saturating_sub(1)), y.min(h.saturating_sub(1)));
+    let (cw, ch) = (cw.min(w - x), ch.min(h - y));
+    if cw == 0 || ch == 0 {
+        return Err("选区为空".into());
+    }
+    let mut cropped = Vec::with_capacity(cw as usize * ch as usize * 4);
+    for row in y..y + ch {
+        let start = (row as usize * w as usize + x as usize) * 4;
+        cropped.extend_from_slice(&bytes[start..start + cw as usize * 4]);
+    }
+    tokio::task::spawn_blocking(move || {
+        let img: image::RgbaImage =
+            image::ImageBuffer::from_raw(cw, ch, cropped).ok_or("裁剪数据不完整")?;
+        let mut out = Vec::new();
+        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85);
+        enc.encode_image(&image::DynamicImage::ImageRgba8(img))
+            .map_err(|e| e.to_string())?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(out))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// macOS 专用：屏幕录制授权预检。返回 {granted, canAsk}。
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub(crate) async fn screen_capture_status() -> Result<Value, String> {
+    let granted = tokio::task::spawn_blocking(|| {
+        let (preflight, _) = mac_capture_fns();
+        preflight()
+    })
+    .await
+    .unwrap_or(false);
+    Ok(json!({ "granted": granted }))
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+pub(crate) async fn screen_capture_status() -> Result<Value, String> {
+    Ok(json!({ "granted": true }))
+}
+
+/// shotoverlay:// 协议：给选区遮罩窗口(shot.html)提供快照元数据 /meta 与快照 PNG /png
+///（/png 现仅作兜底；正常路径 capture_screen 已落盘 PNG，前端走 asset 协议）。
+/// Windows 下自定义协议固定走 http://shotoverlay.local/ 域名（Tauri 约定）。
+pub(crate) fn shot_overlay_protocol(
+    req: tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<Vec<u8>> {
+    use base64::Engine;
+    use image::ImageEncoder as _;
+    let path = req.uri().path().to_string();
+    let (ct, body) = match path.as_str() {
+        "/meta" => {
+            let (w, h, _) = SHOT_SNAP
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or((0, 0, String::new()));
+            // png 路径由 capture_screen 存进会话状态；这里简化：前端只拿尺寸，
+            // 路径走 capture_screen 返回值 → 主窗口不行（overlay 独立加载）。
+            // 改为存在 SHOT_PNG_PATH。
+            let png = SHOT_PNG_PATH.lock().unwrap().clone();
+            ("application/json", json!({ "w": w, "h": h, "png": png }).to_string().into_bytes())
+        }
+        "/png" => {
+            let snap = SHOT_SNAP.lock().unwrap().clone();
+            let body = snap
+                .and_then(|(w, h, rgba)| {
+                    base64::engine::general_purpose::STANDARD
+                        .decode(rgba)
+                        .ok()
+                        .map(|raw| (w, h, raw))
+                })
+                .and_then(|(w, h, raw)| {
+                    let img: image::RgbaImage = image::ImageBuffer::from_raw(w, h, raw)?;
+                    let mut out = Vec::new();
+                    image::codecs::png::PngEncoder::new(&mut out)
+                        .write_image(img.as_raw(), w, h, image::ExtendedColorType::Rgba8)
+                        .ok()?;
+                    Some(out)
+                })
+                .unwrap_or_default();
+            ("image/png", body)
+        }
+        _ => ("text/plain", b"not found".to_vec()),
+    };
+    tauri::http::Response::builder()
+        .status(200)
+        .header("Content-Type", ct)
+        .header("Access-Control-Allow-Origin", "*")
+        .body(body)
+        .unwrap()
+}
+
+/// macOS：跳转到系统设置 → 隐私与安全性 → 屏幕录制。
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub(crate) async fn mac_open_screen_settings() -> Result<(), String> {
+    tokio::task::spawn_blocking(|| {
+        std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+            .status()
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map(|_| ())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+pub(crate) async fn mac_open_screen_settings() -> Result<(), String> {
+    Err("仅 macOS 有系统录制授权".into())
+}
+
+/// 把选区 RGBA 裁剪并编码为 JPEG（base64）。入参 rgba 为 capture_screen 返回的整屏像素。
+/// （诊断日志保留：对照 抓屏尺寸 / 主窗口物理视口 / scale。）
+
+/// xcap 抓主显示器整屏。返回 (宽, 高, base64 RGBA)。
+#[cfg(not(target_os = "macos"))]
+fn capture_screen_xcap(hide_main: bool) -> Result<(u32, u32, String), String> {
+    use base64::Engine;
+    let _ = hide_main;
+    let monitors = xcap::Monitor::all().map_err(|e| format!("枚举显示器失败: {e}"))?;
+    let mon = monitors.into_iter().next().ok_or("没有可用的显示器")?;
+    let img = mon.capture_image().map_err(|e| format!("截图失败: {e}"))?;
+    let (w, h) = (img.width(), img.height());
+    tracing::info!("capture_screen: 抓屏 {w}x{h}");
+    Ok((
+        w,
+        h,
+        base64::engine::general_purpose::STANDARD.encode(img.into_raw()),
+    ))
+}
+
+/// 把 JPEG base64 解码为统一 RGBA（macOS screencapture 路径转统一管线用）。
+#[cfg(target_os = "macos")]
+fn decode_jpeg_meta(b64: &str) -> Result<(u32, u32, String), String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| format!("非法截图数据: {e}"))?;
+    let img = image::load_from_memory(&bytes).map_err(|e| format!("解码截图失败: {e}"))?;
+    let (w, h) = (img.width(), img.height());
+    Ok((
+        w,
+        h,
+        base64::engine::general_purpose::STANDARD.encode(img.to_rgba8().into_raw()),
+    ))
 }
 
 #[tauri::command]
@@ -372,8 +668,36 @@ pub(crate) async fn list_windows(app: AppHandle) -> Result<Vec<Value>, String> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = app;
-        Err("当前系统还不能列出窗口".into())
+        list_windows_xcap()
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn list_windows_xcap() -> Result<Vec<Value>, String> {
+    let windows = xcap::Window::all().map_err(|e| format!("枚举窗口失败: {e}"))?;
+    let mut rows = Vec::new();
+    for w in windows {
+        // 0.9 的 getter 全返回 XCapResult；失败(权限/已销毁)的窗口直接跳过。
+        let (Ok(app_name), Ok(title)) = (w.app_name(), w.title()) else {
+            continue;
+        };
+        if title.trim().is_empty() && app_name.trim().is_empty() {
+            continue;
+        }
+        // 排除自己（托盘/隐藏辅助窗口会混进来）。
+        if app_name.contains("nmspace") || title == "NANO MESH" {
+            continue;
+        }
+        let id = w.id().unwrap_or(0);
+        if id == 0 {
+            continue;
+        }
+        rows.push(json!({ "id": id, "title": title, "app": app_name }));
+        if rows.len() >= 40 {
+            break;
+        }
+    }
+    Ok(rows)
 }
 
 #[tauri::command]
@@ -384,13 +708,37 @@ pub(crate) async fn capture_window(id: u32) -> Result<String, String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = id;
-        Err("当前系统还不能截取窗口".into())
+        capture_window_xcap(id).await
     }
 }
 
+#[cfg(not(target_os = "macos"))]
+async fn capture_window_xcap(id: u32) -> Result<String, String> {
+    use base64::Engine;
+    tokio::task::spawn_blocking(move || {
+        let w = xcap::Window::all()
+            .map_err(|e| format!("枚举窗口失败: {e}"))?
+            .into_iter()
+            .find(|w| w.id().unwrap_or(0) == id)
+            .ok_or("窗口已关闭")?;
+        let img = w.capture_image().map_err(|e| format!("截取窗口失败: {e}"))?;
+        let mut out = Vec::new();
+        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85);
+        enc.encode_image(&image::DynamicImage::ImageRgba8(img))
+            .map_err(|e| e.to_string())?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(out))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg(target_os = "macos")]
-async fn capture_screen_mac(app: AppHandle, hide: bool) -> Result<String, String> {
+async fn capture_screen_mac(app: AppHandle, hide: bool) -> Result<Value, String> {
+    // 预检在先：未授权时不进截屏流程，前端直接弹引导卡。
+    let (preflight, _) = mac_capture_fns();
+    if !preflight() {
+        return Ok(json!({ "needPermission": true }));
+    }
     let win = app.get_webview_window("main");
     let restore = if hide {
         if let Some(w) = &win {
@@ -406,7 +754,20 @@ async fn capture_screen_mac(app: AppHandle, hide: bool) -> Result<String, String
         let _ = w.show();
         let _ = w.set_focus();
     }
-    joined.map_err(|e| e.to_string())?
+    let b64 = joined.map_err(|e| e.to_string())??;
+    decode_jpeg_meta(&b64).map(|(w, h, rgba)| json!({ "w": w, "h": h, "rgba": rgba }))
+}
+
+#[cfg(target_os = "macos")]
+fn mac_capture_fns() -> (
+    unsafe extern "C" fn() -> bool,
+    unsafe extern "C" fn() -> bool,
+) {
+    unsafe extern "C" {
+        fn CGPreflightScreenCaptureAccess() -> bool;
+        fn CGRequestScreenCaptureAccess() -> bool;
+    }
+    (CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess)
 }
 
 #[cfg(target_os = "macos")]
